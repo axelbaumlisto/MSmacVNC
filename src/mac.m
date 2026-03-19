@@ -1,30 +1,30 @@
 
 /*
  *  OSXvnc Copyright (C) 2001 Dan McGuirk <mcguirk@incompleteness.net>.
- *  Original Xvnc code Copyright (C) 1999 AT&T Laboratories Cambridge.  
+ *  Original Xvnc code Copyright (C) 1999 AT&T Laboratories Cambridge.
  *  All Rights Reserved.
- * 
+ *
  * Cut in two parts by Johannes Schindelin (2001): libvncserver and OSXvnc.
- * 
+ *
  * Completely revamped and adapted to work with contemporary APIs by Christian Beier (2020).
- * 
+ *
  * This file implements every system specific function for Mac OS X.
- * 
+ *
  *  It includes the keyboard function:
- * 
+ *
      void KbdAddEvent(down, keySym, cl)
         rfbBool down;
         rfbKeySym keySym;
         rfbClientPtr cl;
- * 
+ *
  *  the mouse function:
- * 
+ *
      void PtrAddEvent(buttonMask, x, y, cl)
         int buttonMask;
         int x;
         int y;
         rfbClientPtr cl;
- * 
+ *
  */
 
 #include <Carbon/Carbon.h>
@@ -36,12 +36,14 @@
 #include <stdio.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 
 #import "ScreenCapturer.h"
+#import "mac.h"
 
 /* The main LibVNCServer screen object */
 rfbScreenInfoPtr rfbScreen;
-/* Operation modes set by CLI options */
+/* Operation modes set via AppDelegate */
 rfbBool viewOnly = FALSE;
 
 /* Two framebuffers. */
@@ -51,9 +53,9 @@ void *frameBufferTwo;
 /* Pointer to the current backbuffer. */
 void *backBuffer;
 
-/* The multi-sceen display number chosen by the user */
+/* The multi-screen display number chosen by the user */
 int displayNumber = -1;
-/* The corresponding multi-sceen display ID */
+/* The corresponding multi-screen display ID */
 CGDirectDisplayID displayID;
 
 /* The server's private event source */
@@ -164,12 +166,18 @@ static int specialKeyMap[] = {
 rfbBool isShiftDown;
 rfbBool isAltGrDown;
 
+/* Tile size (pixels) for dirty-region comparison */
+#define TILE_SIZE 64
+
+/* Number of currently connected clients (read by AppDelegate for status display) */
+_Atomic int vncConnectedClients = 0;
+
 
 static int
 saveDimSettings(void)
 {
-    if (IOPMGetAggressiveness(power_mgt, 
-                              kPMMinutesToDim, 
+    if (IOPMGetAggressiveness(power_mgt,
+                              kPMMinutesToDim,
                               &dim_time) != kIOReturnSuccess)
         return -1;
 
@@ -183,8 +191,8 @@ restoreDimSettings(void)
     if (!dim_time_saved)
         return -1;
 
-    if (IOPMSetAggressiveness(power_mgt, 
-                              kPMMinutesToDim, 
+    if (IOPMSetAggressiveness(power_mgt,
+                              kPMMinutesToDim,
                               dim_time) != kIOReturnSuccess)
         return -1;
 
@@ -196,8 +204,8 @@ restoreDimSettings(void)
 static int
 saveSleepSettings(void)
 {
-    if (IOPMGetAggressiveness(power_mgt, 
-                              kPMMinutesToSleep, 
+    if (IOPMGetAggressiveness(power_mgt,
+                              kPMMinutesToSleep,
                               &sleep_time) != kIOReturnSuccess)
         return -1;
 
@@ -211,8 +219,8 @@ restoreSleepSettings(void)
     if (!sleep_time_saved)
         return -1;
 
-    if (IOPMSetAggressiveness(power_mgt, 
-                              kPMMinutesToSleep, 
+    if (IOPMSetAggressiveness(power_mgt,
+                              kPMMinutesToSleep,
                               sleep_time) != kIOReturnSuccess)
         return -1;
 
@@ -240,7 +248,7 @@ dimmingInit(void)
     if (preventDimming) {
         if (saveDimSettings() < 0)
             return -1;
-        if (IOPMSetAggressiveness(power_mgt, 
+        if (IOPMSetAggressiveness(power_mgt,
                                   kPMMinutesToDim, 0) != kIOReturnSuccess)
             return -1;
     }
@@ -248,7 +256,7 @@ dimmingInit(void)
     if (preventSleep) {
         if (saveSleepSettings() < 0)
             return -1;
-        if (IOPMSetAggressiveness(power_mgt, 
+        if (IOPMSetAggressiveness(power_mgt,
                                   kPMMinutesToSleep, 0) != kIOReturnSuccess)
             return -1;
     }
@@ -264,7 +272,7 @@ undim(void)
     int result = -1;
 
     pthread_mutex_lock(&dimming_mutex);
-    
+
     if (!initialized)
         goto DONE;
 
@@ -276,7 +284,7 @@ undim(void)
         if (restoreDimSettings() < 0)
             goto DONE;
     }
-    
+
     if (!preventSleep) {
         if (saveSleepSettings() < 0)
             goto DONE;
@@ -317,7 +325,6 @@ dimmingShutdown(void)
     return result;
 }
 
-void serverShutdown(rfbClientPtr cl);
 
 /*
   Synthesize a keyboard event. This is not called on the main thread due to rfbRunEventLoop(..,..,TRUE), but it works.
@@ -378,8 +385,14 @@ KbdAddEvent(rfbBool down, rfbKeySym keySym, struct _rfbClientRec* cl)
 	CFRelease(charStr);
     }
 
-    /* Set the Shift modifier explicitly as MacOS sometimes gets internal state wrong and Shift stuck. */
-    CGEventSetFlags(keyboardEvent, CGEventGetFlags(keyboardEvent) & (isShiftDown ? kCGEventFlagMaskShift : ~kCGEventFlagMaskShift));
+    /* Set the Shift modifier explicitly as MacOS sometimes gets internal state wrong and Shift stuck.
+       Only set/clear the Shift bit; leave all other modifier bits untouched. */
+    CGEventFlags kbdFlags = CGEventGetFlags(keyboardEvent);
+    if (isShiftDown)
+        kbdFlags |= kCGEventFlagMaskShift;
+    else
+        kbdFlags &= ~kCGEventFlagMaskShift;
+    CGEventSetFlags(keyboardEvent, kbdFlags);
 
     CGEventPost(kCGSessionEventTap, keyboardEvent);
     CFRelease(keyboardEvent);
@@ -394,6 +407,17 @@ PtrAddEvent(int buttonMask, int x, int y, rfbClientPtr cl)
     CGEventRef mouseEvent = NULL;
 
     undim();
+
+    /* Clamp incoming coordinates to the display bounds to prevent
+       rogue clients from injecting events outside the visible area. */
+    {
+        int dispW = (int)CGDisplayPixelsWide(displayID);
+        int dispH = (int)CGDisplayPixelsHigh(displayID);
+        if (x < 0)         x = 0;
+        if (y < 0)         y = 0;
+        if (x >= dispW)    x = dispW - 1;
+        if (y >= dispH)    y = dispH - 1;
+    }
 
     position.x = x + displayBounds.origin.x;
     position.y = y + displayBounds.origin.y;
@@ -506,12 +530,54 @@ rfbBool keyboardInit()
 }
 
 
-rfbBool
-ScreenInit(int argc, char**argv)
+/*
+  Compare newBuf and oldBuf in TILE_SIZE x TILE_SIZE tiles and call
+  rfbMarkRectAsModified() only for tiles that actually differ.  This
+  avoids sending the full framebuffer every frame when only a small
+  region of the screen has changed.
+  Must be called while client send-mutexes are held.
+*/
+static void
+markChangedRegions(void *newBuf, void *oldBuf, int width, int height)
+{
+    int tilesX = (width  + TILE_SIZE - 1) / TILE_SIZE;
+    int tilesY = (height + TILE_SIZE - 1) / TILE_SIZE;
+
+    for (int ty = 0; ty < tilesY; ty++) {
+        int y0 = ty * TILE_SIZE;
+        int y1 = y0 + TILE_SIZE < height ? y0 + TILE_SIZE : height;
+
+        for (int tx = 0; tx < tilesX; tx++) {
+            int x0 = tx * TILE_SIZE;
+            int x1 = x0 + TILE_SIZE < width ? x0 + TILE_SIZE : width;
+            int rowBytes = (x1 - x0) * 4;
+
+            for (int row = y0; row < y1; row++) {
+                size_t off = ((size_t)row * width + x0) * 4;
+                if (memcmp((char *)newBuf + off,
+                           (char *)oldBuf + off, rowBytes) != 0) {
+                    rfbMarkRectAsModified(rfbScreen, x0, y0, x1, y1);
+                    goto next_tile;
+                }
+            }
+        next_tile:;
+        }
+    }
+}
+
+
+static rfbBool
+ScreenInit(int port, const char *password)
 {
   int bitsPerSample = 8;
   CGDisplayCount displayCount;
   CGDirectDisplayID displays[32];
+
+  /* Build a minimal argv so rfbGetScreen() has a program name but does
+     not try to parse any options — we configure everything manually. */
+  int    dummyArgc    = 1;
+  char  *dummyArgvBuf = "macVNC";
+  char **dummyArgv    = &dummyArgvBuf;
 
   /* grab the active displays */
   CGGetActiveDisplayList(32, displays, &displayCount);
@@ -522,7 +588,7 @@ ScreenInit(int argc, char**argv)
   if(displayNumber < 0) {
       printf("Using primary display as a default\n");
       displayID = CGMainDisplayID();
-  } else if (displayNumber < displayCount) {
+  } else if (displayNumber < (int)displayCount) {
       printf("Using specified display %d\n", displayNumber);
       displayID = displays[displayNumber];
   } else {
@@ -531,7 +597,7 @@ ScreenInit(int argc, char**argv)
   }
 
 
-  rfbScreen = rfbGetScreen(&argc,argv,
+  rfbScreen = rfbGetScreen(&dummyArgc, &dummyArgv,
 			   CGDisplayPixelsWide(displayID),
 			   CGDisplayPixelsHigh(displayID),
 			   bitsPerSample,
@@ -542,14 +608,41 @@ ScreenInit(int argc, char**argv)
       return FALSE;
   }
 
+  /* Configure listen port. */
+  rfbScreen->port     = port;
+  rfbScreen->ipv6port = port;
+
+  /* Configure password authentication if a password was supplied. */
+  if (password && strlen(password) > 0) {
+      /* passwdList must outlive rfbScreen; static storage guarantees this. */
+      static char *passwdList[2] = {NULL, NULL};
+      if (passwdList[0]) { free(passwdList[0]); passwdList[0] = NULL; }
+      passwdList[0] = strdup(password);
+      rfbScreen->authPasswdData = passwdList;
+      rfbScreen->passwordCheck  = rfbCheckPasswordByList;
+  }
+
   rfbScreen->serverFormat.redShift = bitsPerSample*2;
   rfbScreen->serverFormat.greenShift = bitsPerSample*1;
   rfbScreen->serverFormat.blueShift = 0;
 
   gethostname(rfbScreen->thisHost, 255);
 
-  frameBufferOne = malloc(CGDisplayPixelsWide(displayID) * CGDisplayPixelsHigh(displayID) * 4);
-  frameBufferTwo = malloc(CGDisplayPixelsWide(displayID) * CGDisplayPixelsHigh(displayID) * 4);
+  /* Use calloc so the buffers are zero-initialised; this prevents undefined
+     behaviour when markChangedRegions() compares them on the very first frame,
+     and ensures no stale data is ever sent to a client. */
+  size_t bufSize = (size_t)CGDisplayPixelsWide(displayID) * (size_t)CGDisplayPixelsHigh(displayID) * 4;
+  frameBufferOne = calloc(1, bufSize);
+  if (!frameBufferOne) {
+      rfbErr("Could not allocate framebuffer\n");
+      return FALSE;
+  }
+  frameBufferTwo = calloc(1, bufSize);
+  if (!frameBufferTwo) {
+      free(frameBufferOne);
+      rfbErr("Could not allocate framebuffer\n");
+      return FALSE;
+  }
 
   /* back buffer */
   backBuffer = frameBufferOne;
@@ -559,6 +652,9 @@ ScreenInit(int argc, char**argv)
   /* we already capture the cursor in the framebuffer */
   rfbScreen->cursor = NULL;
 
+  /* Allow multiple VNC clients to connect simultaneously */
+  rfbScreen->alwaysShared = TRUE;
+
   rfbScreen->ptrAddEvent = PtrAddEvent;
   rfbScreen->kbdAddEvent = KbdAddEvent;
 
@@ -566,10 +662,25 @@ ScreenInit(int argc, char**argv)
                                                         frameHandler:^(CMSampleBufferRef sampleBuffer) {
           rfbClientIteratorPtr iterator;
           rfbClientPtr cl;
+          int dispW = (int)CGDisplayPixelsWide(displayID);
+          int dispH = (int)CGDisplayPixelsHigh(displayID);
 
-           /*
-             Copy new frame to back buffer.
-           */
+          /*
+            Skip frames where ScreenCaptureKit reports no screen change.
+            SCFrameStatusIdle means the display contents are identical to
+            the previous frame — no copy or VNC update is needed.
+          */
+          CFArrayRef attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, false);
+          if (attachmentsArray && CFArrayGetCount(attachmentsArray) > 0) {
+              NSDictionary *dict = (__bridge NSDictionary *)CFArrayGetValueAtIndex(attachmentsArray, 0);
+              NSNumber *statusNum = dict[SCStreamFrameInfoStatus];
+              if (statusNum && [statusNum integerValue] == SCFrameStatusIdle)
+                  return;
+          }
+
+          /*
+            Copy new frame to back buffer.
+          */
           CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
           if(!pixelBuffer)
               return;
@@ -578,7 +689,7 @@ ScreenInit(int argc, char**argv)
 
           memcpy(backBuffer,
                  CVPixelBufferGetBaseAddress(pixelBuffer),
-                 CGDisplayPixelsWide(displayID) *  CGDisplayPixelsHigh(displayID) * 4);
+                 (size_t)dispW * dispH * 4);
 
           CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
 
@@ -599,11 +710,13 @@ ScreenInit(int argc, char**argv)
           }
 
           /*
-            Mark modified rect in new framebuffer.
-            ScreenCaptureKit does not have something like CGDisplayStreamUpdateGetRects(),
-            so mark the whole framebuffer.
-           */
-          rfbMarkRectAsModified(rfbScreen, 0, 0, CGDisplayPixelsWide(displayID), CGDisplayPixelsHigh(displayID));
+            After the swap: rfbScreen->frameBuffer is the new frame,
+            backBuffer is the previous frame.  Compare them tile by tile
+            and only mark tiles that actually changed.  This dramatically
+            reduces the number of VNC update rectangles when only a small
+            portion of the screen is moving (cursor, video window, etc.).
+          */
+          markChangedRegions(rfbScreen->frameBuffer, backBuffer, dispW, dispH);
 
           /* Swapping framebuffers finished, reenable client reads. */
           iterator=rfbGetClientIterator(rfbScreen);
@@ -613,11 +726,11 @@ ScreenInit(int argc, char**argv)
           rfbReleaseClientIterator(iterator);
 
       } errorHandler:^(NSError *error) {
-          fprintf(stderr, "Error: %s\n", [error.description UTF8String]);
+          rfbLog("Screen capture error: %s\n", [error.description UTF8String]);
           if(error.code == SCStreamErrorUserDeclined) {
-              fprintf(stderr, "Could not get screen contents. Check if the program has been given screen recording permissions in 'System Preferences'->'Security & Privacy'->'Privacy'->'Screen Recording'.\n");
+              rfbLog("Could not get screen contents. Check if the program has been given "
+                     "screen recording permissions in System Settings → Privacy & Security → Screen Recording.\n");
           }
-          //TODO handle other errors
           exit(EXIT_FAILURE);
       }];
   [capturer startCapture];
@@ -630,70 +743,81 @@ ScreenInit(int argc, char**argv)
 
 void clientGone(rfbClientPtr cl)
 {
-    //TODO
+    vncConnectedClients--;
+    rfbLog("Client %s disconnected (%d remaining)\n", cl->host, (int)vncConnectedClients);
 }
 
 enum rfbNewClientAction newClient(rfbClientPtr cl)
 {
+  rfbLog("New client connected from %s\n", cl->host);
+  vncConnectedClients++;
   cl->clientGoneHook = clientGone;
   cl->viewOnly = viewOnly;
 
   return(RFB_CLIENT_ACCEPT);
 }
 
-int main(int argc,char *argv[])
-{
-  int i;
 
-  for(i=argc-1;i>0;i--)
-    if(strcmp(argv[i],"-viewonly")==0) {
-      viewOnly=TRUE;
-    } else if(strcmp(argv[i],"-display")==0) {
-	displayNumber = atoi(argv[i+1]);
-    } else if(strcmp(argv[i],"-h") == 0 || strcmp(argv[i],"--help") == 0)  {
-        fprintf(stderr, "-viewonly              Do not allow any input\n");
-        fprintf(stderr, "-display <index>       Only export specified display\n");
-        rfbUsage();
-        exit(EXIT_SUCCESS);
+/* -----------------------------------------------------------------------
+ * Public API — called from AppDelegate
+ * ----------------------------------------------------------------------- */
+
+rfbBool
+vncServerStart(int port, const char *password)
+{
+    if (!viewOnly) {
+        /* Request Accessibility permission with a system prompt so the
+           user sees the dialog with the app name, not a terminal name. */
+        NSDictionary *opts = @{(__bridge id)kAXTrustedCheckOptionPrompt: @YES};
+        if (!AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)opts)) {
+            rfbLog("Server does not have Accessibility permission. "
+                   "Grant it in System Settings → Privacy & Security → Accessibility "
+                   "and relaunch macVNC.\n");
+            return FALSE;
+        }
     }
 
-  if(!viewOnly && !AXIsProcessTrusted()) {
-      fprintf(stderr, "You have configured the server to post input events, but it does not have the necessary system permission. Please check if the program has been given permission to control your computer in 'System Preferences'->'Security & Privacy'->'Privacy'->'Accessibility'.\n");
-      exit(1);
-  }
+    dimmingInit();
 
-  dimmingInit();
+    eventSource = CGEventSourceCreate(kCGEventSourceStatePrivate);
+    if (!eventSource) {
+        rfbLog("Could not create CGEventSource\n");
+        return FALSE;
+    }
 
-  /* Create a private event source for the server. This helps a lot with modifier keys getting stuck on the OS side
-     (but does not completely mitigate the issue: For this, we keep track of modifier key state and set it specifically
-     for the generated keyboard event in the keyboard event handler). */
-  eventSource = CGEventSourceCreate(kCGEventSourceStatePrivate);
+    if (!keyboardInit())
+        return FALSE;
 
-  if(!keyboardInit())
-      exit(1);
+    if (!ScreenInit(port, password))
+        return FALSE;
 
-  if(!ScreenInit(argc,argv))
-      exit(1);
-  rfbScreen->newClientHook = newClient;
+    rfbScreen->newClientHook = newClient;
+    rfbRunEventLoop(rfbScreen, -1, TRUE);
 
-  rfbRunEventLoop(rfbScreen,-1,TRUE);
-
-  /*
-     The VNC machinery is in the background now and framebuffer updating happens on another thread as well.
-  */
-  while(1) {
-      /* Nothing left to do on the main thread. */
-      sleep(1);
-  }
-
-  dimmingShutdown();
-
-  return(0); /* never ... */
+    return TRUE;
 }
 
-void serverShutdown(rfbClientPtr cl)
+void
+vncServerStop(void)
 {
-  rfbScreenCleanup(rfbScreen);
-  dimmingShutdown();
-  exit(0);
+    if (rfbScreen) {
+        rfbShutdownServer(rfbScreen, TRUE);
+        rfbScreenCleanup(rfbScreen);
+        rfbScreen = NULL;
+    }
+    dimmingShutdown();
+    if (eventSource) {
+        CFRelease(eventSource);
+        eventSource = NULL;
+    }
+    free(frameBufferOne); frameBufferOne = NULL;
+    free(frameBufferTwo); frameBufferTwo = NULL;
+}
+
+int
+vncServerGetPort(void)
+{
+    if (!rfbScreen)
+        return -1;
+    return rfbScreen->port;
 }
