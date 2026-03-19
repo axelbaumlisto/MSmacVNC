@@ -653,10 +653,11 @@ ScreenInit(int port, const char *password)
   CGDirectDisplayID displays[32];
 
   /* Build a minimal argv so rfbGetScreen() has a program name but does
-     not try to parse any options — we configure everything manually. */
-  int    dummyArgc    = 1;
-  char  *dummyArgvBuf = "macVNC";
-  char **dummyArgv    = &dummyArgvBuf;
+     not try to parse any options — we configure everything manually.
+     The array must be NULL-terminated; rfbGetScreen() may check argv[argc]. */
+  int   dummyArgc       = 1;
+  char  progName[]      = "macVNC";
+  char *dummyArgv[2]    = {progName, NULL};
 
   /* grab the active displays */
   CGGetActiveDisplayList(32, displays, &displayCount);
@@ -899,10 +900,6 @@ ScreenInit(int port, const char *password)
 
   rfbInitServer(rfbScreen);
 
-  /* Send the macOS arrow cursor as a RichCursor so clients display a proper
-     arrow shape instead of the generic fallback dot. */
-  sendMacOSCursor(rfbScreen, [NSCursor arrowCursor]);
-
   return TRUE;
 }
 
@@ -959,6 +956,14 @@ vncServerStart(int port, const char *password)
 
     rfbScreen->newClientHook = newClient;
     rfbRunEventLoop(rfbScreen, -1, TRUE);
+
+    /* Send the real macOS arrow cursor as a RichCursor so clients display a
+       proper arrow shape instead of the generic fallback dot.
+       NSCursor / NSImage are AppKit and must be accessed on the main thread. */
+    rfbScreenInfoPtr screen = rfbScreen;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        sendMacOSCursor(screen, [NSCursor arrowCursor]);
+    });
 
     return TRUE;
 }
