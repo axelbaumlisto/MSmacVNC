@@ -748,11 +748,27 @@ ScreenInit(int port, const char *password)
 
       } errorHandler:^(NSError *error) {
           rfbLog("Screen capture error: %s\n", [error.description UTF8String]);
-          if(error.code == SCStreamErrorUserDeclined) {
-              rfbLog("Could not get screen contents. Check if the program has been given "
-                     "screen recording permissions in System Settings → Privacy & Security → Screen Recording.\n");
-          }
-          exit(EXIT_FAILURE);
+
+          /* Show a user-friendly alert on the main thread instead of crashing.
+             This keeps the app alive so the user can grant Screen Recording
+             permission in System Settings and relaunch without a crash loop. */
+          dispatch_async(dispatch_get_main_queue(), ^{
+              NSAlert *alert = [[NSAlert alloc] init];
+              alert.alertStyle      = NSAlertStyleCritical;
+              alert.messageText     = @"Screen Recording permission required";
+              alert.informativeText = @"macVNC needs Screen Recording access to share your display.\n\n"
+                                      @"Enable it in:\nSystem Settings → Privacy & Security → Screen Recording\n\n"
+                                      @"Then relaunch macVNC.";
+              [alert addButtonWithTitle:@"Open System Settings"];
+              [alert addButtonWithTitle:@"Quit"];
+
+              if ([alert runModal] == NSAlertFirstButtonReturn) {
+                  [[NSWorkspace sharedWorkspace]
+                      openURL:[NSURL URLWithString:
+                               @"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"]];
+              }
+              [NSApp terminate:nil];
+          });
       }];
   [capturer startCapture];
 
