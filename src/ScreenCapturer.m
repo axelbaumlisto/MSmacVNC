@@ -56,9 +56,14 @@
         self.stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:self];
 
         NSError *addOutputError = nil;
+        /* Use a high-priority serial queue so frame delivery is not delayed
+           by other work competing on the default QoS level. */
+        dispatch_queue_attr_t qosAttr = dispatch_queue_attr_make_with_qos_class(
+            DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
+        dispatch_queue_t captureQueue = dispatch_queue_create("libvncserver.examples.mac", qosAttr);
         [self.stream addStreamOutput:self
                                 type:SCStreamOutputTypeScreen
-                  sampleHandlerQueue:dispatch_queue_create("libvncserver.examples.mac", NULL)
+                  sampleHandlerQueue:captureQueue
                                error:&addOutputError];
         if (addOutputError) {
             self.errorHandler(addOutputError);
