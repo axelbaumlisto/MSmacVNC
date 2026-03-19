@@ -40,6 +40,7 @@
 
 #import "ScreenCapturer.h"
 #import "mac.h"
+#import <AppKit/AppKit.h>
 
 /* The main LibVNCServer screen object */
 rfbScreenInfoPtr rfbScreen;
@@ -171,6 +172,10 @@ rfbBool isAltGrDown;
 
 /* Number of currently connected clients (read by AppDelegate for status display) */
 _Atomic int vncConnectedClients = 0;
+
+/* Scale factor: physical pixels per logical point (2.0 on 2× Retina, 1.0 otherwise).
+   Computed once at startup and used to convert SCKit dirty-rect coordinates. */
+static double displayScale = 1.0;
 
 
 static int
@@ -425,6 +430,13 @@ PtrAddEvent(int buttonMask, int x, int y, rfbClientPtr cl)
     position.x = x * scaleX + displayBounds.origin.x;
     position.y = y * scaleY + displayBounds.origin.y;
 
+    /* Tell LibVNCServer where the cursor is. Clients that advertise the
+       PointerPos encoding receive a position update in the next
+       FramebufferUpdate, so they can render the cursor locally at the
+       exact position without waiting for framebuffer data. */
+    rfbScreen->cursorX = x;
+    rfbScreen->cursorY = y;
+
     /* map buttons 4 5 6 7 to scroll events as per https://github.com/rfbproto/rfbproto/blob/master/rfbproto.rst#745pointerevent */
     if(buttonMask & (1 << 3))
 	mouseEvent = CGEventCreateScrollWheelEvent(eventSource, kCGScrollEventUnitLine, 2, 1, 0);
@@ -569,6 +581,70 @@ markChangedRegions(void *newBuf, void *oldBuf, int width, int height)
 }
 
 
+/*
+ * Build a RichCursor from an NSCursor and push it to all connected VNC clients.
+ * The cursor image is rendered into a BGRA bitmap matching the server pixel format
+ * (blueShift=0, greenShift=8, redShift=16), so clients display the correct shape
+ * instead of the generic fallback dot.
+ */
+static void
+sendMacOSCursor(rfbScreenInfoPtr screen, NSCursor *nsCursor)
+{
+    if (!screen || !nsCursor) return;
+
+    NSImage *image   = nsCursor.image;
+    NSPoint  hotSpot = nsCursor.hotSpot;
+
+    int w = (int)image.size.width;
+    int h = (int)image.size.height;
+    if (w <= 0 || h <= 0) return;
+
+    /* Render cursor image into a BGRA CGBitmapContext.
+       kCGBitmapByteOrder32Little + kCGImageAlphaPremultipliedFirst on LE hardware
+       produces memory layout [B][G][R][A] — identical to our server pixel format. */
+    CGColorSpaceRef cs  = CGColorSpaceCreateDeviceRGB();
+    uint8_t        *pix = calloc((size_t)w * h * 4, 1);
+    CGContextRef    ctx = CGBitmapContextCreate(pix, (size_t)w, (size_t)h, 8, (size_t)w * 4,
+                                                cs,
+                                                kCGImageAlphaPremultipliedFirst |
+                                                kCGBitmapByteOrder32Little);
+    CGColorSpaceRelease(cs);
+    if (!ctx) { free(pix); return; }
+
+    /* Flip the coordinate system so the image draws right-side up. */
+    CGContextTranslateCTM(ctx, 0, h);
+    CGContextScaleCTM(ctx, 1.0, -1.0);
+
+    CGImageRef cgImg = [image CGImageForProposedRect:nil context:nil hints:nil];
+    if (cgImg)
+        CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), cgImg);
+    CGContextRelease(ctx);
+
+    /* Build the 1-bit-per-pixel mask from the alpha channel. */
+    int      maskStride = (w + 7) / 8;
+    uint8_t *mask       = calloc((size_t)maskStride * h, 1);
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            /* BGRA: alpha is byte 3 in each 4-byte pixel */
+            if (pix[((size_t)y * w + x) * 4 + 3] > 0)
+                mask[(size_t)y * maskStride + x / 8] |= (uint8_t)(0x80u >> (x % 8));
+        }
+    }
+
+    rfbCursorPtr c    = calloc(1, sizeof(rfbCursor));
+    c->width          = w;
+    c->height         = h;
+    c->xhot           = (int)hotSpot.x;
+    c->yhot           = (int)hotSpot.y;
+    c->richSource     = pix;
+    c->cleanUpRichSource = TRUE;
+    c->mask           = mask;
+    c->cleanUpMask    = TRUE;
+
+    rfbSetCursor(screen, c);
+}
+
+
 static rfbBool
 ScreenInit(int port, const char *password)
 {
@@ -599,6 +675,16 @@ ScreenInit(int port, const char *password)
       return FALSE;
   }
 
+  /* Compute the Retina scale factor once. SCKit dirty-rect coordinates are in
+     logical points; multiplying by displayScale converts them to pixel coords. */
+  {
+      CGRect logicalBounds = CGDisplayBounds(displayID);
+      displayScale = logicalBounds.size.width > 0
+                     ? (double)CGDisplayPixelsWide(displayID) / logicalBounds.size.width
+                     : 1.0;
+      printf("Display scale factor: %.1f\n", displayScale);
+  }
+
 
   rfbScreen = rfbGetScreen(&dummyArgc, &dummyArgv,
 			   CGDisplayPixelsWide(displayID),
@@ -625,9 +711,13 @@ ScreenInit(int port, const char *password)
       rfbScreen->passwordCheck  = rfbCheckPasswordByList;
   }
 
-  rfbScreen->serverFormat.redShift = bitsPerSample*2;
-  rfbScreen->serverFormat.greenShift = bitsPerSample*1;
-  rfbScreen->serverFormat.blueShift = 0;
+  rfbScreen->serverFormat.redShift   = bitsPerSample * 2;
+  rfbScreen->serverFormat.greenShift = bitsPerSample * 1;
+  rfbScreen->serverFormat.blueShift  = 0;
+
+  /* Send updates immediately — don't batch them. We control frame rate via
+     SCKit's minimumFrameInterval so there's no risk of flooding clients. */
+  rfbScreen->deferUpdateTime = 0;
 
   gethostname(rfbScreen->thisHost, 255);
 
@@ -652,8 +742,17 @@ ScreenInit(int port, const char *password)
   /* front buffer */
   rfbScreen->frameBuffer = frameBufferTwo;
 
-  /* we already capture the cursor in the framebuffer */
-  rfbScreen->cursor = NULL;
+  /* On macOS 13+ we disable cursor capture in SCKit (showsCursor=NO in ScreenCapturer.m)
+     so that the cursor does NOT appear baked into the framebuffer.  Instead we send the
+     real macOS cursor shape as a RichCursor after rfbInitServer() below, and keep the
+     client's cursor position in sync via rfbScreen->cursorX/Y in PtrAddEvent().
+     On macOS 12.x, showsCursor defaults to YES so the cursor is in the framebuffer;
+     we clear rfbScreen->cursor to avoid showing two cursors simultaneously. */
+  if (@available(macOS 13.0, *)) {
+      /* Keep LibVNCServer's cursor enabled; it will be replaced by sendMacOSCursor(). */
+  } else {
+      rfbScreen->cursor = NULL;
+  }
 
   /* Allow multiple VNC clients to connect simultaneously */
   rfbScreen->alwaysShared = TRUE;
@@ -668,18 +767,20 @@ ScreenInit(int port, const char *password)
           int dispW = (int)CGDisplayPixelsWide(displayID);
           int dispH = (int)CGDisplayPixelsHigh(displayID);
 
-          /*
-            Skip frames where ScreenCaptureKit reports no screen change.
-            SCFrameStatusIdle means the display contents are identical to
-            the previous frame — no copy or VNC update is needed.
-          */
-          CFArrayRef attachmentsArray = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, false);
-          if (attachmentsArray && CFArrayGetCount(attachmentsArray) > 0) {
-              NSDictionary *dict = (__bridge NSDictionary *)CFArrayGetValueAtIndex(attachmentsArray, 0);
-              NSNumber *statusNum = dict[SCStreamFrameInfoStatus];
-              if (statusNum && [statusNum integerValue] == SCFrameStatusIdle)
-                  return;
+          /* Extract frame metadata.  Keep frameInfo in scope — it is used later
+             for both the idle-skip check and for SCKit dirty-rect tracking. */
+          NSDictionary *frameInfo = nil;
+          {
+              CFArrayRef arr = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, false);
+              if (arr && CFArrayGetCount(arr) > 0)
+                  frameInfo = (__bridge NSDictionary *)CFArrayGetValueAtIndex(arr, 0);
           }
+
+          /* Skip frames where ScreenCaptureKit reports no screen change.
+             SCFrameStatusIdle means the display contents are identical to
+             the previous frame — no copy or VNC update is needed. */
+          if ([frameInfo[SCStreamFrameInfoStatus] integerValue] == SCFrameStatusIdle)
+              return;
 
           /*
             Copy new frame to back buffer.
@@ -731,13 +832,37 @@ ScreenInit(int port, const char *password)
           }
 
           /*
-            After the swap: rfbScreen->frameBuffer is the new frame,
-            backBuffer is the previous frame.  Compare them tile by tile
-            and only mark tiles that actually changed.  This dramatically
-            reduces the number of VNC update rectangles when only a small
-            portion of the screen is moving (cursor, video window, etc.).
+            Mark only the screen regions that actually changed so that VNC
+            clients receive minimal update rectangles.
+
+            On macOS 14+ SCKit provides the dirty rectangles directly in the
+            frame metadata — no pixel comparison needed.  On older systems we
+            fall back to our own tile-based comparison.
           */
-          markChangedRegions(rfbScreen->frameBuffer, backBuffer, dispW, dispH);
+          if (@available(macOS 14.0, *)) {
+              NSArray<NSValue *> *dirty = frameInfo[SCStreamFrameInfoDirtyRects];
+              NSNumber           *scaleN = frameInfo[SCStreamFrameInfoContentScale];
+              double              scale  = scaleN ? scaleN.doubleValue : displayScale;
+
+              if (dirty.count > 0) {
+                  for (NSValue *rv in dirty) {
+                      CGRect r = rv.CGRectValue;
+                      /* Dirty rects are in logical points; convert to physical pixels. */
+                      int x1 = MAX(0,     (int)floor(r.origin.x                   * scale));
+                      int y1 = MAX(0,     (int)floor(r.origin.y                   * scale));
+                      int x2 = MIN(dispW, (int)ceil((r.origin.x + r.size.width)  * scale));
+                      int y2 = MIN(dispH, (int)ceil((r.origin.y + r.size.height) * scale));
+                      if (x2 > x1 && y2 > y1)
+                          rfbMarkRectAsModified(rfbScreen, x1, y1, x2, y2);
+                  }
+              } else {
+                  /* No dirty-rect info — mark full frame (safe fallback). */
+                  rfbMarkRectAsModified(rfbScreen, 0, 0, dispW, dispH);
+              }
+          } else {
+              /* macOS 12–13: compare tile by tile. */
+              markChangedRegions(rfbScreen->frameBuffer, backBuffer, dispW, dispH);
+          }
 
           /* Swapping framebuffers finished, reenable client reads. */
           iterator=rfbGetClientIterator(rfbScreen);
@@ -773,6 +898,10 @@ ScreenInit(int port, const char *password)
   [capturer startCapture];
 
   rfbInitServer(rfbScreen);
+
+  /* Send the macOS arrow cursor as a RichCursor so clients display a proper
+     arrow shape instead of the generic fallback dot. */
+  sendMacOSCursor(rfbScreen, [NSCursor arrowCursor]);
 
   return TRUE;
 }

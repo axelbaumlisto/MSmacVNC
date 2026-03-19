@@ -52,6 +52,13 @@
            that corrupts the framebuffer copy and breaks mouse coordinates. */
         config.width  = (int)CGDisplayPixelsWide(self.displayID);
         config.height = (int)CGDisplayPixelsHigh(self.displayID);
+        /* Exclude the cursor from the captured framebuffer.  We send the cursor
+           shape separately as a VNC RichCursor, which lets clients render it
+           locally at zero latency.  Baking it into the frame causes a visible
+           lag and shows two overlapping cursors on most VNC clients.
+           showsCursor is available from macOS 13.0. */
+        if (@available(macOS 13.0, *))
+            config.showsCursor = NO;
         // set max frame rate to 60 FPS
         config.minimumFrameInterval = CMTimeMake(1, 60);
         config.pixelFormat = kCVPixelFormatType_32BGRA;
