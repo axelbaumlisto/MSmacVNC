@@ -637,9 +637,9 @@ sendMacOSCursor(rfbScreenInfoPtr screen, NSCursor *nsCursor)
     c->xhot           = (int)hotSpot.x;
     c->yhot           = (int)hotSpot.y;
     c->richSource     = pix;
-    c->cleanUpRichSource = TRUE;
-    c->mask           = mask;
-    c->cleanUpMask    = TRUE;
+    c->cleanupRichSource = TRUE;
+    c->mask              = mask;
+    c->cleanupMask       = TRUE;
 
     rfbSetCursor(screen, c);
 }
@@ -686,7 +686,7 @@ ScreenInit(int port, const char *password)
   }
 
 
-  rfbScreen = rfbGetScreen(&dummyArgc, &dummyArgv,
+  rfbScreen = rfbGetScreen(&dummyArgc, dummyArgv,
 			   CGDisplayPixelsWide(displayID),
 			   CGDisplayPixelsHigh(displayID),
 			   bitsPerSample,
@@ -846,7 +846,7 @@ ScreenInit(int port, const char *password)
 
               if (dirty.count > 0) {
                   for (NSValue *rv in dirty) {
-                      CGRect r = rv.CGRectValue;
+                      CGRect r = NSRectToCGRect(rv.rectValue);
                       /* Dirty rects are in logical points; convert to physical pixels. */
                       int x1 = MAX(0,     (int)floor(r.origin.x                   * scale));
                       int y1 = MAX(0,     (int)floor(r.origin.y                   * scale));
