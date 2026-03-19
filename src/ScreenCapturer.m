@@ -45,9 +45,13 @@
         }
 
         SCStreamConfiguration *config = [[SCStreamConfiguration alloc] init];
-        // can later be adjusted for server-side scaling
-        config.width = display.width;
-        config.height = display.height;
+        /* Use physical pixel dimensions so the stream output matches the
+           rfbGetScreen framebuffer which was sized with CGDisplayPixelsWide/High.
+           SCDisplay.width/height are in logical *points* (half the physical pixel
+           count on a 2× Retina display), so using them would cause a size mismatch
+           that corrupts the framebuffer copy and breaks mouse coordinates. */
+        config.width  = (int)CGDisplayPixelsWide(self.displayID);
+        config.height = (int)CGDisplayPixelsHigh(self.displayID);
         // set max frame rate to 60 FPS
         config.minimumFrameInterval = CMTimeMake(1, 60);
         config.pixelFormat = kCVPixelFormatType_32BGRA;

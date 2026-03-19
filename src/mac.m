@@ -408,19 +408,22 @@ PtrAddEvent(int buttonMask, int x, int y, rfbClientPtr cl)
 
     undim();
 
-    /* Clamp incoming coordinates to the display bounds to prevent
-       rogue clients from injecting events outside the visible area. */
-    {
-        int dispW = (int)CGDisplayPixelsWide(displayID);
-        int dispH = (int)CGDisplayPixelsHigh(displayID);
-        if (x < 0)         x = 0;
-        if (y < 0)         y = 0;
-        if (x >= dispW)    x = dispW - 1;
-        if (y >= dispH)    y = dispH - 1;
-    }
+    /* Clamp incoming coordinates to the framebuffer (physical pixel) bounds. */
+    if (x < 0)                    x = 0;
+    if (y < 0)                    y = 0;
+    if (x >= (int)rfbScreen->width)  x = (int)rfbScreen->width  - 1;
+    if (y >= (int)rfbScreen->height) y = (int)rfbScreen->height - 1;
 
-    position.x = x + displayBounds.origin.x;
-    position.y = y + displayBounds.origin.y;
+    /* The VNC framebuffer is sized in physical pixels (from CGDisplayPixelsWide/High),
+       but CGPostMouseEvent / CGDisplayBounds work in logical points.
+       On a 2× Retina display this scale factor is 0.5; on non-HiDPI it is 1.0.
+       Without this conversion the server cursor moves at 2× the speed of the
+       client cursor on Retina displays. */
+    double scaleX = displayBounds.size.width  / (double)rfbScreen->width;
+    double scaleY = displayBounds.size.height / (double)rfbScreen->height;
+
+    position.x = x * scaleX + displayBounds.origin.x;
+    position.y = y * scaleY + displayBounds.origin.y;
 
     /* map buttons 4 5 6 7 to scroll events as per https://github.com/rfbproto/rfbproto/blob/master/rfbproto.rst#745pointerevent */
     if(buttonMask & (1 << 3))
@@ -687,9 +690,27 @@ ScreenInit(int port, const char *password)
 
           CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
 
-          memcpy(backBuffer,
-                 CVPixelBufferGetBaseAddress(pixelBuffer),
-                 (size_t)dispW * dispH * 4);
+          /* Copy row-by-row to honour the pixel buffer's actual bytes-per-row
+             (which may include alignment padding after each row).  A single
+             bulk memcpy using dispW*dispH*4 would read past the end of the
+             buffer whenever bytesPerRow > dispW*4. */
+          {
+              const uint8_t *src      = CVPixelBufferGetBaseAddress(pixelBuffer);
+              uint8_t       *dst      = backBuffer;
+              size_t         srcStride = CVPixelBufferGetBytesPerRow(pixelBuffer);
+              size_t         dstStride = (size_t)dispW * 4;
+
+              if (srcStride == dstStride) {
+                  /* Fast path: no padding */
+                  memcpy(dst, src, (size_t)dispH * dstStride);
+              } else {
+                  for (int row = 0; row < dispH; row++) {
+                      memcpy(dst, src, dstStride);
+                      src += srcStride;
+                      dst += dstStride;
+                  }
+              }
+          }
 
           CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
 
