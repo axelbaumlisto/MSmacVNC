@@ -12,7 +12,7 @@ This branch adds a single composite RFB desktop for all active displays, on-dema
 - Correct placement for displays with negative and vertically offset macOS coordinates.
 - Black framebuffer gaps where no physical display exists.
 - Per-display capture streams feeding one serialized composite framebuffer.
-- 64×64 dirty-tile updates through LibVNCServer.
+- 64×64 dirty-tile updates through LibVNCServer, comparing only the advertised 24-bit BGR channels and normalizing the unused alpha byte.
 - Capture starts only after the first authenticated framebuffer request and stops after the last authenticated client disconnects.
 - Near-zero idle CPU while the listener remains available.
 - Mouse mapping across accepted composite display layouts.

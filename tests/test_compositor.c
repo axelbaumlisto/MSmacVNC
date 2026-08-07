@@ -36,6 +36,13 @@ int main(void)
     changed=macVNCCompositeDisplayFrame(canvas,8,6,&display,source,20,2,dirty,&d);
     assert(changed==0 && d.count==0);
 
+    /* Alpha is outside the advertised 24-bit RFB color depth and must not dirty tiles. */
+    for (int y=0; y<3; ++y) for (int x=0; x<4; ++x)
+        source[y*20 + x*4 + 3] = (uint8_t)(x + y);
+    d=(Dirty){0};
+    changed=macVNCCompositeDisplayFrame(canvas,8,6,&display,source,20,2,dirty,&d);
+    assert(changed==0 && d.count==0);
+
     source[1*20 + 2*4] = 99;
     d=(Dirty){0};
     changed=macVNCCompositeDisplayFrame(canvas,8,6,&display,source,20,2,dirty,&d);

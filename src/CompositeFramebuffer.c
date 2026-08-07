@@ -1,7 +1,26 @@
 #include "CompositeFramebuffer.h"
 
 #include <stdbool.h>
-#include <string.h>
+
+static bool
+colorsDiffer(const uint8_t *source, const uint8_t *target, int pixels)
+{
+    for (int pixel = 0; pixel < pixels; ++pixel, source += 4, target += 4)
+        if (source[0] != target[0] || source[1] != target[1] || source[2] != target[2])
+            return true;
+    return false;
+}
+
+static void
+copyColors(uint8_t *target, const uint8_t *source, int pixels)
+{
+    for (int pixel = 0; pixel < pixels; ++pixel, source += 4, target += 4) {
+        target[0] = source[0];
+        target[1] = source[1];
+        target[2] = source[2];
+        target[3] = 0; /* RFB depth is 24; keep the unused byte deterministic. */
+    }
+}
 
 size_t
 macVNCCompositeDisplayFrame(uint8_t *canvas,
@@ -30,14 +49,13 @@ macVNCCompositeDisplayFrame(uint8_t *canvas,
             int tileWidth = tileSize;
             if (x + tileWidth > display->input.pixelWidth)
                 tileWidth = display->input.pixelWidth - x;
-            size_t rowBytes = (size_t)tileWidth * 4;
             bool changed = false;
             for (int row = 0; row < tileHeight; ++row) {
                 const uint8_t *src = source + (size_t)(y + row) * sourceStride + (size_t)x * 4;
                 uint8_t *dst = canvas +
                     ((size_t)(display->framebufferY + y + row) * canvasWidth +
                      display->framebufferX + x) * 4;
-                if (memcmp(src, dst, rowBytes) != 0) {
+                if (colorsDiffer(src, dst, tileWidth)) {
                     changed = true;
                     break;
                 }
@@ -50,7 +68,7 @@ macVNCCompositeDisplayFrame(uint8_t *canvas,
                 uint8_t *dst = canvas +
                     ((size_t)(display->framebufferY + y + row) * canvasWidth +
                      display->framebufferX + x) * 4;
-                memcpy(dst, src, rowBytes);
+                copyColors(dst, src, tileWidth);
             }
             ++changedTiles;
             if (dirtyCallback)
