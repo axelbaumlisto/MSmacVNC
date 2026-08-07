@@ -55,6 +55,16 @@ Pure C input conversion module.
 - Converts legacy X11 Cyrillic keysyms used by mobile VNC clients.
 - Covers lower/upper Russian letters and `ё`/`Ё`.
 
+### `KeyboardModifierState`
+
+Pure C modifier state machine.
+
+- Tracks left/right Shift, Control, Meta, Alt, Level3, and Fn independently.
+- Produces deterministic macOS Shift/Control/Option/Command/Fn flags for every event.
+- Preserves the existing mobile mapping Meta→Option and Alt→Command.
+- Treats mobile Fn as one-shot and auto-releases it after the next non-modifier key-up.
+- Clears all modifiers when the last authenticated client disconnects.
+
 ### `mac.m`
 
 System/RFB orchestration only.

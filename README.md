@@ -17,6 +17,7 @@ This branch adds a single composite RFB desktop for all active displays, on-dema
 - Near-zero idle CPU while the listener remains available.
 - Mouse mapping across accepted composite display layouts.
 - Correct legacy X11 Cyrillic and RFB Unicode keyboard input, including `ё`/`Ё`.
+- Deterministic Shift/Control/Option/Command/Fn state, one-shot mobile Fn auto-release, and modifier reset after the last client disconnects.
 - System cursor captured by ScreenCaptureKit, avoiding flipped custom RichCursor rendering.
 - VNC password authentication.
 - Optional bind to a specific IPv4 address.
