@@ -42,6 +42,8 @@ set(SOURCE_FILES
     src/CompositeFramebuffer.c
     src/PointerState.h
     src/PointerState.c
+    src/KeyboardModifierState.h
+    src/KeyboardModifierState.c
     src/ScreenCapturer.h
     src/ScreenCapturer.m
     src/AppDelegate.h
@@ -125,7 +127,11 @@ if(BUILD_TESTING)
     target_include_directories(test_pointer_state PRIVATE src)
     add_test(NAME pointer_state COMMAND test_pointer_state)
 
-    foreach(test_target test_keysym test_display_layout test_compositor test_pointer_state)
+    add_executable(test_keyboard_modifiers tests/test_keyboard_modifiers.c src/KeyboardModifierState.c)
+    target_include_directories(test_keyboard_modifiers PRIVATE src)
+    add_test(NAME keyboard_modifiers COMMAND test_keyboard_modifiers)
+
+    foreach(test_target test_keysym test_display_layout test_compositor test_pointer_state test_keyboard_modifiers)
         target_compile_options(${test_target} PRIVATE -UNDEBUG)
     endforeach()
 endif()

@@ -14,6 +14,7 @@ Registered tests:
 - `display_layout`: negative origins, vertically offset displays, seams, gaps, order independence, overlap rejection, RFB size limits, pointer mapping.
 - `compositor`: BGRA placement, padded source rows, alpha-only noise suppression, black gaps, unchanged frames, partial dirty tiles, isolation of unrelated pixels.
 - `pointer_state`: valid positions, gap suppression, drag into gap, and release at the last valid position.
+- `keyboard_modifiers`: left/right modifier tracking, macOS flag mapping, one-shot Fn auto-release, and reset.
 
 ### Fail-closed configuration test
 
@@ -93,8 +94,10 @@ Record the exact viewer device/version and verify:
 4. Move and click the pointer on each display.
 5. Confirm pointer input in black gaps causes no unintended click.
 6. Type Latin and Russian text, including `ё` and `Ё`.
-7. Disconnect and confirm server CPU returns near zero.
-8. Reconnect and confirm both capture streams restart.
+7. Press mobile Fn, type a normal key, and verify Fn is no longer latched; typing `F` afterwards must not toggle fullscreen.
+8. Disconnect while a modifier is down and verify reconnect starts with clear modifier flags.
+9. Disconnect and confirm server CPU returns near zero.
+10. Reconnect and confirm both capture streams restart.
 
 ## Performance evidence
 
