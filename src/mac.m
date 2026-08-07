@@ -37,8 +37,13 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <stdatomic.h>
+#include <arpa/inet.h>
 
 #import "ScreenCapturer.h"
+#import "RFBKeySym.h"
+#import "DisplayLayout.h"
+#import "CompositeFramebuffer.h"
+#import "PointerState.h"
 #import "mac.h"
 #import <AppKit/AppKit.h>
 
@@ -47,17 +52,21 @@ rfbScreenInfoPtr rfbScreen;
 /* Operation modes set via AppDelegate */
 rfbBool viewOnly = FALSE;
 
-/* Two framebuffers. */
+/* One composite framebuffer; uncovered regions remain black. */
 void *frameBufferOne;
-void *frameBufferTwo;
 
-/* Pointer to the current backbuffer. */
-void *backBuffer;
-
-/* The multi-screen display number chosen by the user */
+/* -2 = all displays, -1 = primary, >=0 = one enumerated display. */
 int displayNumber = -1;
-/* The corresponding multi-screen display ID */
-CGDirectDisplayID displayID;
+static MacVNCDisplayLayout displayLayout;
+static NSMutableArray<ScreenCapturer *> *screenCapturers;
+static pthread_mutex_t compositorMutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t pointerMutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t clientLifecycleMutex = PTHREAD_MUTEX_INITIALIZER;
+static MacVNCPointerState pointerState;
+
+typedef struct {
+    rfbBool captureCounted;
+} MacVNCClientState;
 
 /* The server's private event source */
 CGEventSourceRef eventSource;
@@ -172,10 +181,6 @@ rfbBool isAltGrDown;
 
 /* Number of currently connected clients (read by AppDelegate for status display) */
 _Atomic int vncConnectedClients = 0;
-
-/* Scale factor: physical pixels per logical point (2.0 on 2× Retina, 1.0 otherwise).
-   Computed once at startup and used to convert SCKit dirty-rect coordinates. */
-static double displayScale = 1.0;
 
 
 static int
@@ -369,7 +374,10 @@ KbdAddEvent(rfbBool down, rfbKeySym keySym, struct _rfbClientRec* cl)
     } else {
 	/* look for char key */
 	size_t keyCodeFromDict;
-	CFStringRef charStr = CFStringCreateWithCharacters(kCFAllocatorDefault, (UniChar*)&keySym, 1);
+        UniChar unicodeChar = macVNCUnicodeForRFBKeySym(keySym);
+        if (!unicodeChar)
+            return;
+	CFStringRef charStr = CFStringCreateWithCharacters(kCFAllocatorDefault, &unicodeChar, 1);
 	CFMutableDictionaryRef keyMap = charKeyMap;
 	if(isShiftDown && !isAltGrDown)
 	    keyMap = charShiftKeyMap;
@@ -382,9 +390,9 @@ KbdAddEvent(rfbBool down, rfbKeySym keySym, struct _rfbClientRec* cl)
 	    /* keycode for ASCII key found */
 	    keyboardEvent = CGEventCreateKeyboardEvent(eventSource, keyCodeFromDict, down);
 	} else {
-	    /* last resort: use the symbol's utf-16 value, does not support modifiers though */
+	    /* Last resort: inject the mapped Unicode character directly. */
 	    keyboardEvent = CGEventCreateKeyboardEvent(eventSource, 0, down);
-	    CGEventKeyboardSetUnicodeString(keyboardEvent, 1, (UniChar*)&keySym);
+	    CGEventKeyboardSetUnicodeString(keyboardEvent, 1, &unicodeChar);
         }
 
 	CFRelease(charStr);
@@ -407,28 +415,25 @@ KbdAddEvent(rfbBool down, rfbKeySym keySym, struct _rfbClientRec* cl)
 void
 PtrAddEvent(int buttonMask, int x, int y, rfbClientPtr cl)
 {
-    CGPoint position;
-    CGRect displayBounds = CGDisplayBounds(displayID);
     CGEventRef mouseEvent = NULL;
 
     undim();
 
-    /* Clamp incoming coordinates to the framebuffer (physical pixel) bounds. */
-    if (x < 0)                    x = 0;
-    if (y < 0)                    y = 0;
-    if (x >= (int)rfbScreen->width)  x = (int)rfbScreen->width  - 1;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x >= (int)rfbScreen->width) x = (int)rfbScreen->width - 1;
     if (y >= (int)rfbScreen->height) y = (int)rfbScreen->height - 1;
 
-    /* The VNC framebuffer is sized in physical pixels (from CGDisplayPixelsWide/High),
-       but CGPostMouseEvent / CGDisplayBounds work in logical points.
-       On a 2× Retina display this scale factor is 0.5; on non-HiDPI it is 1.0.
-       Without this conversion the server cursor moves at 2× the speed of the
-       client cursor on Retina displays. */
-    double scaleX = displayBounds.size.width  / (double)rfbScreen->width;
-    double scaleY = displayBounds.size.height / (double)rfbScreen->height;
-
-    position.x = x * scaleX + displayBounds.origin.x;
-    position.y = y * scaleY + displayBounds.origin.y;
+    double globalX = 0, globalY = 0;
+    bool validPosition = macVNCMapFramebufferPoint(
+        &displayLayout, x, y, &globalX, &globalY, NULL);
+    pthread_mutex_lock(&pointerMutex);
+    bool shouldPost = macVNCResolvePointerEvent(
+        &pointerState, validPosition, globalX, globalY, buttonMask, &globalX, &globalY);
+    pthread_mutex_unlock(&pointerMutex);
+    if (!shouldPost)
+        return;
+    CGPoint position = CGPointMake(globalX, globalY);
 
     /* Tell LibVNCServer where the cursor is. Clients that advertise the
        PointerPos encoding receive a position update in the next
@@ -545,105 +550,105 @@ rfbBool keyboardInit()
 }
 
 
-/*
-  Compare newBuf and oldBuf in TILE_SIZE x TILE_SIZE tiles and call
-  rfbMarkRectAsModified() only for tiles that actually differ.  This
-  avoids sending the full framebuffer every frame when only a small
-  region of the screen has changed.
-  Must be called while client send-mutexes are held.
-*/
 static void
-markChangedRegions(void *newBuf, void *oldBuf, int width, int height)
+markCompositeDirty(void *context, int x, int y, int width, int height)
 {
-    int tilesX = (width  + TILE_SIZE - 1) / TILE_SIZE;
-    int tilesY = (height + TILE_SIZE - 1) / TILE_SIZE;
+    (void)context;
+    rfbMarkRectAsModified(rfbScreen, x, y, x + width, y + height);
+}
 
-    for (int ty = 0; ty < tilesY; ty++) {
-        int y0 = ty * TILE_SIZE;
-        int y1 = y0 + TILE_SIZE < height ? y0 + TILE_SIZE : height;
+typedef struct {
+    rfbClientPtr *items;
+    size_t count;
+} LockedClientSet;
 
-        for (int tx = 0; tx < tilesX; tx++) {
-            int x0 = tx * TILE_SIZE;
-            int x1 = x0 + TILE_SIZE < width ? x0 + TILE_SIZE : width;
-            int rowBytes = (x1 - x0) * 4;
-
-            for (int row = y0; row < y1; row++) {
-                size_t off = ((size_t)row * width + x0) * 4;
-                if (memcmp((char *)newBuf + off,
-                           (char *)oldBuf + off, rowBytes) != 0) {
-                    rfbMarkRectAsModified(rfbScreen, x0, y0, x1, y1);
-                    goto next_tile;
-                }
+static rfbBool
+lockCurrentClients(LockedClientSet *set)
+{
+    memset(set, 0, sizeof(*set));
+    size_t capacity = 0;
+    rfbClientIteratorPtr iterator = rfbGetClientIterator(rfbScreen);
+    rfbClientPtr client;
+    while ((client = rfbClientIteratorNext(iterator))) {
+        if (set->count == capacity) {
+            size_t nextCapacity = capacity ? capacity * 2 : 4;
+            rfbClientPtr *next = realloc(set->items, nextCapacity * sizeof(*next));
+            if (!next) {
+                rfbReleaseClientIterator(iterator);
+                for (size_t i = 0; i < set->count; ++i)
+                    rfbDecrClientRef(set->items[i]);
+                free(set->items);
+                memset(set, 0, sizeof(*set));
+                return FALSE;
             }
-        next_tile:;
+            set->items = next;
+            capacity = nextCapacity;
         }
+        rfbIncrClientRef(client);
+        set->items[set->count++] = client;
     }
+    rfbReleaseClientIterator(iterator);
+    for (size_t i = 0; i < set->count; ++i)
+        LOCK(set->items[i]->sendMutex);
+    return TRUE;
 }
 
-
-/*
- * Build a RichCursor from an NSCursor and push it to all connected VNC clients.
- * The cursor image is rendered into a BGRA bitmap matching the server pixel format
- * (blueShift=0, greenShift=8, redShift=16), so clients display the correct shape
- * instead of the generic fallback dot.
- */
 static void
-sendMacOSCursor(rfbScreenInfoPtr screen, NSCursor *nsCursor)
+unlockCurrentClients(LockedClientSet *set)
 {
-    if (!screen || !nsCursor) return;
-
-    NSImage *image   = nsCursor.image;
-    NSPoint  hotSpot = nsCursor.hotSpot;
-
-    int w = (int)image.size.width;
-    int h = (int)image.size.height;
-    if (w <= 0 || h <= 0) return;
-
-    /* Render cursor image into a BGRA CGBitmapContext.
-       kCGBitmapByteOrder32Little + kCGImageAlphaPremultipliedFirst on LE hardware
-       produces memory layout [B][G][R][A] — identical to our server pixel format. */
-    CGColorSpaceRef cs  = CGColorSpaceCreateDeviceRGB();
-    uint8_t        *pix = calloc((size_t)w * h * 4, 1);
-    CGContextRef    ctx = CGBitmapContextCreate(pix, (size_t)w, (size_t)h, 8, (size_t)w * 4,
-                                                cs,
-                                                kCGImageAlphaPremultipliedFirst |
-                                                kCGBitmapByteOrder32Little);
-    CGColorSpaceRelease(cs);
-    if (!ctx) { free(pix); return; }
-
-    /* Flip the coordinate system so the image draws right-side up. */
-    CGContextTranslateCTM(ctx, 0, h);
-    CGContextScaleCTM(ctx, 1.0, -1.0);
-
-    CGImageRef cgImg = [image CGImageForProposedRect:nil context:nil hints:nil];
-    if (cgImg)
-        CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), cgImg);
-    CGContextRelease(ctx);
-
-    /* Build the 1-bit-per-pixel mask from the alpha channel. */
-    int      maskStride = (w + 7) / 8;
-    uint8_t *mask       = calloc((size_t)maskStride * h, 1);
-    for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-            /* BGRA: alpha is byte 3 in each 4-byte pixel */
-            if (pix[((size_t)y * w + x) * 4 + 3] > 0)
-                mask[(size_t)y * maskStride + x / 8] |= (uint8_t)(0x80u >> (x % 8));
-        }
-    }
-
-    rfbCursorPtr c    = calloc(1, sizeof(rfbCursor));
-    c->width          = w;
-    c->height         = h;
-    c->xhot           = (int)hotSpot.x;
-    c->yhot           = (int)hotSpot.y;
-    c->richSource     = pix;
-    c->cleanupRichSource = TRUE;
-    c->mask              = mask;
-    c->cleanupMask       = TRUE;
-
-    rfbSetCursor(screen, c);
+    for (size_t i = set->count; i > 0; --i)
+        UNLOCK(set->items[i - 1]->sendMutex);
+    for (size_t i = 0; i < set->count; ++i)
+        rfbDecrClientRef(set->items[i]);
+    free(set->items);
+    memset(set, 0, sizeof(*set));
 }
 
+static void
+updateCompositeFrame(CMSampleBufferRef sampleBuffer,
+                     const MacVNCDisplayGeometry *geometry)
+{
+    CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
+    if (!pixelBuffer)
+        return;
+    if ((int)CVPixelBufferGetWidth(pixelBuffer) != geometry->input.pixelWidth ||
+        (int)CVPixelBufferGetHeight(pixelBuffer) != geometry->input.pixelHeight) {
+        rfbErr("Unexpected display %u frame size %zux%zu (expected %dx%d)\n",
+               geometry->input.displayID,
+               CVPixelBufferGetWidth(pixelBuffer),
+               CVPixelBufferGetHeight(pixelBuffer),
+               geometry->input.pixelWidth,
+               geometry->input.pixelHeight);
+        return;
+    }
+
+    CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+    const uint8_t *source = CVPixelBufferGetBaseAddress(pixelBuffer);
+    size_t sourceStride = CVPixelBufferGetBytesPerRow(pixelBuffer);
+
+    pthread_mutex_lock(&compositorMutex);
+    LockedClientSet lockedClients;
+    if (!lockCurrentClients(&lockedClients)) {
+        pthread_mutex_unlock(&compositorMutex);
+        CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+        rfbErr("Could not retain current VNC clients for framebuffer update\n");
+        return;
+    }
+
+    macVNCCompositeDisplayFrame((uint8_t *)rfbScreen->frameBuffer,
+                                rfbScreen->width,
+                                rfbScreen->height,
+                                geometry,
+                                source,
+                                sourceStride,
+                                TILE_SIZE,
+                                markCompositeDirty,
+                                NULL);
+
+    unlockCurrentClients(&lockedClients);
+    pthread_mutex_unlock(&compositorMutex);
+    CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+}
 
 static rfbBool
 ScreenInit(int port, const char *password)
@@ -651,6 +656,9 @@ ScreenInit(int port, const char *password)
   int bitsPerSample = 8;
   CGDisplayCount displayCount;
   CGDirectDisplayID displays[32];
+  CGDirectDisplayID selectedDisplays[MACVNC_MAX_DISPLAYS];
+  MacVNCDisplayInput layoutInputs[MACVNC_MAX_DISPLAYS];
+  size_t selectedCount = 0;
 
   /* Build a minimal argv so rfbGetScreen() has a program name but does
      not try to parse any options — we configure everything manually.
@@ -659,48 +667,84 @@ ScreenInit(int port, const char *password)
   char  progName[]      = "macVNC";
   char *dummyArgv[2]    = {progName, NULL};
 
-  /* grab the active displays */
   CGGetActiveDisplayList(32, displays, &displayCount);
-  for (int i=0; i<displayCount; i++) {
-      CGRect bounds = CGDisplayBounds(displays[i]);
-      printf("Found %s display %d at (%d,%d) and a resolution of %dx%d\n", (CGDisplayIsMain(displays[i]) ? "primary" : "secondary"), i, (int)bounds.origin.x, (int)bounds.origin.y, (int)bounds.size.width, (int)bounds.size.height);
+  if (displayCount == 0 || displayCount > MACVNC_MAX_DISPLAYS) {
+      rfbErr("Unsupported active display count: %u\n", displayCount);
+      return FALSE;
   }
-  if(displayNumber < 0) {
-      printf("Using primary display as a default\n");
-      displayID = CGMainDisplayID();
-  } else if (displayNumber < (int)displayCount) {
+  for (int i = 0; i < (int)displayCount; ++i) {
+      CGRect bounds = CGDisplayBounds(displays[i]);
+      printf("Found %s display %d id=%u at (%.0f,%.0f), logical %.0fx%.0f, pixels %zux%zu\n",
+             CGDisplayIsMain(displays[i]) ? "primary" : "secondary",
+             i, displays[i], bounds.origin.x, bounds.origin.y,
+             bounds.size.width, bounds.size.height,
+             CGDisplayPixelsWide(displays[i]), CGDisplayPixelsHigh(displays[i]));
+  }
+
+  if (displayNumber == -2) {
+      selectedCount = displayCount;
+      for (size_t i = 0; i < selectedCount; ++i)
+          selectedDisplays[i] = displays[i];
+      printf("Using all %zu active displays in one framebuffer\n", selectedCount);
+  } else if (displayNumber == -1) {
+      selectedCount = 1;
+      selectedDisplays[0] = CGMainDisplayID();
+      printf("Using primary display\n");
+  } else if (displayNumber >= 0 && displayNumber < (int)displayCount) {
+      selectedCount = 1;
+      selectedDisplays[0] = displays[displayNumber];
       printf("Using specified display %d\n", displayNumber);
-      displayID = displays[displayNumber];
   } else {
-      fprintf(stderr, "Specified display %d does not exist\n", displayNumber);
+      rfbErr("Specified display %d does not exist\n", displayNumber);
       return FALSE;
   }
 
-  /* Compute the Retina scale factor once. SCKit dirty-rect coordinates are in
-     logical points; multiplying by displayScale converts them to pixel coords. */
-  {
-      CGRect logicalBounds = CGDisplayBounds(displayID);
-      displayScale = logicalBounds.size.width > 0
-                     ? (double)CGDisplayPixelsWide(displayID) / logicalBounds.size.width
-                     : 1.0;
-      printf("Display scale factor: %.1f\n", displayScale);
+  for (size_t i = 0; i < selectedCount; ++i) {
+      CGRect bounds = CGDisplayBounds(selectedDisplays[i]);
+      layoutInputs[i] = (MacVNCDisplayInput){
+          .displayID = selectedDisplays[i],
+          .logicalX = bounds.origin.x,
+          .logicalY = bounds.origin.y,
+          .logicalWidth = bounds.size.width,
+          .logicalHeight = bounds.size.height,
+          .pixelWidth = (int)CGDisplayPixelsWide(selectedDisplays[i]),
+          .pixelHeight = (int)CGDisplayPixelsHigh(selectedDisplays[i]),
+      };
   }
+  if (!macVNCBuildDisplayLayout(layoutInputs, selectedCount, &displayLayout)) {
+      rfbErr("Could not build a non-overlapping RFB display layout\n");
+      return FALSE;
+  }
+  printf("Composite framebuffer: %dx%d\n", displayLayout.width, displayLayout.height);
+  memset(&pointerState, 0, sizeof(pointerState));
 
 
   rfbScreen = rfbGetScreen(&dummyArgc, dummyArgv,
-			   CGDisplayPixelsWide(displayID),
-			   CGDisplayPixelsHigh(displayID),
-			   bitsPerSample,
-			   3,
-			   4);
+                           displayLayout.width,
+                           displayLayout.height,
+                           bitsPerSample,
+                           3,
+                           4);
   if(!rfbScreen) {
       rfbErr("Could not init rfbScreen.\n");
       return FALSE;
   }
 
-  /* Configure listen port. */
-  rfbScreen->port     = port;
-  rfbScreen->ipv6port = port;
+  /* Configure listen port. MACVNC_LISTEN restricts the server to a trusted
+     IPv4 interface (the Tailscale address in the LaunchAgent). */
+  rfbScreen->port = port;
+  const char *listenAddress = getenv("MACVNC_LISTEN");
+  if (listenAddress && *listenAddress) {
+      struct in_addr parsedAddress;
+      if (inet_pton(AF_INET, listenAddress, &parsedAddress) != 1) {
+          rfbErr("Invalid MACVNC_LISTEN address: %s\n", listenAddress);
+          return FALSE;
+      }
+      rfbScreen->listenInterface = parsedAddress.s_addr;
+      rfbScreen->ipv6port = 0;
+  } else {
+      rfbScreen->ipv6port = port;
+  }
 
   /* Configure password authentication if a password was supplied. */
   if (password && strlen(password) > 0) {
@@ -716,44 +760,23 @@ ScreenInit(int port, const char *password)
   rfbScreen->serverFormat.greenShift = bitsPerSample * 1;
   rfbScreen->serverFormat.blueShift  = 0;
 
-  /* Send updates immediately — don't batch them. We control frame rate via
-     SCKit's minimumFrameInterval so there's no risk of flooding clients. */
-  rfbScreen->deferUpdateTime = 0;
+  /* A zero defer interval makes LibVNCServer busy-spin even with no clients.
+     Ten milliseconds keeps idle CPU near zero while bounding added latency. */
+  rfbScreen->deferUpdateTime = 10;
 
   gethostname(rfbScreen->thisHost, 255);
 
-  /* Use calloc so the buffers are zero-initialised; this prevents undefined
-     behaviour when markChangedRegions() compares them on the very first frame,
-     and ensures no stale data is ever sent to a client. */
-  size_t bufSize = (size_t)CGDisplayPixelsWide(displayID) * (size_t)CGDisplayPixelsHigh(displayID) * 4;
+  /* A single zeroed composite canvas keeps uncovered display gaps black. */
+  size_t bufSize = (size_t)displayLayout.width * (size_t)displayLayout.height * 4;
   frameBufferOne = calloc(1, bufSize);
   if (!frameBufferOne) {
-      rfbErr("Could not allocate framebuffer\n");
+      rfbErr("Could not allocate composite framebuffer\n");
       return FALSE;
   }
-  frameBufferTwo = calloc(1, bufSize);
-  if (!frameBufferTwo) {
-      free(frameBufferOne);
-      rfbErr("Could not allocate framebuffer\n");
-      return FALSE;
-  }
+  rfbScreen->frameBuffer = frameBufferOne;
 
-  /* back buffer */
-  backBuffer = frameBufferOne;
-  /* front buffer */
-  rfbScreen->frameBuffer = frameBufferTwo;
-
-  /* On macOS 13+ we disable cursor capture in SCKit (showsCursor=NO in ScreenCapturer.m)
-     so that the cursor does NOT appear baked into the framebuffer.  Instead we send the
-     real macOS cursor shape as a RichCursor after rfbInitServer() below, and keep the
-     client's cursor position in sync via rfbScreen->cursorX/Y in PtrAddEvent().
-     On macOS 12.x, showsCursor defaults to YES so the cursor is in the framebuffer;
-     we clear rfbScreen->cursor to avoid showing two cursors simultaneously. */
-  if (@available(macOS 13.0, *)) {
-      /* Keep LibVNCServer's cursor enabled; it will be replaced by sendMacOSCursor(). */
-  } else {
-      rfbScreen->cursor = NULL;
-  }
+  /* ScreenCaptureKit bakes the correctly oriented system cursor into the frame. */
+  rfbScreen->cursor = NULL;
 
   /* Allow multiple VNC clients to connect simultaneously */
   rfbScreen->alwaysShared = TRUE;
@@ -761,142 +784,36 @@ ScreenInit(int port, const char *password)
   rfbScreen->ptrAddEvent = PtrAddEvent;
   rfbScreen->kbdAddEvent = KbdAddEvent;
 
-  ScreenCapturer *capturer = [[ScreenCapturer alloc] initWithDisplay: displayID
-                                                        frameHandler:^(CMSampleBufferRef sampleBuffer) {
-          rfbClientIteratorPtr iterator;
-          rfbClientPtr cl;
-          int dispW = (int)CGDisplayPixelsWide(displayID);
-          int dispH = (int)CGDisplayPixelsHigh(displayID);
-
-          /* Extract frame metadata.  Keep frameInfo in scope — it is used later
-             for both the idle-skip check and for SCKit dirty-rect tracking. */
-          NSDictionary *frameInfo = nil;
-          {
-              CFArrayRef arr = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, false);
-              if (arr && CFArrayGetCount(arr) > 0)
-                  frameInfo = (__bridge NSDictionary *)CFArrayGetValueAtIndex(arr, 0);
+  void (^captureErrorHandler)(NSError *) = ^(NSError *error) {
+      rfbLog("Screen capture error: %s\n", [error.description UTF8String]);
+      dispatch_async(dispatch_get_main_queue(), ^{
+          NSAlert *alert = [[NSAlert alloc] init];
+          alert.alertStyle = NSAlertStyleCritical;
+          alert.messageText = @"Screen Recording permission required";
+          alert.informativeText = @"macVNC needs Screen Recording access to share your displays.";
+          [alert addButtonWithTitle:@"Open System Settings"];
+          [alert addButtonWithTitle:@"Quit"];
+          if ([alert runModal] == NSAlertFirstButtonReturn) {
+              [[NSWorkspace sharedWorkspace]
+                  openURL:[NSURL URLWithString:
+                           @"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"]];
           }
+          [NSApp terminate:nil];
+      });
+  };
 
-          /* Skip frames where ScreenCaptureKit reports no screen change.
-             SCFrameStatusIdle means the display contents are identical to
-             the previous frame — no copy or VNC update is needed. */
-          if ([frameInfo[SCStreamFrameInfoStatus] integerValue] == SCFrameStatusIdle)
-              return;
-
-          /*
-            Copy new frame to back buffer.
-          */
-          CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
-          if(!pixelBuffer)
-              return;
-
-          CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
-
-          /* Copy row-by-row to honour the pixel buffer's actual bytes-per-row
-             (which may include alignment padding after each row).  A single
-             bulk memcpy using dispW*dispH*4 would read past the end of the
-             buffer whenever bytesPerRow > dispW*4. */
-          {
-              const uint8_t *src      = CVPixelBufferGetBaseAddress(pixelBuffer);
-              uint8_t       *dst      = backBuffer;
-              size_t         srcStride = CVPixelBufferGetBytesPerRow(pixelBuffer);
-              size_t         dstStride = (size_t)dispW * 4;
-
-              if (srcStride == dstStride) {
-                  /* Fast path: no padding */
-                  memcpy(dst, src, (size_t)dispH * dstStride);
-              } else {
-                  for (int row = 0; row < dispH; row++) {
-                      memcpy(dst, src, dstStride);
-                      src += srcStride;
-                      dst += dstStride;
-                  }
-              }
+  screenCapturers = [[NSMutableArray alloc] initWithCapacity:selectedCount];
+  for (size_t i = 0; i < selectedCount; ++i) {
+      const MacVNCDisplayGeometry *geometry = &displayLayout.displays[i];
+      ScreenCapturer *capturer = [[ScreenCapturer alloc]
+          initWithDisplay:geometry->input.displayID
+          frameHandler:^(CMSampleBufferRef sampleBuffer) {
+              updateCompositeFrame(sampleBuffer, geometry);
           }
-
-          CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
-
-          /* Lock out client reads. */
-          iterator=rfbGetClientIterator(rfbScreen);
-          while((cl=rfbClientIteratorNext(iterator))) {
-              LOCK(cl->sendMutex);
-          }
-          rfbReleaseClientIterator(iterator);
-
-          /* Swap framebuffers. */
-          if (backBuffer == frameBufferOne) {
-              backBuffer = frameBufferTwo;
-              rfbScreen->frameBuffer = frameBufferOne;
-          } else {
-              backBuffer = frameBufferOne;
-              rfbScreen->frameBuffer = frameBufferTwo;
-          }
-
-          /*
-            Mark only the screen regions that actually changed so that VNC
-            clients receive minimal update rectangles.
-
-            On macOS 14+ SCKit provides the dirty rectangles directly in the
-            frame metadata — no pixel comparison needed.  On older systems we
-            fall back to our own tile-based comparison.
-          */
-          if (@available(macOS 14.0, *)) {
-              NSArray<NSValue *> *dirty = frameInfo[SCStreamFrameInfoDirtyRects];
-              NSNumber           *scaleN = frameInfo[SCStreamFrameInfoContentScale];
-              double              scale  = scaleN ? scaleN.doubleValue : displayScale;
-
-              if (dirty.count > 0) {
-                  for (NSValue *rv in dirty) {
-                      CGRect r = NSRectToCGRect(rv.rectValue);
-                      /* Dirty rects are in logical points; convert to physical pixels. */
-                      int x1 = MAX(0,     (int)floor(r.origin.x                   * scale));
-                      int y1 = MAX(0,     (int)floor(r.origin.y                   * scale));
-                      int x2 = MIN(dispW, (int)ceil((r.origin.x + r.size.width)  * scale));
-                      int y2 = MIN(dispH, (int)ceil((r.origin.y + r.size.height) * scale));
-                      if (x2 > x1 && y2 > y1)
-                          rfbMarkRectAsModified(rfbScreen, x1, y1, x2, y2);
-                  }
-              } else {
-                  /* No dirty-rect info — mark full frame (safe fallback). */
-                  rfbMarkRectAsModified(rfbScreen, 0, 0, dispW, dispH);
-              }
-          } else {
-              /* macOS 12–13: compare tile by tile. */
-              markChangedRegions(rfbScreen->frameBuffer, backBuffer, dispW, dispH);
-          }
-
-          /* Swapping framebuffers finished, reenable client reads. */
-          iterator=rfbGetClientIterator(rfbScreen);
-          while((cl=rfbClientIteratorNext(iterator))) {
-              UNLOCK(cl->sendMutex);
-          }
-          rfbReleaseClientIterator(iterator);
-
-      } errorHandler:^(NSError *error) {
-          rfbLog("Screen capture error: %s\n", [error.description UTF8String]);
-
-          /* Show a user-friendly alert on the main thread instead of crashing.
-             This keeps the app alive so the user can grant Screen Recording
-             permission in System Settings and relaunch without a crash loop. */
-          dispatch_async(dispatch_get_main_queue(), ^{
-              NSAlert *alert = [[NSAlert alloc] init];
-              alert.alertStyle      = NSAlertStyleCritical;
-              alert.messageText     = @"Screen Recording permission required";
-              alert.informativeText = @"macVNC needs Screen Recording access to share your display.\n\n"
-                                      @"Enable it in:\nSystem Settings → Privacy & Security → Screen Recording\n\n"
-                                      @"Then relaunch macVNC.";
-              [alert addButtonWithTitle:@"Open System Settings"];
-              [alert addButtonWithTitle:@"Quit"];
-
-              if ([alert runModal] == NSAlertFirstButtonReturn) {
-                  [[NSWorkspace sharedWorkspace]
-                      openURL:[NSURL URLWithString:
-                               @"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"]];
-              }
-              [NSApp terminate:nil];
-          });
-      }];
-  [capturer startCapture];
+          errorHandler:captureErrorHandler];
+      [screenCapturers addObject:capturer];
+      [capturer release];
+  }
 
   rfbInitServer(rfbScreen);
 
@@ -904,20 +821,72 @@ ScreenInit(int port, const char *password)
 }
 
 
+static void
+setDisplayCapturesRunning(BOOL running)
+{
+    for (ScreenCapturer *capturer in screenCapturers) {
+        if (running)
+            [capturer startCapture];
+        else
+            [capturer stopCapture];
+    }
+}
+
+static void
+stopDisplayCapturesAndWait(void)
+{
+    for (ScreenCapturer *capturer in screenCapturers)
+        [capturer stopCaptureAndWait];
+}
+
+static void
+displayHook(rfbClientPtr cl)
+{
+    pthread_mutex_lock(&clientLifecycleMutex);
+    MacVNCClientState *state = cl->clientData;
+    if (state && !state->captureCounted) {
+        state->captureCounted = TRUE;
+        int previous = atomic_fetch_add(&vncConnectedClients, 1);
+        if (previous == 0) {
+            setDisplayCapturesRunning(YES);
+            rfbLog("First authenticated client requested a frame; starting %lu display captures\n",
+                   (unsigned long)screenCapturers.count);
+        }
+    }
+    pthread_mutex_unlock(&clientLifecycleMutex);
+}
+
 void clientGone(rfbClientPtr cl)
 {
-    vncConnectedClients--;
-    rfbLog("Client %s disconnected (%d remaining)\n", cl->host, (int)vncConnectedClients);
+    int remaining = atomic_load(&vncConnectedClients);
+    pthread_mutex_lock(&clientLifecycleMutex);
+    MacVNCClientState *state = cl->clientData;
+    if (state && state->captureCounted) {
+        remaining = atomic_fetch_sub(&vncConnectedClients, 1) - 1;
+        if (remaining <= 0) {
+            remaining = 0;
+            atomic_store(&vncConnectedClients, 0);
+            setDisplayCapturesRunning(NO);
+            rfbLog("Last authenticated client disconnected; %lu display captures stopped\n",
+                   (unsigned long)screenCapturers.count);
+        }
+    }
+    cl->clientData = NULL;
+    free(state);
+    pthread_mutex_unlock(&clientLifecycleMutex);
+    rfbLog("Client %s disconnected (%d authenticated remaining)\n", cl->host, remaining);
 }
 
 enum rfbNewClientAction newClient(rfbClientPtr cl)
 {
-  rfbLog("New client connected from %s\n", cl->host);
-  vncConnectedClients++;
+  MacVNCClientState *state = calloc(1, sizeof(*state));
+  if (!state)
+      return RFB_CLIENT_REFUSE;
+  rfbLog("New client connected from %s; capture waits for authenticated frame request\n", cl->host);
+  cl->clientData = state;
   cl->clientGoneHook = clientGone;
   cl->viewOnly = viewOnly;
-
-  return(RFB_CLIENT_ACCEPT);
+  return RFB_CLIENT_ACCEPT;
 }
 
 
@@ -955,15 +924,8 @@ vncServerStart(int port, const char *password)
         return FALSE;
 
     rfbScreen->newClientHook = newClient;
+    rfbScreen->displayHook = displayHook;
     rfbRunEventLoop(rfbScreen, -1, TRUE);
-
-    /* Send the real macOS arrow cursor as a RichCursor so clients display a
-       proper arrow shape instead of the generic fallback dot.
-       NSCursor / NSImage are AppKit and must be accessed on the main thread. */
-    rfbScreenInfoPtr screen = rfbScreen;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        sendMacOSCursor(screen, [NSCursor arrowCursor]);
-    });
 
     return TRUE;
 }
@@ -971,8 +933,17 @@ vncServerStart(int port, const char *password)
 void
 vncServerStop(void)
 {
-    if (rfbScreen) {
+    /* LibVNCServer >=0.9.15 reverted detached client threads. This call stops
+       accepting clients and joins every client/listener thread before lifecycle
+       objects they can access are released. */
+    if (rfbScreen)
         rfbShutdownServer(rfbScreen, TRUE);
+
+    stopDisplayCapturesAndWait();
+    [screenCapturers release];
+    screenCapturers = nil;
+    atomic_store(&vncConnectedClients, 0);
+    if (rfbScreen) {
         rfbScreenCleanup(rfbScreen);
         rfbScreen = NULL;
     }
@@ -982,7 +953,6 @@ vncServerStop(void)
         eventSource = NULL;
     }
     free(frameBufferOne); frameBufferOne = NULL;
-    free(frameBufferTwo); frameBufferTwo = NULL;
 }
 
 int
