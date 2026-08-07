@@ -15,7 +15,9 @@ endif(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
 #
 # Dependencies
 #
-find_package(LibVNCServer REQUIRED)
+# 0.9.15 reverted detached client threads; rfbShutdownServer(..., TRUE)
+# synchronously joins client/listener threads before rfbScreen cleanup.
+find_package(LibVNCServer 0.9.15 REQUIRED)
 find_package(Threads REQUIRED)
 find_library(CARBON_LIBRARY         Carbon           REQUIRED)
 find_library(IOKIT_LIBRARY          IOKit            REQUIRED)
@@ -32,6 +34,14 @@ find_library(SERVICE_MANAGEMENT     ServiceManagement REQUIRED)
 set(SOURCE_FILES
     src/mac.h
     src/mac.m
+    src/RFBKeySym.h
+    src/RFBKeySym.c
+    src/DisplayLayout.h
+    src/DisplayLayout.c
+    src/CompositeFramebuffer.h
+    src/CompositeFramebuffer.c
+    src/PointerState.h
+    src/PointerState.c
     src/ScreenCapturer.h
     src/ScreenCapturer.m
     src/AppDelegate.h
@@ -95,4 +105,27 @@ if(APPLE)
         COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>"
         COMMENT "Ad-hoc code-signing macVNC.app (needed for SMAppService / Start at Login)"
     )
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(test_keysym tests/test_keysym.c src/RFBKeySym.c)
+    target_include_directories(test_keysym PRIVATE src)
+    add_test(NAME keysym_mapping COMMAND test_keysym)
+
+    add_executable(test_display_layout tests/test_display_layout.c src/DisplayLayout.c)
+    target_include_directories(test_display_layout PRIVATE src)
+    add_test(NAME display_layout COMMAND test_display_layout)
+
+    add_executable(test_compositor tests/test_compositor.c src/CompositeFramebuffer.c)
+    target_include_directories(test_compositor PRIVATE src)
+    add_test(NAME compositor COMMAND test_compositor)
+
+    add_executable(test_pointer_state tests/test_pointer_state.c src/PointerState.c)
+    target_include_directories(test_pointer_state PRIVATE src)
+    add_test(NAME pointer_state COMMAND test_pointer_state)
+
+    foreach(test_target test_keysym test_display_layout test_compositor test_pointer_state)
+        target_compile_options(${test_target} PRIVATE -UNDEBUG)
+    endforeach()
 endif()
