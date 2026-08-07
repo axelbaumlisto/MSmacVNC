@@ -69,7 +69,12 @@ static MacVNCKeyboardModifierState keyboardModifierState;
 
 typedef struct {
     rfbBool captureCounted;
+    rfbBool readinessSatisfied;
 } MacVNCClientState;
+
+static rfbBool macVNCPasswordCheck(rfbClientPtr client,
+                                   const char *encryptedPassword,
+                                   int length);
 
 /* The server's private event source */
 CGEventSourceRef eventSource;
@@ -782,7 +787,10 @@ ScreenInit(int port, const char *password)
       if (passwdList[0]) { free(passwdList[0]); passwdList[0] = NULL; }
       passwdList[0] = strdup(password);
       rfbScreen->authPasswdData = passwdList;
-      rfbScreen->passwordCheck  = rfbCheckPasswordByList;
+      rfbScreen->passwordCheck = macVNCPasswordCheck;
+  } else {
+      rfbErr("A non-empty VNC password is required\n");
+      return FALSE;
   }
 
   rfbScreen->serverFormat.redShift   = bitsPerSample * 2;
@@ -868,21 +876,65 @@ stopDisplayCapturesAndWait(void)
         [capturer stopCaptureAndWait];
 }
 
+static BOOL
+prepareAuthenticatedClient(rfbClientPtr cl)
+{
+    MacVNCClientState *state = NULL;
+    pthread_mutex_lock(&clientLifecycleMutex);
+    state = cl->clientData;
+    if (!state) {
+        pthread_mutex_unlock(&clientLifecycleMutex);
+        return NO;
+    }
+    if (!state->captureCounted) {
+        state->captureCounted = TRUE;
+        int previous = atomic_fetch_add(&vncConnectedClients, 1);
+        if (previous == 0) {
+            setDisplayCapturesRunning(YES);
+            rfbLog("First client password accepted; starting %lu display captures\n",
+                   (unsigned long)screenCapturers.count);
+        }
+    }
+    BOOL alreadyReady = state->readinessSatisfied;
+    pthread_mutex_unlock(&clientLifecycleMutex);
+
+    BOOL allReady = alreadyReady;
+    if (!alreadyReady) {
+        allReady = YES;
+        for (ScreenCapturer *capturer in screenCapturers) {
+            if (![capturer waitForFirstFrameWithTimeout:3.0]) {
+                allReady = NO;
+                rfbLog("Timed out waiting for a display's first captured frame\n");
+            }
+        }
+        pthread_mutex_lock(&clientLifecycleMutex);
+        if (cl->clientData == state)
+            state->readinessSatisfied = allReady;
+        pthread_mutex_unlock(&clientLifecycleMutex);
+    }
+    return allReady;
+}
+
+static rfbBool
+macVNCPasswordCheck(rfbClientPtr client,
+                    const char *encryptedPassword,
+                    int length)
+{
+    if (!rfbCheckPasswordByList(client, encryptedPassword, length))
+        return FALSE;
+    prepareAuthenticatedClient(client);
+    return TRUE;
+}
+
 static void
 displayHook(rfbClientPtr cl)
 {
     pthread_mutex_lock(&clientLifecycleMutex);
     MacVNCClientState *state = cl->clientData;
-    if (state && !state->captureCounted) {
-        state->captureCounted = TRUE;
-        int previous = atomic_fetch_add(&vncConnectedClients, 1);
-        if (previous == 0) {
-            setDisplayCapturesRunning(YES);
-            rfbLog("First authenticated client requested a frame; starting %lu display captures\n",
-                   (unsigned long)screenCapturers.count);
-        }
-    }
+    BOOL ready = state && state->readinessSatisfied;
     pthread_mutex_unlock(&clientLifecycleMutex);
+    if (!ready)
+        rfbLog("Sending framebuffer update before every display became ready\n");
 }
 
 void clientGone(rfbClientPtr cl)

@@ -13,7 +13,7 @@ This branch adds a single composite RFB desktop for all active displays, on-dema
 - Black framebuffer gaps where no physical display exists.
 - Per-display capture streams feeding one serialized composite framebuffer.
 - 64×64 dirty-tile updates through LibVNCServer, comparing only the advertised 24-bit BGR channels and normalizing the unused alpha byte.
-- Capture starts only after the first authenticated framebuffer request and stops after the last authenticated client disconnects.
+- Capture starts after successful VNC password validation, waits for the first frame of every selected display before completing authentication, and stops after the last authenticated client disconnects.
 - Near-zero idle CPU while the listener remains available.
 - Mouse mapping across accepted composite display layouts.
 - Correct legacy X11 Cyrillic and RFB Unicode keyboard input, including `ё`/`Ё`.
@@ -134,7 +134,6 @@ The implementation separates layout, pixel composition, capture lifecycle, input
 - Display topology is read at server startup. Hot-plugging, mirroring, or rearranging displays requires a restart.
 - Mixed-scale adjacent layouts whose native pixel rectangles overlap after logical-origin normalization are rejected rather than composited incorrectly.
 - Composite width is padded with zero-filled black columns to a multiple of four for strict VNC viewer compatibility.
-- The first automated framebuffer request can race asynchronous ScreenCaptureKit startup. Interactive clients normally hide this with authentication time; automated clients should wait for capture readiness before the first full request.
 - The CLI process does not survive reboot unless a supervised service is configured.
 
 ## License
