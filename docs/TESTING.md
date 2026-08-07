@@ -12,7 +12,7 @@ Registered tests:
 
 - `keysym_mapping`: ASCII, RFB Unicode, legacy X11 Cyrillic lower/upper, `ё`/`Ё`, unsupported non-BMP input.
 - `display_layout`: negative origins, vertically offset displays, seams, gaps, order independence, overlap rejection, RFB size limits, pointer mapping.
-- `compositor`: BGRA placement, padded source rows, black gaps, unchanged frames, partial dirty tiles, isolation of unrelated pixels.
+- `compositor`: BGRA placement, padded source rows, alpha-only noise suppression, black gaps, unchanged frames, partial dirty tiles, isolation of unrelated pixels.
 - `pointer_state`: valid positions, gap suppression, drag into gap, and release at the last valid position.
 
 ### Fail-closed configuration test
