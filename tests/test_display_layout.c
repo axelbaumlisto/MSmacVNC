@@ -13,7 +13,7 @@ int main(void)
     };
     MacVNCDisplayLayout layout;
     assert(macVNCBuildDisplayLayout(current, 2, &layout));
-    assert(layout.width == 5550);
+    assert(layout.width == 5552);
     assert(layout.height == 2715);
     assert(layout.displays[0].framebufferX == 1710);
     assert(layout.displays[0].framebufferY == 0);

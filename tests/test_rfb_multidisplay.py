@@ -47,21 +47,24 @@ def main():
         client = lifecycle.RFBClient(args.listen, args.port, password)
         client.trigger_capture()
         time.sleep(2)
-        assert (client.width, client.height) == (5550, 2715)
+        assert (client.width, client.height) == (5552, 2715)
         frame = client.full_frame()
 
         external = nonblack_ratio(frame, client.width, 1710, 0, 3840, 2160)
         internal = nonblack_ratio(frame, client.width, 0, 1603, 1710, 1112)
         upper_gap = nonblack_ratio(frame, client.width, 0, 0, 1710, 1500)
         lower_gap = nonblack_ratio(frame, client.width, 1710, 2160, 3840, 555)
+        right_padding = nonblack_ratio(frame, client.width, 5550, 0, 2, 2715, step=1)
         assert external > 0.05, f"external display black: {external:.3f}"
         assert internal > 0.05, f"internal display black: {internal:.3f}"
         assert upper_gap == 0.0, f"upper gap contaminated: {upper_gap:.6f}"
         assert lower_gap == 0.0, f"lower gap contaminated: {lower_gap:.6f}"
+        assert right_padding == 0.0, f"right padding contaminated: {right_padding:.6f}"
         print(
             "PASS multidisplay "
             f"desktop={client.width}x{client.height} external={external:.3f} "
-            f"internal={internal:.3f} upper_gap={upper_gap:.3f} lower_gap={lower_gap:.3f}"
+            f"internal={internal:.3f} upper_gap={upper_gap:.3f} "
+            f"lower_gap={lower_gap:.3f} right_padding={right_padding:.3f}"
         )
     finally:
         if client:

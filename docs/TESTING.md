@@ -37,7 +37,7 @@ python3 tests/test_lifecycle.py \
   --listen "<private-overlay-ip>" \
   --port 5916 \
   --display -2 \
-  --expected-width 5550 \
+  --expected-width 5552 \
   --expected-height 2715
 ```
 
@@ -75,7 +75,7 @@ python3 tests/test_rfb_multidisplay.py \
 
 For the documented two-display fixture, it verifies:
 
-- one `ServerInit` reports `5550×2715`;
+- one `ServerInit` reports aligned `5552×2715`;
 - external display region is non-black;
 - internal display region is non-black;
 - upper-left and lower-right physical gaps are exactly black;

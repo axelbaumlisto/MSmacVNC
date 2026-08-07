@@ -91,10 +91,11 @@ becomes:
 ```text
 internal framebuffer rect: (0,1603)       1710×1112
 external framebuffer rect: (1710,0)       3840×2160
-composite framebuffer:                     5550×2715
+logical display union:                      5550×2715
+RFB framebuffer (4-pixel aligned):          5552×2715
 ```
 
-The uncovered upper-left and lower-right regions remain zero-filled black.
+The uncovered upper-left/lower-right regions and the two-column right alignment padding remain zero-filled black.
 
 ## Capture lifecycle
 
