@@ -31,8 +31,9 @@ Pure C pixel module.
 
 - Accepts one BGRA display frame at a time.
 - Honors source row padding.
-- Compares 64×64 tiles against the composite canvas.
-- Copies only changed tiles.
+- Compares 64×64 tiles against the composite canvas using only BGR channels advertised by the 24-bit RFB depth.
+- Ignores ScreenCaptureKit alpha-only noise and normalizes the unused alpha byte to zero.
+- Copies only color-changed tiles.
 - Reports dirty rectangles already offset into composite RFB coordinates.
 - Never modifies pixels belonging to another display or a black gap.
 
