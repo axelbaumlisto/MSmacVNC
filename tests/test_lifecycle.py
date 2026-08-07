@@ -182,7 +182,7 @@ def main():
             sock.close()
         time.sleep(1)
         preauth_log = log_path.read_text(errors="replace")
-        assert "First authenticated client" not in preauth_log
+        assert "First client password accepted" not in preauth_log
 
         first = RFBClient(args.listen, args.port, password)
         clients.append(first)
@@ -201,7 +201,7 @@ def main():
         second.trigger_capture()
         time.sleep(0.5)
         before_disconnect_log = log_path.read_text(errors="replace")
-        assert before_disconnect_log.count("First authenticated client requested a frame; starting") == 1, (
+        assert before_disconnect_log.count("First client password accepted; starting") == 1, (
             "second client started duplicate capture streams"
         )
         first.close()
@@ -228,7 +228,7 @@ def main():
         assert idle_after_churn < 10, f"rapid reconnect left capture running: {idle_after_churn:.1f}%"
 
         log_text = log_path.read_text(errors="replace")
-        assert "First authenticated client requested a frame; starting" in log_text
+        assert "First client password accepted; starting" in log_text
         assert "Last authenticated client disconnected;" in log_text
 
         print(

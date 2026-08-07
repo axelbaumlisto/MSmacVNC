@@ -46,8 +46,8 @@ Acceptance gates:
 
 1. Listener idle CPU is below 10%.
 2. Pre-auth TCP/RFB churn starts no capture.
-3. First authenticated framebuffer request starts capture and receives a non-black framebuffer.
-4. Second authenticated client's framebuffer request does not create duplicate captures.
+3. First successful password check starts capture and waits for a non-black first framebuffer.
+4. Second authenticated client reuses capture streams without duplicate starts.
 5. Disconnecting the first client keeps capture active for the second.
 6. Disconnecting the last authenticated client stops capture and returns CPU to idle.
 7. Rapid authenticated start/stop churn cannot leave capture running.
@@ -63,6 +63,17 @@ python3 tests/test_active_shutdown.py \
 ```
 
 This keeps both display captures active, sends a Cocoa terminate request to the exact PID, and requires client shutdown, synchronous ScreenCaptureKit quiescence, and process exit code 0.
+
+### Cold first-frame readiness test
+
+```bash
+python3 tests/test_first_frame.py \
+  --app "$PWD/build-arm64/macVNC.app/Contents/MacOS/macVNC" \
+  --password-file "$HOME/.config/macvnc/password" \
+  --attempts 10
+```
+
+Every fresh process must return real content on its first full framebuffer request. The successful password check starts capture and delays SecurityResult/ServerInit completion until every selected display has produced its first composited frame.
 
 ### Composite RFB test
 
