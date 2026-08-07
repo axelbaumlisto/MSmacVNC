@@ -45,6 +45,9 @@ macVNCBuildDisplayLayout(const MacVNCDisplayInput *inputs,
         if (bottom > layout->height) layout->height = bottom;
     }
 
+    /* Some VNC viewers require a framebuffer width divisible by four. */
+    layout->width = (layout->width + 3) & ~3;
+
     if (layout->width <= 0 || layout->height <= 0 ||
         layout->width > UINT16_MAX || layout->height > UINT16_MAX)
         return false;

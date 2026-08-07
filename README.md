@@ -132,7 +132,7 @@ The implementation separates layout, pixel composition, capture lifecycle, input
 
 - Display topology is read at server startup. Hot-plugging, mirroring, or rearranging displays requires a restart.
 - Mixed-scale adjacent layouts whose native pixel rectangles overlap after logical-origin normalization are rejected rather than composited incorrectly.
-- A composite width that is not divisible by four may trigger a LibVNCServer compatibility warning. Tested clients should be verified; padding can be added if a client requires it.
+- Composite width is padded with zero-filled black columns to a multiple of four for strict VNC viewer compatibility.
 - The first automated framebuffer request can race asynchronous ScreenCaptureKit startup. Interactive clients normally hide this with authentication time; automated clients should wait for capture readiness before the first full request.
 - The CLI process does not survive reboot unless a supervised service is configured.
 
