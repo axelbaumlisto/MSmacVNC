@@ -44,6 +44,7 @@
 #import "DisplayLayout.h"
 #import "CompositeFramebuffer.h"
 #import "PointerState.h"
+#import "KeyboardModifierState.h"
 #import "mac.h"
 #import <AppKit/AppKit.h>
 
@@ -61,8 +62,10 @@ static MacVNCDisplayLayout displayLayout;
 static NSMutableArray<ScreenCapturer *> *screenCapturers;
 static pthread_mutex_t compositorMutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t pointerMutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t keyboardMutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t clientLifecycleMutex = PTHREAD_MUTEX_INITIALIZER;
 static MacVNCPointerState pointerState;
+static MacVNCKeyboardModifierState keyboardModifierState;
 
 typedef struct {
     rfbBool captureCounted;
@@ -171,10 +174,6 @@ static int specialKeyMap[] = {
     XK_Menu,              50,      /* Menu (-> International) */
 #endif
 };
-
-/* Global shifting modifier states */
-rfbBool isShiftDown;
-rfbBool isAltGrDown;
 
 /* Tile size (pixels) for dirty-region comparison */
 #define TILE_SIZE 64
@@ -336,6 +335,36 @@ dimmingShutdown(void)
 }
 
 
+static CGEventFlags
+currentKeyboardFlags(void)
+{
+    uint32_t mask = macVNCModifierMask(&keyboardModifierState);
+    CGEventFlags flags = 0;
+    if (mask & MACVNC_MOD_SHIFT) flags |= kCGEventFlagMaskShift;
+    if (mask & MACVNC_MOD_CONTROL) flags |= kCGEventFlagMaskControl;
+    if (mask & MACVNC_MOD_OPTION) flags |= kCGEventFlagMaskAlternate;
+    if (mask & MACVNC_MOD_COMMAND) flags |= kCGEventFlagMaskCommand;
+    if (mask & MACVNC_MOD_FN) flags |= kCGEventFlagMaskSecondaryFn;
+    return flags;
+}
+
+static void
+resetKeyboardModifiers(void)
+{
+    static const CGKeyCode modifierKeyCodes[] = {56, 59, 58, 55, 61, 63};
+    pthread_mutex_lock(&keyboardMutex);
+    macVNCClearModifiers(&keyboardModifierState);
+    for (size_t i = 0; i < sizeof(modifierKeyCodes) / sizeof(modifierKeyCodes[0]); ++i) {
+        CGEventRef keyUp = CGEventCreateKeyboardEvent(eventSource, modifierKeyCodes[i], false);
+        if (keyUp) {
+            CGEventSetFlags(keyUp, 0);
+            CGEventPost(kCGSessionEventTap, keyUp);
+            CFRelease(keyUp);
+        }
+    }
+    pthread_mutex_unlock(&keyboardMutex);
+}
+
 /*
   Synthesize a keyboard event. This is not called on the main thread due to rfbRunEventLoop(..,..,TRUE), but it works.
   We first look up the incoming keysym in the keymap for special keys (and save state of the shifting modifiers).
@@ -346,69 +375,68 @@ dimmingShutdown(void)
 void
 KbdAddEvent(rfbBool down, rfbKeySym keySym, struct _rfbClientRec* cl)
 {
-    int i;
-    CGKeyCode keyCode = -1;
-    CGEventRef keyboardEvent;
-    int specialKeyFound = 0;
-
+    (void)cl;
     undim();
+    pthread_mutex_lock(&keyboardMutex);
 
-    /* look for special key */
-    for (i = 0; i < (sizeof(specialKeyMap) / sizeof(int)); i += 2) {
-        if (specialKeyMap[i] == keySym) {
-            keyCode = specialKeyMap[i+1];
-            specialKeyFound = 1;
+    CGKeyCode keyCode = (CGKeyCode)-1;
+    for (size_t i = 0; i < sizeof(specialKeyMap) / sizeof(specialKeyMap[0]); i += 2) {
+        if ((rfbKeySym)specialKeyMap[i] == keySym) {
+            keyCode = (CGKeyCode)specialKeyMap[i + 1];
             break;
         }
     }
 
-    if(specialKeyFound) {
-	/* keycode for special key found */
-	keyboardEvent = CGEventCreateKeyboardEvent(eventSource, keyCode, down);
-	/* save state of shifting modifiers */
-	if(keySym == XK_ISO_Level3_Shift)
-	    isAltGrDown = down;
-	if(keySym == XK_Shift_L || keySym == XK_Shift_R)
-	    isShiftDown = down;
+    bool isModifier = macVNCUpdateModifier(&keyboardModifierState, keySym, down);
+    bool autoReleaseFn = macVNCShouldAutoReleaseFn(&keyboardModifierState, keySym, down);
+    CGEventRef keyboardEvent = NULL;
 
+    if (keyCode != (CGKeyCode)-1) {
+        keyboardEvent = CGEventCreateKeyboardEvent(eventSource, keyCode, down);
     } else {
-	/* look for char key */
-	size_t keyCodeFromDict;
         UniChar unicodeChar = macVNCUnicodeForRFBKeySym(keySym);
-        if (!unicodeChar)
+        if (!unicodeChar) {
+            pthread_mutex_unlock(&keyboardMutex);
             return;
-	CFStringRef charStr = CFStringCreateWithCharacters(kCFAllocatorDefault, &unicodeChar, 1);
-	CFMutableDictionaryRef keyMap = charKeyMap;
-	if(isShiftDown && !isAltGrDown)
-	    keyMap = charShiftKeyMap;
-	if(!isShiftDown && isAltGrDown)
-	    keyMap = charAltGrKeyMap;
-	if(isShiftDown && isAltGrDown)
-	    keyMap = charShiftAltGrKeyMap;
-
-	if (CFDictionaryGetValueIfPresent(keyMap, charStr, (const void **)&keyCodeFromDict)) {
-	    /* keycode for ASCII key found */
-	    keyboardEvent = CGEventCreateKeyboardEvent(eventSource, keyCodeFromDict, down);
-	} else {
-	    /* Last resort: inject the mapped Unicode character directly. */
-	    keyboardEvent = CGEventCreateKeyboardEvent(eventSource, 0, down);
-	    CGEventKeyboardSetUnicodeString(keyboardEvent, 1, &unicodeChar);
         }
-
-	CFRelease(charStr);
+        size_t keyCodeFromDictionary;
+        bool shift = (macVNCModifierMask(&keyboardModifierState) & MACVNC_MOD_SHIFT) != 0;
+        bool level3 = keyboardModifierState.level3;
+        CFMutableDictionaryRef keyMap = charKeyMap;
+        if (shift && !level3) keyMap = charShiftKeyMap;
+        if (!shift && level3) keyMap = charAltGrKeyMap;
+        if (shift && level3) keyMap = charShiftAltGrKeyMap;
+        CFStringRef character = CFStringCreateWithCharacters(kCFAllocatorDefault, &unicodeChar, 1);
+        if (CFDictionaryGetValueIfPresent(keyMap, character,
+                                          (const void **)&keyCodeFromDictionary)) {
+            keyboardEvent = CGEventCreateKeyboardEvent(
+                eventSource, (CGKeyCode)keyCodeFromDictionary, down);
+        } else {
+            keyboardEvent = CGEventCreateKeyboardEvent(eventSource, 0, down);
+            if (keyboardEvent)
+                CGEventKeyboardSetUnicodeString(keyboardEvent, 1, &unicodeChar);
+        }
+        CFRelease(character);
     }
 
-    /* Set the Shift modifier explicitly as MacOS sometimes gets internal state wrong and Shift stuck.
-       Only set/clear the Shift bit; leave all other modifier bits untouched. */
-    CGEventFlags kbdFlags = CGEventGetFlags(keyboardEvent);
-    if (isShiftDown)
-        kbdFlags |= kCGEventFlagMaskShift;
-    else
-        kbdFlags &= ~kCGEventFlagMaskShift;
-    CGEventSetFlags(keyboardEvent, kbdFlags);
+    if (keyboardEvent) {
+        CGEventSetFlags(keyboardEvent, currentKeyboardFlags());
+        CGEventPost(kCGSessionEventTap, keyboardEvent);
+        CFRelease(keyboardEvent);
+    }
 
-    CGEventPost(kCGSessionEventTap, keyboardEvent);
-    CFRelease(keyboardEvent);
+    /* Mobile viewers can leave Fn latched. Treat it as a one-key modifier. */
+    if (!isModifier && autoReleaseFn) {
+        macVNCUpdateModifier(&keyboardModifierState, 0x1008ff2bU, false);
+        CGEventRef fnUp = CGEventCreateKeyboardEvent(eventSource, 63, false);
+        if (fnUp) {
+            CGEventSetFlags(fnUp, currentKeyboardFlags());
+            CGEventPost(kCGSessionEventTap, fnUp);
+            CFRelease(fnUp);
+        }
+        rfbLog("Auto-released latched Fn modifier after key event\n");
+    }
+    pthread_mutex_unlock(&keyboardMutex);
 }
 
 /* Synthesize a mouse event. This is not called on the main thread due to rfbRunEventLoop(..,..,TRUE), but it works. */
@@ -717,6 +745,7 @@ ScreenInit(int port, const char *password)
   }
   printf("Composite framebuffer: %dx%d\n", displayLayout.width, displayLayout.height);
   memset(&pointerState, 0, sizeof(pointerState));
+  macVNCClearModifiers(&keyboardModifierState);
 
 
   rfbScreen = rfbGetScreen(&dummyArgc, dummyArgv,
@@ -867,7 +896,8 @@ void clientGone(rfbClientPtr cl)
             remaining = 0;
             atomic_store(&vncConnectedClients, 0);
             setDisplayCapturesRunning(NO);
-            rfbLog("Last authenticated client disconnected; %lu display captures stopped\n",
+            resetKeyboardModifiers();
+            rfbLog("Last authenticated client disconnected; %lu display captures stopped and modifiers reset\n",
                    (unsigned long)screenCapturers.count);
         }
     }
