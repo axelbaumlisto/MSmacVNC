@@ -112,15 +112,17 @@ The uncovered upper-left/lower-right regions and the two-column right alignment 
 
 ```text
 0 authenticated clients
-  └─ first post-auth frame request → start every display capturer
+  └─ successful password check → start every display capturer
+                              → wait for each first composited frame
+                              → complete VNC authentication
 N authenticated clients
-  └─ additional frame request      → no additional capture streams
+  └─ additional password check → reuse ready capture streams
 1 authenticated client
-  └─ last disconnect               → stop every display capturer
-0 authenticated clients            → listener remains, capture CPU returns near zero
+  └─ last disconnect           → stop every display capturer
+0 authenticated clients        → listener remains, capture CPU returns near zero
 ```
 
-A per-client state is counted only from LibVNCServer's post-auth `displayHook`; unauthenticated TCP/RFB clients cannot start capture. Client counting is atomic. Each capturer independently guards asynchronous ScreenCaptureKit discovery, start, stop, and output callbacks with its generation token.
+A wrapper around LibVNCServer's password check starts capture only after the password has been validated, then blocks authentication completion on per-display first-frame readiness conditions. Invalid and pre-auth clients cannot start capture. Client counting is atomic. Each capturer independently guards asynchronous ScreenCaptureKit discovery, start, stop, output, and readiness callbacks with its generation token.
 
 ## Concurrency
 

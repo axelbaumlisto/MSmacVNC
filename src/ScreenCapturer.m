@@ -1,4 +1,7 @@
 #import "ScreenCapturer.h"
+#include <errno.h>
+#include <math.h>
+#include <time.h>
 
 @interface ScreenCapturer ()
 
@@ -29,6 +32,10 @@
         _operationGroup = dispatch_group_create();
         _captureRequested = NO;
         _generation = 0;
+        pthread_mutex_init(&_readinessMutex, NULL);
+        pthread_cond_init(&_readinessCondition, NULL);
+        _firstFrameReady = NO;
+        _readinessGeneration = 0;
     }
     return self;
 }
@@ -39,6 +46,11 @@
             return;
         self.captureRequested = YES;
         NSUInteger generation = ++self.generation;
+        pthread_mutex_lock(&self->_readinessMutex);
+        self->_readinessGeneration = generation;
+        self->_firstFrameReady = NO;
+        pthread_cond_broadcast(&self->_readinessCondition);
+        pthread_mutex_unlock(&self->_readinessMutex);
         dispatch_group_enter(self.operationGroup);
 
         [SCShareableContent getShareableContentWithCompletionHandler:^(SCShareableContent *content, NSError *error) {
@@ -122,6 +134,11 @@
     dispatch_sync(self.stateQueue, ^{
         self.captureRequested = NO;
         ++self.generation;
+        pthread_mutex_lock(&self->_readinessMutex);
+        self->_readinessGeneration = self.generation;
+        self->_firstFrameReady = NO;
+        pthread_cond_broadcast(&self->_readinessCondition);
+        pthread_mutex_unlock(&self->_readinessMutex);
         stream = [self.stream retain];
         self.stream = nil;
     });
@@ -160,14 +177,49 @@
     CFRetain(sampleBuffer);
     dispatch_group_enter(self.operationGroup);
     dispatch_async(self.stateQueue, ^{
-        if (self.captureRequested && self.stream == stream)
+        if (self.captureRequested && self.stream == stream) {
             self.frameHandler(sampleBuffer);
+            pthread_mutex_lock(&self->_readinessMutex);
+            self->_readinessGeneration = self.generation;
+            self->_firstFrameReady = YES;
+            pthread_cond_broadcast(&self->_readinessCondition);
+            pthread_mutex_unlock(&self->_readinessMutex);
+        }
         CFRelease(sampleBuffer);
         dispatch_group_leave(self.operationGroup);
     });
 }
 
+- (BOOL)waitForFirstFrameWithTimeout:(NSTimeInterval)timeout {
+    __block NSUInteger generation = 0;
+    __block BOOL requested = NO;
+    dispatch_sync(self.stateQueue, ^{
+        generation = self.generation;
+        requested = self.captureRequested;
+    });
+    if (!requested)
+        return NO;
+
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    long nanoseconds = (long)((timeout - floor(timeout)) * NSEC_PER_SEC);
+    deadline.tv_sec += (time_t)floor(timeout) + (deadline.tv_nsec + nanoseconds) / NSEC_PER_SEC;
+    deadline.tv_nsec = (deadline.tv_nsec + nanoseconds) % NSEC_PER_SEC;
+
+    pthread_mutex_lock(&_readinessMutex);
+    while (_readinessGeneration == generation && !_firstFrameReady) {
+        int result = pthread_cond_timedwait(&_readinessCondition, &_readinessMutex, &deadline);
+        if (result == ETIMEDOUT)
+            break;
+    }
+    BOOL ready = _readinessGeneration == generation && _firstFrameReady;
+    pthread_mutex_unlock(&_readinessMutex);
+    return ready;
+}
+
 - (void)dealloc {
+    pthread_cond_destroy(&_readinessCondition);
+    pthread_mutex_destroy(&_readinessMutex);
     [_frameHandler release];
     [_errorHandler release];
     dispatch_release(_operationGroup);
