@@ -1,5 +1,10 @@
 /compile_commands.json
-/build
+/build/
+/build-*/
+/bin/
+*.log
 *~
-/.cache
+/.cache/
 /.DS_Store
+__pycache__/
+*.pyc

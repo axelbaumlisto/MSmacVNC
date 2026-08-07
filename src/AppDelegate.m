@@ -2,6 +2,11 @@
 #import "mac.h"
 
 #import <ServiceManagement/ServiceManagement.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* Default TCP port for VNC */
 static const int kDefaultPort = 5900;
@@ -15,6 +20,81 @@ static NSString * const kKeyDisplay  = @"displayNumber";
 /* Bundle identifier used for the LaunchAgent plist (must match Info.plist) */
 static NSString * const kBundleID = @"net.christianbeier.macVNC";
 
+static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
+{
+    const char *fileSystemPath = path.fileSystemRepresentation;
+    int fd = open(fileSystemPath, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) {
+        if (errorMessage)
+            *errorMessage = [NSString stringWithFormat:@"Cannot open MACVNC_PASSWORD_FILE %@: %s",
+                             path, strerror(errno)];
+        return nil;
+    }
+
+    struct stat info;
+    if (fstat(fd, &info) != 0) {
+        if (errorMessage)
+            *errorMessage = [NSString stringWithFormat:@"Cannot inspect MACVNC_PASSWORD_FILE %@: %s",
+                             path, strerror(errno)];
+        close(fd);
+        return nil;
+    }
+    if (!S_ISREG(info.st_mode)) {
+        if (errorMessage)
+            *errorMessage = [NSString stringWithFormat:@"MACVNC_PASSWORD_FILE %@ must be a regular file", path];
+        close(fd);
+        return nil;
+    }
+    if (info.st_uid != getuid()) {
+        if (errorMessage)
+            *errorMessage = [NSString stringWithFormat:@"MACVNC_PASSWORD_FILE %@ is not owned by uid %u",
+                             path, getuid()];
+        close(fd);
+        return nil;
+    }
+    if ((info.st_mode & 0077) != 0) {
+        if (errorMessage)
+            *errorMessage = [NSString stringWithFormat:
+                @"MACVNC_PASSWORD_FILE %@ must not be accessible by group/others", path];
+        close(fd);
+        return nil;
+    }
+    if (info.st_size <= 0 || info.st_size > 4096) {
+        if (errorMessage)
+            *errorMessage = [NSString stringWithFormat:@"MACVNC_PASSWORD_FILE %@ is empty or too large", path];
+        close(fd);
+        return nil;
+    }
+
+    size_t size = (size_t)info.st_size;
+    char *bytes = malloc(size);
+    size_t received = 0;
+    while (received < size) {
+        ssize_t count = read(fd, bytes + received, size - received);
+        if (count <= 0) break;
+        received += (size_t)count;
+    }
+    close(fd);
+    if (received != size) {
+        free(bytes);
+        if (errorMessage)
+            *errorMessage = [NSString stringWithFormat:@"Could not completely read MACVNC_PASSWORD_FILE %@", path];
+        return nil;
+    }
+
+    NSString *raw = [[[NSString alloc] initWithBytesNoCopy:bytes
+                                                     length:size
+                                                   encoding:NSUTF8StringEncoding
+                                               freeWhenDone:YES] autorelease];
+    NSString *password = [raw stringByTrimmingCharactersInSet:
+        NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (!raw || password.length == 0) {
+        if (errorMessage)
+            *errorMessage = [NSString stringWithFormat:@"MACVNC_PASSWORD_FILE %@ is not valid non-empty UTF-8", path];
+        return nil;
+    }
+    return password;
+}
 
 @interface AppDelegate ()
 
@@ -173,16 +253,30 @@ static NSString * const kBundleID = @"net.christianbeier.macVNC";
 
         int       port     = (int)[defaults integerForKey:kKeyPort];
         NSString *password = [defaults stringForKey:kKeyPassword];
+        NSString *configurationError = nil;
+        NSDictionary<NSString *, NSString *> *environment = NSProcessInfo.processInfo.environment;
+        NSString *portOverride = environment[@"MACVNC_PORT"];
+        if (portOverride.integerValue > 0 && portOverride.integerValue <= 65535)
+            port = (int)portOverride.integerValue;
+        NSString *passwordFile = environment[@"MACVNC_PASSWORD_FILE"];
+        if (passwordFile.length > 0) {
+            password = readSecurePasswordFile(passwordFile, &configurationError);
+            if (configurationError)
+                NSLog(@"%@", configurationError);
+        }
 
         /* Copy these globals before calling vncServerStart(). */
-        viewOnly      = (rfbBool)[defaults boolForKey:kKeyViewOnly];
+        viewOnly = (rfbBool)[defaults boolForKey:kKeyViewOnly];
         displayNumber = (int)[defaults integerForKey:kKeyDisplay];
+        NSString *displayOverride = environment[@"MACVNC_DISPLAY"];
+        if (displayOverride.length > 0)
+            displayNumber = (int)displayOverride.integerValue;
 
         if (port <= 0 || port > 65535)
             port = kDefaultPort;
 
-        BOOL ok = vncServerStart(port,
-                                 password.length > 0 ? password.UTF8String : NULL);
+        BOOL ok = configurationError == nil &&
+            vncServerStart(port, password.length > 0 ? password.UTF8String : NULL);
 
         dispatch_async(dispatch_get_main_queue(), ^{
             if (ok) {
@@ -191,7 +285,7 @@ static NSString * const kBundleID = @"net.christianbeier.macVNC";
                 self.statusMenuItem.title = @"Failed to start";
                 NSAlert *alert = [[NSAlert alloc] init];
                 alert.messageText     = @"macVNC could not start";
-                alert.informativeText = @"Check System Settings → Privacy & Security → "
+                alert.informativeText = configurationError ?: @"Check System Settings → Privacy & Security → "
                                         @"Accessibility and Screen Recording, then relaunch.";
                 alert.alertStyle      = NSAlertStyleCritical;
                 [alert runModal];
