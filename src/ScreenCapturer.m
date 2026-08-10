@@ -1,7 +1,8 @@
 #import "ScreenCapturer.h"
-#import "CaptureQueueDrain.h"
+#import "ReadinessPolicy.h"
 #include <errno.h>
 #include <math.h>
+#include <stdatomic.h>
 #include <time.h>
 
 @interface ScreenCapturer ()
@@ -22,6 +23,32 @@
 
 @end
 
+
+#if defined(MACVNC_ENABLE_TEST_HOOKS)
+static NSInteger captureInitializationsBeforeFailure = -1;
+static _Atomic bool captureInitializationFaultConsumed = false;
+
+void
+macVNCFailCaptureInitializationAfter(NSInteger successfulInitializations)
+{
+    captureInitializationsBeforeFailure = successfulInitializations;
+    atomic_store(&captureInitializationFaultConsumed, false);
+}
+
+bool
+macVNCCaptureInitializationFaultWasConsumed(void)
+{
+    return atomic_load(&captureInitializationFaultConsumed);
+}
+#endif
+
+static uint64_t
+monotonicNanoseconds(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * NSEC_PER_SEC + (uint64_t)now.tv_nsec;
+}
 
 static void releaseMailboxFrame(void *frame)
 {
@@ -62,6 +89,15 @@ static void endMailboxActivity(void *context)
         pthread_cond_init(&_readinessCondition, NULL);
         _firstFrameReady = NO;
         _readinessGeneration = 0;
+#if defined(MACVNC_ENABLE_TEST_HOOKS)
+        if (captureInitializationsBeforeFailure == 0) {
+            atomic_store(&captureInitializationFaultConsumed, true);
+            [self release];
+            return nil;
+        }
+        if (captureInitializationsBeforeFailure > 0)
+            --captureInitializationsBeforeFailure;
+#endif
         _frameMailboxInitialized = macVNCFrameMailboxInit(
             &_frameMailbox, releaseMailboxFrame, beginMailboxActivity,
             endMailboxActivity, (void *)_operationGroup);
@@ -155,10 +191,6 @@ static void endMailboxActivity(void *context)
     });
 }
 
-- (void)stopCapture {
-    [self stopCaptureAndWait];
-}
-
 - (void)stopCaptureAndWait {
     __block SCStream *stream = nil;
     dispatch_sync(self.stateQueue, ^{
@@ -180,11 +212,11 @@ static void endMailboxActivity(void *context)
         [stream stopCaptureWithCompletionHandler:^(NSError *error) {
             (void)error;
             /* Stop completion prevents new ScreenCaptureKit submissions, but
-               does not promise its sample-handler queue is drained. The serial
-               barrier closes admission for callbacks queued before completion;
-               only then may the stop sentinel leave the group. */
-            macVNCEndOperationAfterSerialQueueDrain(self.sampleHandlerQueue,
-                                                     self.operationGroup);
+               does not promise its serial sample queue is drained. This sentinel
+               runs after every callback already admitted to the owned queue. */
+            dispatch_async(self.sampleHandlerQueue, ^{
+                dispatch_group_leave(self.operationGroup);
+            });
         }];
     }
     /* Covers discovery/start/mailbox work, definitive stream stop, and every
@@ -288,16 +320,26 @@ static void endMailboxActivity(void *context)
     if (!requested)
         return NO;
 
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    long nanoseconds = (long)((timeout - floor(timeout)) * NSEC_PER_SEC);
-    deadline.tv_sec += (time_t)floor(timeout) + (deadline.tv_nsec + nanoseconds) / NSEC_PER_SEC;
-    deadline.tv_nsec = (deadline.tv_nsec + nanoseconds) % NSEC_PER_SEC;
+    uint64_t durationNanoseconds = 0;
+    if (isfinite(timeout) && timeout > 0) {
+        long double scaled = (long double)timeout * NSEC_PER_SEC;
+        durationNanoseconds = scaled >= ldexpl(1.0L, 64)
+            ? UINT64_MAX
+            : (uint64_t)scaled;
+    }
+    MacVNCReadinessBudget budget = macVNCReadinessBudgetStart(
+        monotonicNanoseconds(), durationNanoseconds);
 
     pthread_mutex_lock(&_readinessMutex);
     while (_readinessGeneration == generation && !_firstFrameReady) {
-        int result = pthread_cond_timedwait(&_readinessCondition, &_readinessMutex, &deadline);
-        if (result == ETIMEDOUT)
+        uint64_t remaining = macVNCReadinessBudgetRemaining(
+            &budget, monotonicNanoseconds());
+        if (remaining == 0)
+            break;
+        struct timespec relativeWait = macVNCReadinessRelativeWait(remaining);
+        int result = pthread_cond_timedwait_relative_np(
+            &_readinessCondition, &_readinessMutex, &relativeWait);
+        if (result != 0 && result != ETIMEDOUT)
             break;
     }
     BOOL ready = _readinessGeneration == generation && _firstFrameReady;

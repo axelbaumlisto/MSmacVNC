@@ -78,7 +78,7 @@ System/RFB orchestration only.
 - Serializes compositor access across capture callback queues.
 - Locks LibVNCServer clients while modifying framebuffer tiles.
 - Globally defers/coalesces framebuffer transmissions per client across all displays by `ceil(1000 / FPS)` milliseconds (84 ms at 12 FPS), without changing input processing or pointer deferral.
-- Starts all captures on the first client and stops all captures after the last client.
+- Starts all captures on the first authenticated client and synchronously stops all captures after the last authenticated client.
 - Routes keyboard and pointer events to macOS.
 
 ### `AppDelegate`
@@ -126,13 +126,13 @@ N authenticated clients
 0 authenticated clients        → listener remains, capture CPU returns near zero
 ```
 
-A wrapper around LibVNCServer's password check starts capture only after the password has been validated, then blocks authentication completion on per-display first-frame readiness conditions. Invalid and pre-auth clients cannot start capture. Client counting is atomic. Each capturer independently guards asynchronous ScreenCaptureKit discovery, start, stop, output, and readiness callbacks with its generation token.
+A wrapper around LibVNCServer's password check starts capture only after the password has been validated, then blocks authentication completion while selected displays consume one shared three-second first-frame deadline. Each successive wait receives only the budget remaining from that one monotonic deadline; the bound does not multiply by display count. Invalid and pre-auth clients cannot start capture. Client counting is atomic. Each capturer independently guards asynchronous ScreenCaptureKit discovery, start, stop, output, and readiness callbacks with its generation token.
 
-If the bounded initial wait expires, that client enters a timed-out readiness state and one warning is logged. Later framebuffer hooks query current-generation capturer readiness and promote the client after every selected display has composited a frame, logging one recovery transition. Framebuffer requests while still waiting do not emit repeated warnings.
+If the shared initial deadline expires, that client enters a timed-out readiness state and one warning is logged. Later framebuffer hooks query current-generation capturer readiness and promote the client after every selected display has composited a frame, logging one recovery transition. Framebuffer requests while still waiting do not emit repeated warnings.
 
 ## Concurrency
 
-Each `ScreenCapturer` owns one serial ScreenCaptureKit sample-handler queue for its full lifetime and one serial mailbox-drain queue. Mailbox scheduling and empty/unschedule decisions use the same mutex, so a producer cannot lose a wakeup at the drain boundary. Admission and the single drain are covered by the capturer dispatch group. Stop invalidates the generation and enters a sentinel before requesting definitive stream stop; after stop completion, a serial barrier drains callbacks already admitted to the owned sample-handler queue before the sentinel leaves. Group wait therefore cannot return while an already queued callback may still touch state. Restart reuses that drained queue, and the queue is released only after final quiescence.
+Each `ScreenCapturer` owns one serial ScreenCaptureKit sample-handler queue for its full lifetime and one serial mailbox-drain queue. Mailbox scheduling and empty/unschedule decisions use the same mutex, so a producer cannot lose a wakeup at the drain boundary. Admission and the single drain are covered by the capturer dispatch group. Stop invalidates the generation and enters the group before requesting definitive stream stop; after stop completion, an ordinary asynchronous sentinel on the serial sample-handler queue runs after callbacks already admitted to that queue and then leaves the group. Group wait therefore cannot return while an already queued callback may still touch state. Restart reuses that drained queue, and the queue is released only after final quiescence.
 
 At most one frame per display enters composition at a time. All drains enter one process-wide compositor mutex before modifying the shared canvas. LibVNCServer client send mutexes are held during tile copies and dirty-region publication, preventing clients from reading torn composite pixels. Capture remains independently rate-limited per display, while actual RFB framebuffer sends are globally deferred/coalesced per client across the composite desktop. This bounds retained sample memory and stale-frame age without changing the one-RFB-desktop composition model.
 

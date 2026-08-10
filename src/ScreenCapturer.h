@@ -2,6 +2,7 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <CoreMedia/CoreMedia.h>
 #include <pthread.h>
+#include <stdbool.h>
 #import "FrameMailbox.h"
 
 NS_ASSUME_NONNULL_BEGIN
@@ -21,11 +22,16 @@ NS_ASSUME_NONNULL_BEGIN
                    errorHandler:(nonnull void (^)(NSError *error))errorHandler;
 
 - (void)startCapture;
-- (void)stopCapture;
 - (void)stopCaptureAndWait;
 - (BOOL)waitForFirstFrameWithTimeout:(NSTimeInterval)timeout;
 - (BOOL)isCurrentGenerationReady;
 
 @end
+
+#if defined(MACVNC_ENABLE_TEST_HOOKS)
+/* Dedicated test builds can fail the Nth capturer initialization (zero-based). */
+void macVNCFailCaptureInitializationAfter(NSInteger successfulInitializations);
+bool macVNCCaptureInitializationFaultWasConsumed(void);
+#endif
 
 NS_ASSUME_NONNULL_END

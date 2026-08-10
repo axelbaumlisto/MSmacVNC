@@ -47,3 +47,8 @@ void vncServerStop(void);
  * Return the TCP port the server is listening on, or -1 if not started.
  */
 int vncServerGetPort(void);
+
+#if defined(MACVNC_ENABLE_TEST_HOOKS)
+#include <stdbool.h>
+bool macVNCServerHasLifecycleResourcesForTesting(void);
+#endif

@@ -1,0 +1,62 @@
+{
+  "name": "controlled dual-display 3840x2160 + 1710x1112 fixture",
+  "desktop": {
+    "width": 5552,
+    "height": 2715
+  },
+  "displayRegions": [
+    {
+      "name": "external",
+      "x": 1710,
+      "y": 0,
+      "width": 3840,
+      "height": 2160,
+      "minimumNonblackRatio": 0.05,
+      "step": 16
+    },
+    {
+      "name": "internal",
+      "x": 0,
+      "y": 1603,
+      "width": 1710,
+      "height": 1112,
+      "minimumNonblackRatio": 0.05,
+      "step": 16
+    }
+  ],
+  "blackRegions": [
+    {
+      "name": "upper_gap",
+      "x": 0,
+      "y": 0,
+      "width": 1710,
+      "height": 1500,
+      "maximumNonblackRatio": 0.0,
+      "step": 16
+    },
+    {
+      "name": "lower_gap",
+      "x": 1710,
+      "y": 2160,
+      "width": 3840,
+      "height": 555,
+      "maximumNonblackRatio": 0.0,
+      "step": 16
+    },
+    {
+      "name": "right_padding",
+      "x": 5550,
+      "y": 0,
+      "width": 2,
+      "height": 2715,
+      "maximumNonblackRatio": 0.0,
+      "step": 1
+    }
+  ],
+  "motionRegion": {
+    "x": 1810,
+    "y": 100,
+    "width": 3640,
+    "height": 1960
+  }
+}
