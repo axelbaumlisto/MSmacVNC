@@ -15,6 +15,10 @@ Registered tests:
 - `compositor`: BGRA placement, padded source rows, alpha-only noise suppression, black gaps, unchanged frames, partial dirty tiles, isolation of unrelated pixels.
 - `pointer_state`: valid positions, gap suppression, drag into gap, and release at the last valid position.
 - `keyboard_modifiers`: left/right modifier tracking, macOS flag mapping, one-shot Fn auto-release, and reset.
+- `capture_rate`: unset/empty 12 FPS default, valid values and `1..60` boundaries, malformed/out-of-range rejection, and integer ceiling conversion (`12 FPS → 84 ms`) for global per-client framebuffer deferral.
+- `frame_mailbox`: latest-pending replacement and balanced ownership, one concurrent drain owner, no lost wakeup at the empty boundary, generation metadata, and lifecycle quiescence.
+- `capture_queue_drain`: a deterministic blocked callback proves the stop sentinel cannot leave its group until the owned serial sample-handler queue has drained.
+- `readiness_policy`: immediate readiness, one timeout transition, delayed recovery, and no repeated timeout/recovery diagnostics.
 
 ### Fail-closed configuration test
 
@@ -25,7 +29,7 @@ python3 tests/test_config_failclosed.py \
   --base-port 5920
 ```
 
-Missing, empty, wrong-owner, group/other-readable, non-regular, or symlinked configured password paths must open no listener. The automated test covers missing, empty, exposed mode, FIFO, and symlink cases; owner validation is enforced by the same descriptor-based path.
+Missing, empty, wrong-owner, group/other-readable, non-regular, or symlinked configured password paths must open no listener. A non-empty `MACVNC_CAPTURE_FPS` that is not a decimal integer in `1..60` must also open no listener. The automated test covers missing, empty, exposed mode, FIFO, symlink, and malformed/out-of-range FPS cases; owner validation is enforced by the same descriptor-based path.
 
 ### Lifecycle black-box test
 
@@ -73,7 +77,7 @@ python3 tests/test_first_frame.py \
   --attempts 10
 ```
 
-Every fresh process must return real content on its first full framebuffer request. The successful password check starts capture and delays SecurityResult/ServerInit completion until every selected display has produced its first composited frame.
+Every fresh process must return real content on its first full framebuffer request. The successful password check starts capture and delays SecurityResult/ServerInit completion until every selected display has produced its first composited frame. The pure readiness-policy regression also covers a frame arriving after the initial deadline: the client transitions from timed out to ready exactly once instead of remaining stale or logging on every framebuffer hook.
 
 ### Composite RFB test
 
@@ -119,6 +123,8 @@ Do not compare implementations using different resolutions or workloads. A valid
 - visual workload;
 - test duration;
 - network path.
+
+For high-motion validation, keep both displays selected and confirm RSS reaches a plateau rather than growing with retained samples. After motion stops, current content should replace intermediate frames promptly, and disconnect/shutdown should wait for at most the processing frame plus latest pending frame per display. Capture is capped independently per display (12 FPS by default), while LibVNCServer defers/coalesces actual framebuffer sends globally per client across the one composite desktop using `ceil(1000 / FPS)` milliseconds (84 ms by default). Input processing and pointer defer behavior remain unchanged. Inspect logs for at most one readiness timeout and one recovery per affected client.
 
 Measure separately:
 

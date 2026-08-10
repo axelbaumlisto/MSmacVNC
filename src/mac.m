@@ -45,6 +45,8 @@
 #import "CompositeFramebuffer.h"
 #import "PointerState.h"
 #import "KeyboardModifierState.h"
+#import "ReadinessPolicy.h"
+#import "CaptureRate.h"
 #import "mac.h"
 #import <AppKit/AppKit.h>
 
@@ -69,7 +71,7 @@ static MacVNCKeyboardModifierState keyboardModifierState;
 
 typedef struct {
     rfbBool captureCounted;
-    rfbBool readinessSatisfied;
+    MacVNCReadinessPolicy readiness;
 } MacVNCClientState;
 
 static rfbBool macVNCPasswordCheck(rfbClientPtr client,
@@ -684,7 +686,7 @@ updateCompositeFrame(CMSampleBufferRef sampleBuffer,
 }
 
 static rfbBool
-ScreenInit(int port, const char *password)
+ScreenInit(int port, const char *password, int captureFramesPerSecond)
 {
   int bitsPerSample = 8;
   CGDisplayCount displayCount;
@@ -692,6 +694,21 @@ ScreenInit(int port, const char *password)
   CGDirectDisplayID selectedDisplays[MACVNC_MAX_DISPLAYS];
   MacVNCDisplayInput layoutInputs[MACVNC_MAX_DISPLAYS];
   size_t selectedCount = 0;
+
+  if (captureFramesPerSecond < MACVNC_CAPTURE_FPS_MIN ||
+      captureFramesPerSecond > MACVNC_CAPTURE_FPS_MAX) {
+      rfbErr("Invalid capture rate: %d FPS\n", captureFramesPerSecond);
+      return FALSE;
+  }
+  int framebufferDeferMilliseconds =
+      macVNCCaptureFrameIntervalMilliseconds(captureFramesPerSecond);
+  if (framebufferDeferMilliseconds == 0) {
+      rfbErr("Could not derive framebuffer interval for %d FPS\n",
+             captureFramesPerSecond);
+      return FALSE;
+  }
+  rfbLog("Screen capture rate: %d FPS per display; client framebuffer updates deferred %d ms\n",
+         captureFramesPerSecond, framebufferDeferMilliseconds);
 
   /* Build a minimal argv so rfbGetScreen() has a program name but does
      not try to parse any options — we configure everything manually.
@@ -797,9 +814,9 @@ ScreenInit(int port, const char *password)
   rfbScreen->serverFormat.greenShift = bitsPerSample * 1;
   rfbScreen->serverFormat.blueShift  = 0;
 
-  /* A zero defer interval makes LibVNCServer busy-spin even with no clients.
-     Ten milliseconds keeps idle CPU near zero while bounding added latency. */
-  rfbScreen->deferUpdateTime = 10;
+  /* Coalesce dirty regions from every display into one per-client framebuffer
+     transmission ceiling. Input processing and deferPtrUpdateTime are unchanged. */
+  rfbScreen->deferUpdateTime = framebufferDeferMilliseconds;
 
   gethostname(rfbScreen->thisHost, 255);
 
@@ -844,10 +861,15 @@ ScreenInit(int port, const char *password)
       const MacVNCDisplayGeometry *geometry = &displayLayout.displays[i];
       ScreenCapturer *capturer = [[ScreenCapturer alloc]
           initWithDisplay:geometry->input.displayID
+          captureFramesPerSecond:captureFramesPerSecond
           frameHandler:^(CMSampleBufferRef sampleBuffer) {
               updateCompositeFrame(sampleBuffer, geometry);
           }
           errorHandler:captureErrorHandler];
+      if (!capturer) {
+          rfbErr("Could not initialize display capture mailbox\n");
+          return FALSE;
+      }
       [screenCapturers addObject:capturer];
       [capturer release];
   }
@@ -895,22 +917,23 @@ prepareAuthenticatedClient(rfbClientPtr cl)
                    (unsigned long)screenCapturers.count);
         }
     }
-    BOOL alreadyReady = state->readinessSatisfied;
+    BOOL alreadyReady = macVNCReadinessIsReady(&state->readiness);
     pthread_mutex_unlock(&clientLifecycleMutex);
 
     BOOL allReady = alreadyReady;
     if (!alreadyReady) {
         allReady = YES;
         for (ScreenCapturer *capturer in screenCapturers) {
-            if (![capturer waitForFirstFrameWithTimeout:3.0]) {
+            if (![capturer waitForFirstFrameWithTimeout:3.0])
                 allReady = NO;
-                rfbLog("Timed out waiting for a display's first captured frame\n");
-            }
         }
+        BOOL logTimeout = NO;
         pthread_mutex_lock(&clientLifecycleMutex);
         if (cl->clientData == state)
-            state->readinessSatisfied = allReady;
+            logTimeout = macVNCReadinessRecordInitialResult(&state->readiness, allReady);
         pthread_mutex_unlock(&clientLifecycleMutex);
+        if (logTimeout)
+            rfbLog("Initial display readiness timed out; waiting for late frames\n");
     }
     return allReady;
 }
@@ -931,10 +954,28 @@ displayHook(rfbClientPtr cl)
 {
     pthread_mutex_lock(&clientLifecycleMutex);
     MacVNCClientState *state = cl->clientData;
-    BOOL ready = state && state->readinessSatisfied;
+    BOOL timedOut = state && state->readiness.state == MACVNC_READINESS_TIMED_OUT;
     pthread_mutex_unlock(&clientLifecycleMutex);
-    if (!ready)
-        rfbLog("Sending framebuffer update before every display became ready\n");
+    if (!timedOut)
+        return;
+
+    BOOL allReady = YES;
+    for (ScreenCapturer *capturer in screenCapturers) {
+        if (![capturer isCurrentGenerationReady]) {
+            allReady = NO;
+            break;
+        }
+    }
+    if (!allReady)
+        return;
+
+    BOOL logRecovery = NO;
+    pthread_mutex_lock(&clientLifecycleMutex);
+    if (cl->clientData == state)
+        logRecovery = macVNCReadinessPromoteIfReady(&state->readiness, true);
+    pthread_mutex_unlock(&clientLifecycleMutex);
+    if (logRecovery)
+        rfbLog("All display captures became ready after the initial timeout\n");
 }
 
 void clientGone(rfbClientPtr cl)
@@ -977,7 +1018,7 @@ enum rfbNewClientAction newClient(rfbClientPtr cl)
  * ----------------------------------------------------------------------- */
 
 rfbBool
-vncServerStart(int port, const char *password)
+vncServerStart(int port, const char *password, int captureFramesPerSecond)
 {
     if (!viewOnly) {
         /* Request Accessibility permission with a system prompt so the
@@ -1002,7 +1043,7 @@ vncServerStart(int port, const char *password)
     if (!keyboardInit())
         return FALSE;
 
-    if (!ScreenInit(port, password))
+    if (!ScreenInit(port, password, captureFramesPerSecond))
         return FALSE;
 
     rfbScreen->newClientHook = newClient;
