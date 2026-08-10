@@ -44,6 +44,14 @@ set(SOURCE_FILES
     src/PointerState.c
     src/KeyboardModifierState.h
     src/KeyboardModifierState.c
+    src/CaptureRate.h
+    src/CaptureRate.c
+    src/CaptureQueueDrain.h
+    src/CaptureQueueDrain.m
+    src/FrameMailbox.h
+    src/FrameMailbox.c
+    src/ReadinessPolicy.h
+    src/ReadinessPolicy.c
     src/ScreenCapturer.h
     src/ScreenCapturer.m
     src/AppDelegate.h
@@ -131,7 +139,25 @@ if(BUILD_TESTING)
     target_include_directories(test_keyboard_modifiers PRIVATE src)
     add_test(NAME keyboard_modifiers COMMAND test_keyboard_modifiers)
 
-    foreach(test_target test_keysym test_display_layout test_compositor test_pointer_state test_keyboard_modifiers)
+    add_executable(test_capture_rate tests/test_capture_rate.c src/CaptureRate.c)
+    target_include_directories(test_capture_rate PRIVATE src)
+    add_test(NAME capture_rate COMMAND test_capture_rate)
+
+    add_executable(test_frame_mailbox tests/test_frame_mailbox.c src/FrameMailbox.c)
+    target_include_directories(test_frame_mailbox PRIVATE src)
+    target_link_libraries(test_frame_mailbox Threads::Threads)
+    add_test(NAME frame_mailbox COMMAND test_frame_mailbox)
+
+    add_executable(test_capture_queue_drain tests/test_capture_queue_drain.m src/CaptureQueueDrain.m)
+    target_include_directories(test_capture_queue_drain PRIVATE src)
+    target_link_libraries(test_capture_queue_drain ${FOUNDATION})
+    add_test(NAME capture_queue_drain COMMAND test_capture_queue_drain)
+
+    add_executable(test_readiness_policy tests/test_readiness_policy.c src/ReadinessPolicy.c)
+    target_include_directories(test_readiness_policy PRIVATE src)
+    add_test(NAME readiness_policy COMMAND test_readiness_policy)
+
+    foreach(test_target test_keysym test_display_layout test_compositor test_pointer_state test_keyboard_modifiers test_capture_rate test_frame_mailbox test_capture_queue_drain test_readiness_policy)
         target_compile_options(${test_target} PRIVATE -UNDEBUG)
     endforeach()
 endif()

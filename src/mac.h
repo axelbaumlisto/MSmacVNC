@@ -29,12 +29,13 @@ extern _Atomic int vncConnectedClients;
  *
  * port     – TCP port to listen on (5900 is the VNC default).
  * password – Shared password string, or NULL to disable authentication.
+ * captureFramesPerSecond – Validated immutable capture rate for every display.
  *
  * Returns TRUE on success. On failure the reason is printed via rfbLog().
  * Must not be called on the main thread because rfbInitServer() briefly
  * blocks while binding the listen socket.
  */
-rfbBool vncServerStart(int port, const char *password);
+rfbBool vncServerStart(int port, const char *password, int captureFramesPerSecond);
 
 /*
  * Disconnect all clients, stop the server and free all resources.

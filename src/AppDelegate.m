@@ -1,5 +1,6 @@
 #import "AppDelegate.h"
 #import "mac.h"
+#import "CaptureRate.h"
 
 #import <ServiceManagement/ServiceManagement.h>
 #include <errno.h>
@@ -265,6 +266,18 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
                 NSLog(@"%@", configurationError);
         }
 
+        int captureFramesPerSecond = MACVNC_CAPTURE_FPS_DEFAULT;
+        NSString *captureFPSOverride = environment[@"MACVNC_CAPTURE_FPS"];
+        if (macVNCParseCaptureFPS(captureFPSOverride.UTF8String,
+                                  &captureFramesPerSecond) == MACVNC_CAPTURE_RATE_INVALID) {
+            NSString *captureRateError = [NSString stringWithFormat:
+                @"Invalid MACVNC_CAPTURE_FPS '%@'; expected an integer from %d to %d",
+                captureFPSOverride, MACVNC_CAPTURE_FPS_MIN, MACVNC_CAPTURE_FPS_MAX];
+            if (!configurationError)
+                configurationError = captureRateError;
+            NSLog(@"%@", captureRateError);
+        }
+
         /* Copy these globals before calling vncServerStart(). */
         viewOnly = (rfbBool)[defaults boolForKey:kKeyViewOnly];
         displayNumber = (int)[defaults integerForKey:kKeyDisplay];
@@ -276,7 +289,8 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
             port = kDefaultPort;
 
         BOOL ok = configurationError == nil &&
-            vncServerStart(port, password.length > 0 ? password.UTF8String : NULL);
+            vncServerStart(port, password.length > 0 ? password.UTF8String : NULL,
+                           captureFramesPerSecond);
 
         dispatch_async(dispatch_get_main_queue(), ^{
             if (ok) {

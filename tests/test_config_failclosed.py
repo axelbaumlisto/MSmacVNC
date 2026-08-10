@@ -15,7 +15,7 @@ def listener_exists(pid, port):
     ).returncode == 0
 
 
-def run_case(app, listen, port, password_file, expected_log):
+def run_case(app, listen, port, password_file, expected_log, extra_env=None):
     env = os.environ.copy()
     env.update({
         "MACVNC_LISTEN": listen,
@@ -23,12 +23,14 @@ def run_case(app, listen, port, password_file, expected_log):
         "MACVNC_DISPLAY": "-2",
         "MACVNC_PASSWORD_FILE": str(password_file),
     })
+    if extra_env:
+        env.update(extra_env)
     with tempfile.NamedTemporaryFile(prefix="macvnc-config-", suffix=".log", delete=False) as log:
         path = pathlib.Path(log.name)
         process = subprocess.Popen([app], env=env, stdout=log, stderr=log)
     try:
         time.sleep(2)
-        assert not listener_exists(process.pid, port), f"invalid password file opened port {port}"
+        assert not listener_exists(process.pid, port), f"invalid configuration opened port {port}"
         text = path.read_text(errors="replace")
         assert expected_log in text, text
     finally:
@@ -67,7 +69,17 @@ def main():
     run_case(args.app, args.listen, args.base_port + 2, exposed, "must not be accessible by group/others")
     run_case(args.app, args.listen, args.base_port + 3, fifo, "must be a regular file")
     run_case(args.app, args.listen, args.base_port + 4, symlink, "Cannot open MACVNC_PASSWORD_FILE")
-    print("PASS config_failclosed missing/empty/exposed/fifo/symlink opened no listener")
+
+    for offset, invalid_fps in enumerate(("0", "61", "20x", " 20"), start=5):
+        run_case(
+            args.app,
+            args.listen,
+            args.base_port + offset,
+            target,
+            "Invalid MACVNC_CAPTURE_FPS",
+            {"MACVNC_CAPTURE_FPS": invalid_fps},
+        )
+    print("PASS config_failclosed password paths and invalid capture FPS opened no listener")
 
 
 if __name__ == "__main__":
