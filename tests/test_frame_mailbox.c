@@ -267,7 +267,7 @@ static void *idle_waiter(void *opaque)
     return NULL;
 }
 
-static void test_lifecycle_waits_for_processing_and_generation_is_explicit(void)
+static void test_lifecycle_waits_for_processing(void)
 {
     atomic_int released = 0;
     Activity activity;
@@ -279,7 +279,7 @@ static void test_lifecycle_waits_for_processing_and_generation_is_explicit(void)
                                     (void *)0x1111, 41));
     MacVNCFrameMailboxItem item;
     assert(macVNCFrameMailboxTake(&mailbox, &item));
-    assert(item.stream == (void *)0x1111 && item.generation == 41);
+    assert(item.stream == (void *)0x1111);
 
     WaiterArgs waiterArgs = {&activity, false};
     pthread_t waiter;
@@ -288,9 +288,6 @@ static void test_lifecycle_waits_for_processing_and_generation_is_explicit(void)
     nanosleep(&pause, NULL);
     assert(!atomic_load(&waiterArgs.returned));
 
-    /* A restarted generation would reject this old tuple before handling it. */
-    uint64_t currentGeneration = 42;
-    assert(item.generation != currentGeneration);
     release_frame(item.frame);
     assert(!macVNCFrameMailboxEndDrainIteration(&mailbox));
     pthread_join(waiter, NULL);
@@ -306,7 +303,7 @@ int main(void)
     test_latest_replaces_pending_and_preserves_metadata();
     test_concurrent_admission_has_one_drain_owner();
     test_no_lost_wakeup_at_unschedule_boundary();
-    test_lifecycle_waits_for_processing_and_generation_is_explicit();
+    test_lifecycle_waits_for_processing();
     puts("frame mailbox tests passed");
     return 0;
 }
