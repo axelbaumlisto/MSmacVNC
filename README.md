@@ -11,9 +11,9 @@ This branch adds a single composite RFB desktop for all active displays, on-dema
 - One RFB desktop containing either one display or all active displays.
 - Correct placement for displays with negative and vertically offset macOS coordinates.
 - Black framebuffer gaps where no physical display exists.
-- Per-display capture streams feeding one serialized composite framebuffer.
+- Per-display capture streams feeding one serialized composite framebuffer, with a bounded latest-frame mailbox to prevent motion backlog.
 - 64×64 dirty-tile updates through LibVNCServer, comparing only the advertised 24-bit BGR channels and normalizing the unused alpha byte.
-- Capture starts after successful VNC password validation, waits for the first frame of every selected display before completing authentication, and stops after the last authenticated client disconnects.
+- Capture starts after successful VNC password validation, waits up to the initial deadline for every selected display, self-heals readiness if frames arrive late, and stops after the last authenticated client disconnects.
 - Near-zero idle CPU while the listener remains available.
 - Mouse mapping across accepted composite display layouts.
 - Correct legacy X11 Cyrillic and RFB Unicode keyboard input, including `ё`/`Ё`.
@@ -66,8 +66,9 @@ The server reads the existing app preferences and supports environment overrides
 | `MACVNC_PORT` | RFB port. | `5903` |
 | `MACVNC_DISPLAY` | `-2`: all active displays; `-1`: primary; `0+`: enumerated display index. | `-2` |
 | `MACVNC_PASSWORD_FILE` | UTF-8 file containing the VNC password. | `~/.config/macvnc/password` |
+| `MACVNC_CAPTURE_FPS` | Integer capture rate for every selected display and the global per-client framebuffer-send ceiling; allowed `1..60`, default `12`. | `12` |
 
-The configured password path is fail-closed: it must be a non-empty regular UTF-8 file owned by the current UID and inaccessible to group/others. Symlinks and special files are rejected.
+A non-empty invalid `MACVNC_CAPTURE_FPS` value fails closed and opens no listener. The configured password path is also fail-closed: it must be a non-empty regular UTF-8 file owned by the current UID and inaccessible to group/others. Symlinks and special files are rejected.
 
 ```bash
 chmod 600 ~/.config/macvnc/password
@@ -79,6 +80,7 @@ chmod 600 ~/.config/macvnc/password
 MACVNC_LISTEN="<private-overlay-ip>" \
 MACVNC_PORT=5903 \
 MACVNC_DISPLAY=-2 \
+MACVNC_CAPTURE_FPS=12 \
 MACVNC_PASSWORD_FILE="$HOME/.config/macvnc/password" \
 nohup "$PWD/build-arm64/macVNC.app/Contents/MacOS/macVNC" \
   > /tmp/macvnc.log 2>&1 &
@@ -113,12 +115,15 @@ Pure unit tests cover:
 - Multi-display layout and pointer coordinate transforms.
 - Composite framebuffer placement, row padding, gaps, and dirty tiles.
 - Pointer button-state handling across black gaps, including drag release.
+- Strict capture-FPS parsing, bounded latest-frame mailbox replacement/concurrency/quiescence, and delayed readiness state transitions.
+
+Each display captures independently and retains at most one frame being processed plus one replaceable latest pending frame. Intermediate motion frames are dropped rather than queued FIFO, while ScreenCaptureKit itself uses `queueDepth=2`. LibVNCServer globally defers and coalesces framebuffer transmissions per client across all displays by `ceil(1000 / MACVNC_CAPTURE_FPS)` milliseconds (84 ms at the default 12 FPS); input processing and pointer defer behavior are unchanged.
 
 Black-box tests cover:
 
 - idle → first client → second client → last disconnect → idle lifecycle;
 - pre-auth and authenticated rapid churn;
-- fail-closed password-file configuration, including missing/empty/exposed/FIFO/symlink paths;
+- fail-closed password-file and capture-FPS configuration;
 - composite RFB dimensions;
 - real pixels from both displays;
 - black inter-display gaps.
