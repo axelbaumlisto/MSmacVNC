@@ -16,9 +16,9 @@ Registered tests:
 - `pointer_state`: valid positions, gap suppression, drag into gap, and release at the last valid position.
 - `keyboard_modifiers`: left/right modifier tracking, macOS flag mapping, one-shot Fn auto-release, and reset.
 - `capture_rate`: unset/empty 12 FPS default, valid values and `1..60` boundaries, malformed/out-of-range rejection, and integer ceiling conversion (`12 FPS → 84 ms`) for global per-client framebuffer deferral.
-- `frame_mailbox`: latest-pending replacement and balanced ownership, one concurrent drain owner, no lost wakeup at the empty boundary, generation metadata, and lifecycle quiescence.
-- `capture_queue_drain`: a deterministic blocked callback proves the stop sentinel cannot leave its group until the owned serial sample-handler queue has drained.
-- `readiness_policy`: immediate readiness, one timeout transition, delayed recovery, and no repeated timeout/recovery diagnostics.
+- `frame_mailbox`: latest-pending replacement and balanced ownership, one concurrent drain owner, no lost wakeup at the empty boundary, metadata ownership, and lifecycle quiescence.
+- `readiness_policy`: deterministic one-total-deadline budget arithmetic, immediate readiness, one timeout transition, delayed recovery, and no repeated timeout/recovery diagnostics.
+- `server_init_failure`: a compile-only capturer-initialization fault seam verifies the injected fault is consumed, `vncServerStart()` failure cleans lifecycle resources (including keyboard maps), reports port `-1`, leaves the authenticated count at zero, and tolerates concurrent/repeated stop. Hosts without an active display explicitly skip. The seam is absent from the production app target.
 
 ### Fail-closed configuration test
 
@@ -51,11 +51,12 @@ Acceptance gates:
 1. Listener idle CPU is below 10%.
 2. Pre-auth TCP/RFB churn starts no capture.
 3. First successful password check starts capture and waits for a non-black first framebuffer.
-4. Second authenticated client reuses capture streams without duplicate starts.
-5. Disconnecting the first client keeps capture active for the second.
-6. Disconnecting the last authenticated client stops capture and returns CPU to idle.
-7. Rapid authenticated start/stop churn cannot leave capture running.
-8. Logs contain post-auth start and last-authenticated-client stop events.
+4. A valid auth response may disconnect immediately without reading `SecurityResult` or `ServerInit`, interleaved with a successful reconnect.
+5. Second authenticated client reuses capture streams without duplicate starts.
+6. After the first of two clients disconnects, the second receives another usable real frame and measured CPU remains above idle.
+7. Disconnecting the last authenticated client stops capture and returns CPU to idle.
+8. Rapid authenticated start/stop churn cannot leave capture running.
+9. Logs contain post-auth start and last-authenticated-client stop events.
 
 ### Active shutdown test
 
@@ -63,10 +64,12 @@ Acceptance gates:
 python3 tests/test_active_shutdown.py \
   --app "$PWD/build-arm64/macVNC.app/Contents/MacOS/macVNC" \
   --password-file "$HOME/.config/macvnc/password" \
-  --port 5918
+  --fixture tests/fixtures/dual-display-5552x2715.json \
+  --port 5918 \
+  --cycles 3
 ```
 
-This keeps both display captures active, sends a Cocoa terminate request to the exact PID, and requires client shutdown, synchronous ScreenCaptureKit quiescence, and process exit code 0.
+By default each cycle keeps both display captures active, sends a Cocoa terminate request to the exact PID, and requires the RFB client to observe closure, the capture-stop log to appear, and the process to exit 0. The disruptive pointer-motion variant is opt-in only: add both `--stress-pointer-input --allow-input-injection`. It moves the real macOS pointer with button mask zero, so it never clicks or drags, and must never be run in an interactive session without explicit approval.
 
 ### Cold first-frame readiness test
 
@@ -74,10 +77,11 @@ This keeps both display captures active, sends a Cocoa terminate request to the 
 python3 tests/test_first_frame.py \
   --app "$PWD/build-arm64/macVNC.app/Contents/MacOS/macVNC" \
   --password-file "$HOME/.config/macvnc/password" \
+  --fixture tests/fixtures/dual-display-5552x2715.json \
   --attempts 10
 ```
 
-Every fresh process must return real content on its first full framebuffer request. The successful password check starts capture and delays SecurityResult/ServerInit completion until every selected display has produced its first composited frame. The pure readiness-policy regression also covers a frame arriving after the initial deadline: the client transitions from timed out to ready exactly once instead of remaining stale or logging on every framebuffer hook.
+Every fresh process must return real content on its first full framebuffer request. With explicit fixture metadata, every named physical-display region must independently exceed its non-black threshold; without `--fixture`, the portable fallback asserts only aggregate real content. The successful password check starts capture and delays SecurityResult/ServerInit completion for at most one shared three-second deadline across all selected displays. The pure readiness-policy regression covers deterministic remaining-budget arithmetic and a frame arriving after the initial deadline: the client transitions from timed out to ready exactly once instead of remaining stale or logging on every framebuffer hook.
 
 ### Composite RFB test
 
@@ -85,6 +89,7 @@ Every fresh process must return real content on its first full framebuffer reque
 python3 tests/test_rfb_multidisplay.py \
   --app "$PWD/build-arm64/macVNC.app/Contents/MacOS/macVNC" \
   --password-file "$HOME/.config/macvnc/password" \
+  --fixture tests/fixtures/dual-display-5552x2715.json \
   --listen "<private-overlay-ip>" \
   --port 5917
 ```
@@ -98,6 +103,22 @@ For the documented two-display fixture, it verifies:
 - one TCP/RFB endpoint is used.
 
 Temporary test ports are closed when tests finish.
+
+### Backpressure black-box test (controlled hardware/TCC fixture only)
+
+```bash
+python3 tests/test_backpressure.py \
+  --app "$PWD/build-arm64/macVNC.app/Contents/MacOS/macVNC" \
+  --password-file "$HOME/.config/macvnc/password" \
+  --fixture tests/fixtures/dual-display-5552x2715.json \
+  --listen "<private-overlay-ip>" \
+  --port 5930 \
+  --low-fps 3 \
+  --duration 4 \
+  --allow-input-injection
+```
+
+The script runs two fresh app processes: one with `MACVNC_CAPTURE_FPS` explicitly unset (therefore 12 FPS) and one at the requested low FPS. During continuous RFB pointer motion and incremental framebuffer requests it counts actual `FramebufferUpdate` messages, enforces the configured ceiling with declared tolerance/slack, samples RSS and bounds both median growth and total span, checks the exact final `PointerPos` and its cursor region become fresh, records updates during an idle interval, then requires new motion to deliver its exact `PointerPos` through the outstanding incremental request. Idle update count is measured rather than constrained because unrelated on-screen animation is not stopped by the test. It requires Screen Recording and Accessibility approval for the exact app signature and explicit matching fixture geometry. It posts real macOS pointer events and therefore fails closed unless `--allow-input-injection` is supplied. Never run it during an interactive session without explicit approval. It is intentionally not registered in CTest or generic GitHub-hosted CI.
 
 ## Manual RealVNC E2E
 

@@ -13,7 +13,7 @@ This branch adds a single composite RFB desktop for all active displays, on-dema
 - Black framebuffer gaps where no physical display exists.
 - Per-display capture streams feeding one serialized composite framebuffer, with a bounded latest-frame mailbox to prevent motion backlog.
 - 64×64 dirty-tile updates through LibVNCServer, comparing only the advertised 24-bit BGR channels and normalizing the unused alpha byte.
-- Capture starts after successful VNC password validation, waits up to the initial deadline for every selected display, self-heals readiness if frames arrive late, and stops after the last authenticated client disconnects.
+- Capture starts after successful VNC password validation, shares one total three-second initial-readiness deadline across all selected displays, self-heals readiness if frames arrive late, and synchronously stops after the last authenticated client disconnects.
 - Near-zero idle CPU while the listener remains available.
 - Mouse mapping across accepted composite display layouts.
 - Correct legacy X11 Cyrillic and RFB Unicode keyboard input, including `ё`/`Ё`.
@@ -115,18 +115,20 @@ Pure unit tests cover:
 - Multi-display layout and pointer coordinate transforms.
 - Composite framebuffer placement, row padding, gaps, and dirty tiles.
 - Pointer button-state handling across black gaps, including drag release.
-- Strict capture-FPS parsing, bounded latest-frame mailbox replacement/concurrency/quiescence, and delayed readiness state transitions.
+- Strict capture-FPS parsing, bounded latest-frame mailbox replacement/concurrency/quiescence, shared readiness-deadline budgeting, delayed readiness transitions, and transactional capture-initialization failure cleanup.
 
 Each display captures independently and retains at most one frame being processed plus one replaceable latest pending frame. Intermediate motion frames are dropped rather than queued FIFO, while ScreenCaptureKit itself uses `queueDepth=2`. LibVNCServer globally defers and coalesces framebuffer transmissions per client across all displays by `ceil(1000 / MACVNC_CAPTURE_FPS)` milliseconds (84 ms at the default 12 FPS); input processing and pointer defer behavior are unchanged.
 
 Black-box tests cover:
 
 - idle → first client → second client → last disconnect → idle lifecycle;
-- pre-auth and authenticated rapid churn;
+- pre-auth churn, immediate post-auth-response disconnect, and authenticated rapid reconnects;
+- continued usable frames for the second client after the first disconnects;
+- repeated active shutdown, with motion-only (never click/drag) pointer stress available only through two explicit input-injection safety flags;
 - fail-closed password-file and capture-FPS configuration;
-- composite RFB dimensions;
-- real pixels from both displays;
-- black inter-display gaps.
+- composite RFB dimensions and fixture-scoped real pixels from both displays;
+- black inter-display gaps;
+- fixture-scoped update-rate, bounded short-run RSS median half-to-half growth and total sampled span, final freshness, and idle recovery at default and explicit low FPS.
 
 See [docs/TESTING.md](docs/TESTING.md).
 

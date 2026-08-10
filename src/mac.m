@@ -38,6 +38,7 @@
 #include <stdlib.h>
 #include <stdatomic.h>
 #include <arpa/inet.h>
+#include <time.h>
 
 #import "ScreenCapturer.h"
 #import "RFBKeySym.h"
@@ -62,6 +63,9 @@ void *frameBufferOne;
 int displayNumber = -1;
 static MacVNCDisplayLayout displayLayout;
 static NSMutableArray<ScreenCapturer *> *screenCapturers;
+static rfbBool rfbServerInitialized = FALSE;
+static _Atomic int publishedServerPort = -1;
+static pthread_mutex_t serverLifecycleMutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t compositorMutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t pointerMutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t keyboardMutex = PTHREAD_MUTEX_INITIALIZER;
@@ -184,6 +188,15 @@ static int specialKeyMap[] = {
 
 /* Tile size (pixels) for dirty-region comparison */
 #define TILE_SIZE 64
+#define INITIAL_READINESS_TIMEOUT_NANOSECONDS (3ULL * NSEC_PER_SEC)
+
+static uint64_t
+monotonicNanoseconds(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * NSEC_PER_SEC + (uint64_t)now.tv_nsec;
+}
 
 /* Number of currently connected clients (read by AppDelegate for status display) */
 _Atomic int vncConnectedClients = 0;
@@ -324,7 +337,7 @@ dimmingShutdown(void)
     int result = -1;
 
     if (!initialized)
-        goto DONE;
+        return 0;
 
     pthread_mutex_lock(&dimming_mutex);
     if (dim_time_saved)
@@ -335,6 +348,7 @@ dimmingShutdown(void)
             goto DONE;
 
     result = 0;
+    initialized = FALSE;
 
  DONE:
     pthread_mutex_unlock(&dimming_mutex);
@@ -512,6 +526,23 @@ PtrAddEvent(int buttonMask, int x, int y, rfbClientPtr cl)
   Initialises keyboard handling:
   This creates four keymaps mapping UniChars to keycodes for the current keyboard layout with no shifting modifiers, Shift, Alt-Gr and Shift+Alt-Gr applied, respectively.
  */
+static void
+keyboardShutdown(void)
+{
+    CFMutableDictionaryRef *keyMaps[] = {
+        &charKeyMap,
+        &charShiftKeyMap,
+        &charAltGrKeyMap,
+        &charShiftAltGrKeyMap,
+    };
+    for (size_t i = 0; i < sizeof(keyMaps) / sizeof(keyMaps[0]); ++i) {
+        if (*keyMaps[i]) {
+            CFRelease(*keyMaps[i]);
+            *keyMaps[i] = NULL;
+        }
+    }
+}
+
 rfbBool keyboardInit()
 {
     size_t i, keyCodeCount=128;
@@ -534,6 +565,7 @@ rfbBool keyboardInit()
 
     if(!charKeyMap || !charShiftKeyMap || !charAltGrKeyMap || !charShiftAltGrKeyMap) {
 	fprintf(stderr, "Could not create keymaps\n");
+        CFRelease(currentKeyboard);
 	return FALSE;
     }
 
@@ -875,20 +907,17 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
   }
 
   rfbInitServer(rfbScreen);
+  rfbServerInitialized = TRUE;
 
   return TRUE;
 }
 
 
 static void
-setDisplayCapturesRunning(BOOL running)
+startDisplayCaptures(void)
 {
-    for (ScreenCapturer *capturer in screenCapturers) {
-        if (running)
-            [capturer startCapture];
-        else
-            [capturer stopCapture];
-    }
+    for (ScreenCapturer *capturer in screenCapturers)
+        [capturer startCapture];
 }
 
 static void
@@ -912,7 +941,7 @@ prepareAuthenticatedClient(rfbClientPtr cl)
         state->captureCounted = TRUE;
         int previous = atomic_fetch_add(&vncConnectedClients, 1);
         if (previous == 0) {
-            setDisplayCapturesRunning(YES);
+            startDisplayCaptures();
             rfbLog("First client password accepted; starting %lu display captures\n",
                    (unsigned long)screenCapturers.count);
         }
@@ -922,10 +951,18 @@ prepareAuthenticatedClient(rfbClientPtr cl)
 
     BOOL allReady = alreadyReady;
     if (!alreadyReady) {
+        MacVNCReadinessBudget budget = macVNCReadinessBudgetStart(
+            monotonicNanoseconds(), INITIAL_READINESS_TIMEOUT_NANOSECONDS);
         allReady = YES;
         for (ScreenCapturer *capturer in screenCapturers) {
-            if (![capturer waitForFirstFrameWithTimeout:3.0])
+            uint64_t remaining = macVNCReadinessBudgetRemaining(
+                &budget, monotonicNanoseconds());
+            if (remaining == 0 ||
+                ![capturer waitForFirstFrameWithTimeout:
+                    (NSTimeInterval)remaining / NSEC_PER_SEC]) {
                 allReady = NO;
+                break;
+            }
         }
         BOOL logTimeout = NO;
         pthread_mutex_lock(&clientLifecycleMutex);
@@ -988,7 +1025,7 @@ void clientGone(rfbClientPtr cl)
         if (remaining <= 0) {
             remaining = 0;
             atomic_store(&vncConnectedClients, 0);
-            setDisplayCapturesRunning(NO);
+            stopDisplayCapturesAndWait();
             resetKeyboardModifiers();
             rfbLog("Last authenticated client disconnected; %lu display captures stopped and modifiers reset\n",
                    (unsigned long)screenCapturers.count);
@@ -1017,50 +1054,24 @@ enum rfbNewClientAction newClient(rfbClientPtr cl)
  * Public API — called from AppDelegate
  * ----------------------------------------------------------------------- */
 
-rfbBool
-vncServerStart(int port, const char *password, int captureFramesPerSecond)
+static bool
+serverHasLifecycleResourcesLocked(void)
 {
-    if (!viewOnly) {
-        /* Request Accessibility permission with a system prompt so the
-           user sees the dialog with the app name, not a terminal name. */
-        NSDictionary *opts = @{(__bridge id)kAXTrustedCheckOptionPrompt: @YES};
-        if (!AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)opts)) {
-            rfbLog("Server does not have Accessibility permission. "
-                   "Grant it in System Settings → Privacy & Security → Accessibility "
-                   "and relaunch macVNC.\n");
-            return FALSE;
-        }
-    }
-
-    dimmingInit();
-
-    eventSource = CGEventSourceCreate(kCGEventSourceStatePrivate);
-    if (!eventSource) {
-        rfbLog("Could not create CGEventSource\n");
-        return FALSE;
-    }
-
-    if (!keyboardInit())
-        return FALSE;
-
-    if (!ScreenInit(port, password, captureFramesPerSecond))
-        return FALSE;
-
-    rfbScreen->newClientHook = newClient;
-    rfbScreen->displayHook = displayHook;
-    rfbRunEventLoop(rfbScreen, -1, TRUE);
-
-    return TRUE;
+    return rfbScreen || frameBufferOne || screenCapturers || eventSource ||
+           charKeyMap || charShiftKeyMap || charAltGrKeyMap ||
+           charShiftAltGrKeyMap;
 }
 
-void
-vncServerStop(void)
+static void
+vncServerStopLocked(void)
 {
+    atomic_store_explicit(&publishedServerPort, -1, memory_order_release);
     /* LibVNCServer >=0.9.15 reverted detached client threads. This call stops
        accepting clients and joins every client/listener thread before lifecycle
        objects they can access are released. */
-    if (rfbScreen)
+    if (rfbScreen && rfbServerInitialized)
         rfbShutdownServer(rfbScreen, TRUE);
+    rfbServerInitialized = FALSE;
 
     stopDisplayCapturesAndWait();
     [screenCapturers release];
@@ -1075,13 +1086,80 @@ vncServerStop(void)
         CFRelease(eventSource);
         eventSource = NULL;
     }
+    keyboardShutdown();
     free(frameBufferOne); frameBufferOne = NULL;
+}
+
+rfbBool
+vncServerStart(int port, const char *password, int captureFramesPerSecond)
+{
+    pthread_mutex_lock(&serverLifecycleMutex);
+    if (serverHasLifecycleResourcesLocked()) {
+        rfbErr("VNC server lifecycle is already initialized\n");
+        pthread_mutex_unlock(&serverLifecycleMutex);
+        return FALSE;
+    }
+    atomic_store_explicit(&publishedServerPort, -1, memory_order_release);
+    if (!viewOnly) {
+        /* Request Accessibility permission with a system prompt so the
+           user sees the dialog with the app name, not a terminal name. */
+        NSDictionary *opts = @{(__bridge id)kAXTrustedCheckOptionPrompt: @YES};
+        if (!AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)opts)) {
+            rfbLog("Server does not have Accessibility permission. "
+                   "Grant it in System Settings → Privacy & Security → Accessibility "
+                   "and relaunch macVNC.\n");
+            goto FAILURE;
+        }
+    }
+
+    dimmingInit();
+
+    eventSource = CGEventSourceCreate(kCGEventSourceStatePrivate);
+    if (!eventSource) {
+        rfbLog("Could not create CGEventSource\n");
+        goto FAILURE;
+    }
+
+    if (!keyboardInit())
+        goto FAILURE;
+
+    if (!ScreenInit(port, password, captureFramesPerSecond))
+        goto FAILURE;
+
+    rfbScreen->newClientHook = newClient;
+    rfbScreen->displayHook = displayHook;
+    rfbRunEventLoop(rfbScreen, -1, TRUE);
+    atomic_store_explicit(&publishedServerPort, rfbScreen->port, memory_order_release);
+    pthread_mutex_unlock(&serverLifecycleMutex);
+    return TRUE;
+
+FAILURE:
+    vncServerStopLocked();
+    pthread_mutex_unlock(&serverLifecycleMutex);
+    return FALSE;
+}
+
+void
+vncServerStop(void)
+{
+    pthread_mutex_lock(&serverLifecycleMutex);
+    vncServerStopLocked();
+    pthread_mutex_unlock(&serverLifecycleMutex);
 }
 
 int
 vncServerGetPort(void)
 {
-    if (!rfbScreen)
-        return -1;
-    return rfbScreen->port;
+    return atomic_load_explicit(&publishedServerPort, memory_order_acquire);
 }
+
+#if defined(MACVNC_ENABLE_TEST_HOOKS)
+bool
+macVNCServerHasLifecycleResourcesForTesting(void)
+{
+    pthread_mutex_lock(&serverLifecycleMutex);
+    bool hasResources = serverHasLifecycleResourcesLocked();
+    pthread_mutex_unlock(&serverLifecycleMutex);
+    return hasResources;
+}
+#endif

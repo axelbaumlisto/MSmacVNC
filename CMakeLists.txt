@@ -46,8 +46,6 @@ set(SOURCE_FILES
     src/KeyboardModifierState.c
     src/CaptureRate.h
     src/CaptureRate.c
-    src/CaptureQueueDrain.h
-    src/CaptureQueueDrain.m
     src/FrameMailbox.h
     src/FrameMailbox.c
     src/ReadinessPolicy.h
@@ -148,16 +146,40 @@ if(BUILD_TESTING)
     target_link_libraries(test_frame_mailbox Threads::Threads)
     add_test(NAME frame_mailbox COMMAND test_frame_mailbox)
 
-    add_executable(test_capture_queue_drain tests/test_capture_queue_drain.m src/CaptureQueueDrain.m)
-    target_include_directories(test_capture_queue_drain PRIVATE src)
-    target_link_libraries(test_capture_queue_drain ${FOUNDATION})
-    add_test(NAME capture_queue_drain COMMAND test_capture_queue_drain)
-
     add_executable(test_readiness_policy tests/test_readiness_policy.c src/ReadinessPolicy.c)
     target_include_directories(test_readiness_policy PRIVATE src)
     add_test(NAME readiness_policy COMMAND test_readiness_policy)
 
-    foreach(test_target test_keysym test_display_layout test_compositor test_pointer_state test_keyboard_modifiers test_capture_rate test_frame_mailbox test_capture_queue_drain test_readiness_policy)
+    add_executable(test_server_init_failure
+        tests/test_server_init_failure.m
+        src/mac.m
+        src/RFBKeySym.c
+        src/DisplayLayout.c
+        src/CompositeFramebuffer.c
+        src/PointerState.c
+        src/KeyboardModifierState.c
+        src/CaptureRate.c
+        src/FrameMailbox.c
+        src/ReadinessPolicy.c
+        src/ScreenCapturer.m
+    )
+    target_include_directories(test_server_init_failure PRIVATE src)
+    target_compile_definitions(test_server_init_failure PRIVATE MACVNC_ENABLE_TEST_HOOKS=1)
+    target_link_libraries(test_server_init_failure
+        LibVNCServer::vncserver
+        ${CMAKE_THREAD_LIBS_INIT}
+        ${CARBON_LIBRARY}
+        ${IOKIT_LIBRARY}
+        ${SCREEN_CAPTURE_KIT}
+        ${CORE_MEDIA}
+        ${CORE_VIDEO}
+        ${FOUNDATION}
+        ${APPKIT_LIBRARY}
+    )
+    add_test(NAME server_init_failure COMMAND test_server_init_failure)
+    set_tests_properties(server_init_failure PROPERTIES SKIP_RETURN_CODE 77)
+
+    foreach(test_target test_keysym test_display_layout test_compositor test_pointer_state test_keyboard_modifiers test_capture_rate test_frame_mailbox test_readiness_policy test_server_init_failure)
         target_compile_options(${test_target} PRIVATE -UNDEBUG)
     endforeach()
 endif()
