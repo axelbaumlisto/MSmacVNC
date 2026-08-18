@@ -1,3 +1,41 @@
+# macVNC 0.3.3
+
+## Highlights
+
+- Fixed the long-standing "password check failed" bug for the notarized standalone build.
+- Root cause: the app was signed with hardened runtime but WITHOUT `com.apple.security.cs.disable-library-validation`, so the bundled Homebrew dylibs (libvncserver + OpenSSL) failed library validation and libvncserver's OpenSSL-backed VNC DES password check always failed.
+- Release signing now uses `build/entitlements.plist` with `disable-library-validation`.
+- Release packaging now bundles the REAL dylib targets (resolves symlinks) so a stale/mismatched OpenSSL can no longer be shipped.
+- Password is stored in plaintext defaults and trimmed of surrounding whitespace/newlines.
+- Note: VNC passwords are effectively 8 characters (DES); longer values are truncated.
+
+## Validation
+
+- Release build: passed.
+- CTest: 15/15 passed.
+- Reference libvncclient auth against the signed bundle: AUTH_OK.
+- Developer ID + hardened runtime + entitlements: signed, notarized, stapled.
+
+# macVNC 0.3.1
+
+## Highlights
+
+- Password is now stored in plaintext `NSUserDefaults` (by request), not in the macOS Keychain.
+- Fixes the case where a Keychain-stored password was unreadable by the app (`errSecInteractionNotAllowed -25308`), which made the server refuse to start with "A non-empty VNC password is required".
+- Any legacy Keychain password is migrated back into defaults and removed from the Keychain.
+
+## Validation
+
+- Release build: passed.
+- CTest: 15/15 passed.
+- Developer ID Application signing / notarization / staple: passed.
+
+# macVNC 0.3.0
+
+## Highlights
+
+- Do not block startup on `CGPreflightScreenCaptureAccess()` false-negatives; rely on the runtime capture handler instead.
+
 # macVNC 0.2.9
 
 ## Highlights

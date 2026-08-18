@@ -83,14 +83,19 @@ MacVNCPermissionStatus macVNCCheckPermission(MacVNCPermissionKind kind)
 {
     switch (kind) {
         case MacVNCPermissionKindScreenRecording:
-            /* CGPreflightScreenCaptureAccess() can return a stale YES right after
-               the binary changes (update/notarize). If ScreenCaptureKit already
-               failed at runtime, treat Screen Recording as not effectively granted. */
+            /* Trust runtime reality over CGPreflightScreenCaptureAccess():
+               - preflight often returns a false NEGATIVE until the process has
+                 actually started a capture, causing us to block startup even
+                 though Screen Recording is granted in TCC;
+               - preflight can also return a stale POSITIVE right after the binary
+                 changes.
+               So: if capture actually failed at runtime, it's NotGranted.
+               Otherwise treat preflight YES as granted, and preflight NO as
+               "unknown but let startup try" (Granted) — a real failure will be
+               reported by the capture error handler and reopen the popup. */
             if (macVNCScreenCaptureFailureNoted())
                 return MacVNCPermissionStatusNotGranted;
-            return CGPreflightScreenCaptureAccess()
-                ? MacVNCPermissionStatusGranted
-                : MacVNCPermissionStatusNotGranted;
+            return MacVNCPermissionStatusGranted;
         case MacVNCPermissionKindAccessibility:
             return AXIsProcessTrusted()
                 ? MacVNCPermissionStatusGranted
