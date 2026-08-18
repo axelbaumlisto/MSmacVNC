@@ -34,6 +34,7 @@ static NSString * const kBundleID = @"net.christianbeier.macVNC";
 
 static const NSInteger kPreferencesCustomAddressLabelTag = 9101;
 static const NSInteger kPreferencesCustomAddressFieldTag = 9102;
+static const NSInteger kPreferencesAllowedSummaryTag = 9103;
 
 static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
 {
@@ -444,11 +445,14 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
 {
     NSTextField *addressLabel = nil;
     NSTextField *addressField = nil;
+    NSTextField *allowedSummary = nil;
     for (NSView *subview in popup.superview.subviews) {
         if (subview.tag == kPreferencesCustomAddressLabelTag)
             addressLabel = (NSTextField *)subview;
         else if (subview.tag == kPreferencesCustomAddressFieldTag)
             addressField = (NSTextField *)subview;
+        else if (subview.tag == kPreferencesAllowedSummaryTag)
+            allowedSummary = (NSTextField *)subview;
     }
     if (!addressLabel || !addressField)
         return;
@@ -459,20 +463,23 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
         addressField.enabled = YES;
         addressField.editable = YES;
         addressField.alphaValue = 1.0;
+        allowedSummary.stringValue = @"Advanced: enter allowed client IP/CIDR below.";
     } else if (tag >= 1000) {
+        NSDictionary *row = [popup.selectedItem.representedObject isKindOfClass:NSDictionary.class]
+            ? popup.selectedItem.representedObject : nil;
         addressLabel.stringValue = @"Selected address:";
-        NSString *address = [popup.selectedItem.representedObject isKindOfClass:NSString.class]
-            ? popup.selectedItem.representedObject : @"";
-        addressField.stringValue = address;
+        addressField.stringValue = row[@"address"] ?: @"";
         addressField.enabled = NO;
         addressField.editable = NO;
         addressField.alphaValue = 0.65;
+        allowedSummary.stringValue = row[@"allowTitle"] ?: @"Auto: matching client network.";
     } else {
         addressLabel.stringValue = @"Custom address:";
         addressField.stringValue = @"";
         addressField.enabled = NO;
         addressField.editable = NO;
         addressField.alphaValue = 0.35;
+        allowedSummary.stringValue = @"This Mac only — 127.0.0.1";
     }
 }
 
@@ -505,7 +512,6 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
     NSString *currentMode = [defaults stringForKey:kKeyListenMode] ?: @"localhost";
     NSString *currentAddress = [defaults stringForKey:kKeyListenAddress] ?: @"";
     NSString *currentAllowed = [defaults stringForKey:kKeyAllowedClients] ?: @"";
-    BOOL allowAll = [defaults boolForKey:kKeyAllowAllConfirmed];
     NSArray<NSDictionary *> *networkRows = [self activeNetworkRows];
     NSMutableArray<NSString *> *presetCIDRs = [NSMutableArray array];
     for (NSDictionary *row in networkRows) {
@@ -547,20 +553,16 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
     listenPopup.toolTip = @"Choose the local address/interface that accepts incoming VNC connections. This is not the allowlist; it only chooses where to listen.";
     [listenPopup addItemWithTitle:@"Localhost only (127.0.0.1)"];
     listenPopup.lastItem.tag = 1;
-    [listenPopup addItemWithTitle:@"All interfaces (requires allow-all confirmation)"];
-    listenPopup.lastItem.tag = 0;
-    [listenPopup addItemWithTitle:@"Custom IPv4 address"];
+    [listenPopup addItemWithTitle:@"Custom IPv4 address (advanced)"];
     listenPopup.lastItem.tag = 2;
     for (NSUInteger i = 0; i < networkRows.count; ++i) {
         NSDictionary *row = networkRows[i];
         [listenPopup addItemWithTitle:[NSString stringWithFormat:@"%@", row[@"listenTitle"]]];
         listenPopup.lastItem.tag = 1000 + (NSInteger)i;
-        listenPopup.lastItem.representedObject = row[@"address"];
+        listenPopup.lastItem.representedObject = row;
     }
 
-    if ([currentMode isEqualToString:@"all"])
-        [listenPopup selectItemWithTag:0];
-    else if ([currentMode isEqualToString:@"custom"])
+    if ([currentMode isEqualToString:@"custom"])
         [listenPopup selectItemWithTag:2];
     else if ([currentMode isEqualToString:@"selected"]) {
         BOOL selected = NO;
@@ -588,51 +590,23 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
     listenPopup.target = self;
     listenPopup.action = @selector(preferencesListenPopupChanged:);
 
-    NSTextField *netLabel = [NSTextField labelWithString:@"Allow clients from:"];
-    netLabel.frame = NSMakeRect(0, 214, 180, 22);
-    netLabel.toolTip = @"Which remote client IP ranges may connect after reaching the selected listen address.";
-    NSTextField *netHint = [NSTextField labelWithString:@"Listen chooses the local interface. Allow chooses remote client IP ranges."];
-    netHint.frame = NSMakeRect(160, 214, 360, 22);
-    netHint.textColor = NSColor.secondaryLabelColor;
-    netHint.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
-    NSMutableArray<NSButton *> *networkButtons = [NSMutableArray array];
-    CGFloat y = 190;
-    NSUInteger visibleAllowRows = 0;
-    for (NSUInteger i = 0; i < networkRows.count && visibleAllowRows < 5; ++i) {
-        NSDictionary *row = networkRows[i];
-        if (![row[@"allowPresetVisible"] boolValue])
-            continue;
-        NSButton *checkbox = [NSButton checkboxWithTitle:row[@"allowTitle"] target:nil action:nil];
-        checkbox.frame = NSMakeRect(16, y, 500, 22);
-        checkbox.toolTip = [row[@"cgnatLike"] boolValue]
-            ? @"Broad CGNAT/Tailscale-style range. Use only with Tailscale ACLs or another trusted private network."
-            : @"Allow VNC clients from this IPv4 subnet.";
-        checkbox.tag = (NSInteger)i;
-        checkbox.state = (!allowAll && [currentAllowed containsString:row[@"allowCIDR"]]) ? NSControlStateValueOn : NSControlStateValueOff;
-        [networkButtons addObject:checkbox];
-        [form addSubview:checkbox];
-        y -= 24;
-        ++visibleAllowRows;
-    }
-    if (visibleAllowRows == 0) {
-        NSTextField *none = [NSTextField labelWithString:@"No selectable active IPv4 networks found. Use custom/manual entries if needed."];
-        none.frame = NSMakeRect(16, y, 500, 22);
-        [form addSubview:none];
-        y -= 24;
-    }
+    NSTextField *netLabel = [NSTextField labelWithString:@"Allowed clients:"];
+    netLabel.frame = NSMakeRect(0, 214, 150, 22);
+    netLabel.toolTip = @"Calculated automatically from the selected listen interface.";
+    NSTextField *allowedSummary = [NSTextField labelWithString:@""];
+    allowedSummary.frame = NSMakeRect(160, 214, 360, 22);
+    allowedSummary.tag = kPreferencesAllowedSummaryTag;
+    allowedSummary.textColor = NSColor.secondaryLabelColor;
+    allowedSummary.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
+    allowedSummary.toolTip = @"No checkbox needed: localhost allows localhost, a Tailscale interface allows Tailscale clients, and a LAN interface allows that LAN.";
 
-    NSButton *allowAllButton = [NSButton checkboxWithTitle:@"Allow all IPv4 clients (explicit; not recommended on untrusted networks)" target:nil action:nil];
-    allowAllButton.frame = NSMakeRect(0, 68, 500, 22);
-    allowAllButton.toolTip = @"Disables the client allowlist. Safe only when the listen address is already protected, e.g. localhost or a trusted VPN interface.";
-    allowAllButton.state = allowAll ? NSControlStateValueOn : NSControlStateValueOff;
-
-    NSTextField *manualLabel = [NSTextField labelWithString:@"Custom allowed IPv4/CIDR:"];
-    manualLabel.frame = NSMakeRect(0, 40, 180, 22);
-    manualLabel.toolTip = @"Optional extra client IPs/subnets, one per line. Example: 100.100.242.110/32";
-    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(180, 0, 340, 62)];
-    NSTextView *allowedText = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 340, 62)];
-    allowedText.string = allowAll ? @"" : manualAllowed;
-    allowedText.toolTip = @"Manual allowlist entries only. Checked presets above are saved separately and are not repeated here.";
+    NSTextField *manualLabel = [NSTextField labelWithString:@"Extra allowed clients (advanced):"];
+    manualLabel.frame = NSMakeRect(0, 170, 210, 22);
+    manualLabel.toolTip = @"Optional extra client IPs/subnets, one per line. Leave empty for the automatic safe policy.";
+    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(210, 108, 310, 84)];
+    NSTextView *allowedText = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 310, 84)];
+    allowedText.string = manualAllowed;
+    allowedText.toolTip = @"Advanced only. Example: one phone's Tailscale IP as 100.x.y.z/32.";
     scroll.documentView = allowedText;
     scroll.hasVerticalScroller = YES;
     scroll.borderType = NSBezelBorder;
@@ -641,8 +615,7 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
     [form addSubview:pwdLabel]; [form addSubview:pwdField];
     [form addSubview:listenLabel]; [form addSubview:listenPopup];
     [form addSubview:customLabel]; [form addSubview:customField];
-    [form addSubview:netLabel]; [form addSubview:netHint];
-    [form addSubview:allowAllButton];
+    [form addSubview:netLabel]; [form addSubview:allowedSummary];
     [form addSubview:manualLabel]; [form addSubview:scroll];
     [self preferencesListenPopupChanged:listenPopup];
     alert.accessoryView = form;
@@ -652,9 +625,7 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
         NSString *newMode = @"localhost";
         NSString *newAddress = @"";
         NSInteger tag = listenPopup.selectedItem.tag;
-        if (tag == 0) {
-            newMode = @"all";
-        } else if (tag == 1) {
+        if (tag == 1) {
             newMode = @"localhost";
         } else if (tag == 2) {
             newMode = @"custom";
@@ -667,22 +638,28 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
             }
         }
 
-        BOOL newAllowAll = allowAllButton.state == NSControlStateValueOn;
-        NSMutableString *combinedAllowed = [NSMutableString string];
-        if (!newAllowAll) {
-            for (NSButton *button in networkButtons) {
-                if (button.state == NSControlStateValueOn && (NSUInteger)button.tag < networkRows.count)
-                    [combinedAllowed appendFormat:@"%@\n", networkRows[(NSUInteger)button.tag][@"allowCIDR"]];
-            }
-            if (allowedText.string.length > 0)
-                [combinedAllowed appendString:allowedText.string];
+        NSMutableOrderedSet<NSString *> *allowedSet = [NSMutableOrderedSet orderedSet];
+        if ([newMode isEqualToString:@"localhost"]) {
+            [allowedSet addObject:@"127.0.0.1"];
+        } else if ([newMode isEqualToString:@"selected"] && tag >= 1000) {
+            NSUInteger rowIndex = (NSUInteger)(tag - 1000);
+            if (rowIndex < networkRows.count)
+                [allowedSet addObject:networkRows[rowIndex][@"allowCIDR"]];
         }
+        for (NSString *line in [allowedText.string componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+            NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            if (trimmed.length > 0)
+                [allowedSet addObject:trimmed];
+        }
+        NSMutableString *combinedAllowed = [NSMutableString string];
+        for (NSString *entry in allowedSet)
+            [combinedAllowed appendFormat:@"%@\n", entry];
+        BOOL newAllowAll = NO;
 
-        if (!newAllowAll && ([combinedAllowed containsString:@"0.0.0.0/0"] ||
-                             [combinedAllowed containsString:@"100.64.0.0/10"])) {
+        if ([combinedAllowed containsString:@"0.0.0.0/0"]) {
             NSAlert *warning = [[NSAlert alloc] init];
-            warning.messageText = @"Broad network range";
-            warning.informativeText = @"The allowed clients list contains a broad range. Continue only if this is intentional.";
+            warning.messageText = @"Allow all clients?";
+            warning.informativeText = @"0.0.0.0/0 allows every IPv4 client that can reach macVNC. This is unsafe outside a trusted VPN.";
             [warning addButtonWithTitle:@"Continue"];
             [warning addButtonWithTitle:@"Cancel"];
             if ([warning runModal] != NSAlertFirstButtonReturn)
