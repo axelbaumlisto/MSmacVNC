@@ -218,6 +218,7 @@ static const NSInteger kPermissionPanelActionQuit = -1;
 static const NSInteger kPermissionPanelActionNone = 0;
 static const NSInteger kPermissionPanelActionStart = 1;
 static const NSInteger kPermissionPanelActionPreferences = 2;
+static const NSInteger kPermissionPanelActionRestart = 3;
 
 @interface MacVNCPermissionsPanelController : NSObject
 
@@ -227,6 +228,8 @@ static const NSInteger kPermissionPanelActionPreferences = 2;
 @property (nonatomic, retain) NSTextField *hintLabel;
 @property (nonatomic, retain) NSButton *startButton;
 @property (nonatomic, retain) NSTimer *refreshTimer;
+@property (nonatomic, retain) NSMutableSet<NSNumber *> *openedPermissionKinds;
+@property (nonatomic, assign) BOOL restartRequired;
 @property (nonatomic, assign) NSInteger action;
 
 - (NSInteger)runModal;
@@ -242,6 +245,7 @@ static const NSInteger kPermissionPanelActionPreferences = 2;
         return nil;
 
     self.action = kPermissionPanelActionNone;
+    self.openedPermissionKinds = [NSMutableSet set];
     self.window = [[[NSWindow alloc]
         initWithContentRect:NSMakeRect(0, 0, 480, 246)
                   styleMask:NSWindowStyleMaskTitled
@@ -281,11 +285,11 @@ static const NSInteger kPermissionPanelActionPreferences = 2;
     [content addSubview:quitButton];
 
     NSButton *preferencesButton = [NSButton buttonWithTitle:@"Preferences" target:self action:@selector(preferencesClicked:)];
-    preferencesButton.frame = NSMakeRect(260, 18, 96, 28);
+    preferencesButton.frame = NSMakeRect(232, 18, 110, 28);
     [content addSubview:preferencesButton];
 
     self.startButton = [NSButton buttonWithTitle:@"Start macVNC" target:self action:@selector(startClicked:)];
-    self.startButton.frame = NSMakeRect(364, 18, 92, 28);
+    self.startButton.frame = NSMakeRect(350, 18, 106, 28);
     self.startButton.keyEquivalent = @"\r";
     [content addSubview:self.startButton];
 
@@ -302,6 +306,8 @@ static const NSInteger kPermissionPanelActionPreferences = 2;
     self.accessibilityButton = nil;
     self.hintLabel = nil;
     self.startButton = nil;
+    self.openedPermissionKinds = nil;
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
     [super dealloc];
 }
 
@@ -329,6 +335,7 @@ static const NSInteger kPermissionPanelActionPreferences = 2;
 {
     NSArray<NSDictionary<NSString *, id> *> *snapshots = macVNCPermissionSnapshots();
     BOOL allGranted = macVNCPermissionsAllGrantedFromSnapshots(snapshots);
+    BOOL restartRequired = NO;
     for (NSDictionary<NSString *, id> *snapshot in snapshots) {
         MacVNCPermissionKind kind = (MacVNCPermissionKind)[snapshot[MacVNCPermissionSnapshotKindKey] integerValue];
         MacVNCPermissionStatus status = (MacVNCPermissionStatus)[snapshot[MacVNCPermissionSnapshotStatusKey] integerValue];
@@ -336,16 +343,35 @@ static const NSInteger kPermissionPanelActionPreferences = 2;
         if (!button)
             continue;
         BOOL granted = status == MacVNCPermissionStatusGranted;
+        NSNumber *kindNumber = @(kind);
+        if (granted)
+            [self.openedPermissionKinds removeObject:kindNumber];
+        BOOL pendingRestart = !granted && [self.openedPermissionKinds containsObject:kindNumber];
+        if (pendingRestart)
+            restartRequired = YES;
         button.title = [NSString stringWithFormat:@"%@  %@ — %@",
-                        granted ? @"✓" : @"⚠",
+                        granted ? @"✓" : (pendingRestart ? @"↻" : @"⚠"),
                         snapshot[MacVNCPermissionSnapshotNameKey],
-                        macVNCPermissionStatusText(status)];
+                        granted ? @"Granted" : (pendingRestart ? @"Restart required" : macVNCPermissionStatusText(status))];
+        button.toolTip = pendingRestart
+            ? @"macOS may apply this permission only after restarting macVNC. Click to reopen System Settings."
+            : @"Click to open the matching macOS Privacy & Security pane.";
         button.enabled = !granted;
     }
-    self.startButton.enabled = allGranted;
-    self.hintLabel.stringValue = allGranted
-        ? @"All permissions granted. You can start macVNC now."
-        : @"Server is stopped until both permissions are granted.";
+    self.restartRequired = restartRequired;
+    if (allGranted) {
+        self.startButton.title = @"Start macVNC";
+        self.startButton.enabled = YES;
+        self.hintLabel.stringValue = @"All permissions granted. You can start macVNC now.";
+    } else if (restartRequired) {
+        self.startButton.title = @"Restart macVNC";
+        self.startButton.enabled = YES;
+        self.hintLabel.stringValue = @"macOS may apply Screen Recording only after restart.";
+    } else {
+        self.startButton.title = @"Start macVNC";
+        self.startButton.enabled = NO;
+        self.hintLabel.stringValue = @"Server is stopped until both permissions are granted.";
+    }
 }
 
 - (void)refreshTimerFired:(NSTimer *)timer
@@ -356,6 +382,7 @@ static const NSInteger kPermissionPanelActionPreferences = 2;
 
 - (void)permissionClicked:(NSButton *)sender
 {
+    [self.openedPermissionKinds addObject:@(sender.tag)];
     macVNCRequestPermissionAndOpenSettings((MacVNCPermissionKind)sender.tag);
     [self refreshPermissions];
 }
@@ -366,7 +393,7 @@ static const NSInteger kPermissionPanelActionPreferences = 2;
     [self refreshPermissions];
     if (!self.startButton.enabled)
         return;
-    self.action = kPermissionPanelActionStart;
+    self.action = self.restartRequired ? kPermissionPanelActionRestart : kPermissionPanelActionStart;
     [NSApp stopModal];
 }
 
@@ -384,9 +411,19 @@ static const NSInteger kPermissionPanelActionPreferences = 2;
     [NSApp stopModal];
 }
 
+- (void)applicationDidBecomeActive:(NSNotification *)notification
+{
+    (void)notification;
+    [self refreshPermissions];
+}
+
 - (NSInteger)runModal
 {
     [self refreshPermissions];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(applicationDidBecomeActive:)
+                                                 name:NSApplicationDidBecomeActiveNotification
+                                               object:nil];
     self.refreshTimer = [NSTimer timerWithTimeInterval:1.0
                                                 target:self
                                               selector:@selector(refreshTimerFired:)
@@ -559,6 +596,22 @@ static const NSInteger kPermissionPanelActionPreferences = 2;
  * Startup permissions
  * ----------------------------------------------------------------------- */
 
+- (void)relaunchApplication
+{
+    NSString *bundlePath = NSBundle.mainBundle.bundlePath;
+    if (bundlePath.length > 0) {
+        NSTask *task = [[[NSTask alloc] init] autorelease];
+        task.launchPath = @"/usr/bin/open";
+        task.arguments = @[@"-n", bundlePath];
+        @try {
+            [task launch];
+        } @catch (NSException *exception) {
+            NSLog(@"Could not relaunch macVNC: %@", exception.reason);
+        }
+    }
+    [NSApp terminate:nil];
+}
+
 - (BOOL)ensureStartupPermissions
 {
     if (macVNCPermissionsAllGranted() || macVNCAllowsTestPermissionGateBypass())
@@ -571,7 +624,9 @@ static const NSInteger kPermissionPanelActionPreferences = 2;
 
     if (action == kPermissionPanelActionStart)
         return macVNCPermissionsAllGranted();
-    if (action == kPermissionPanelActionPreferences)
+    if (action == kPermissionPanelActionRestart)
+        [self relaunchApplication];
+    else if (action == kPermissionPanelActionPreferences)
         [self openPreferences:nil];
     else if (action == kPermissionPanelActionQuit)
         [NSApp terminate:nil];
