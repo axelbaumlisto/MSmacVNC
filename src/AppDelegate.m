@@ -449,9 +449,19 @@ static const NSInteger kPermissionPanelActionRestart = 3;
 @property (nonatomic, strong) NSMenuItem    *clientsMenuItem;
 @property (nonatomic, strong) NSMenuItem    *loginItemMenuItem;
 @property (nonatomic, strong) NSTimer       *updateTimer;
+@property (nonatomic, assign) BOOL           permissionsPanelVisible;
 
 @end
 
+
+static AppDelegate *gSharedAppDelegate = nil;
+
+static void macVNCScreenCaptureFailed(void)
+{
+    [gSharedAppDelegate performSelectorOnMainThread:@selector(handleScreenCaptureFailure)
+                                         withObject:nil
+                                      waitUntilDone:NO];
+}
 
 @implementation AppDelegate
 
@@ -461,10 +471,11 @@ static const NSInteger kPermissionPanelActionRestart = 3;
 
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification
 {
+    gSharedAppDelegate = self;
+    macVNCScreenCaptureFailureHandler = macVNCScreenCaptureFailed;
     [self registerDefaults];
     [self setupStatusBarItem];
-    if ([self ensureStartupPermissions])
-        [self startServer];
+    [self startServerIfPermitted];
 
     /* Poll every 2 s to refresh client-count in the menu. */
     self.updateTimer = [NSTimer scheduledTimerWithTimeInterval:2.0
@@ -600,9 +611,15 @@ static const NSInteger kPermissionPanelActionRestart = 3;
 {
     NSString *bundlePath = NSBundle.mainBundle.bundlePath;
     if (bundlePath.length > 0) {
+        /* Wait for THIS process to exit, then open exactly one new instance.
+           Using a pid wait avoids ending up with two running macVNC processes. */
+        pid_t pid = getpid();
+        NSString *script = [NSString stringWithFormat:
+            @"while kill -0 %d 2>/dev/null; do sleep 0.2; done; /usr/bin/open %@",
+            pid, [self shellQuote:bundlePath]];
         NSTask *task = [[[NSTask alloc] init] autorelease];
-        task.launchPath = @"/usr/bin/open";
-        task.arguments = @[@"-n", bundlePath];
+        task.launchPath = @"/bin/sh";
+        task.arguments = @[@"-c", script];
         @try {
             [task launch];
         } @catch (NSException *exception) {
@@ -612,25 +629,56 @@ static const NSInteger kPermissionPanelActionRestart = 3;
     [NSApp terminate:nil];
 }
 
-- (BOOL)ensureStartupPermissions
+- (NSString *)shellQuote:(NSString *)path
 {
-    if (macVNCPermissionsAllGranted() || macVNCAllowsTestPermissionGateBypass())
-        return YES;
+    return [NSString stringWithFormat:@"'%@'",
+            [path stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]];
+}
 
+- (void)startServerIfPermitted
+{
+    if (macVNCPermissionsAllGranted() || macVNCAllowsTestPermissionGateBypass()) {
+        [self startServer];
+        return;
+    }
+    [self showPermissionsPanel];
+}
+
+- (void)showPermissionsPanel
+{
+    if (self.permissionsPanelVisible)
+        return;
+    self.permissionsPanelVisible = YES;
     self.statusMenuItem.title = @"Not running  •  permissions required";
+
     MacVNCPermissionsPanelController *controller = [[MacVNCPermissionsPanelController alloc] init];
     NSInteger action = [controller runModal];
     [controller release];
+    self.permissionsPanelVisible = NO;
 
-    if (action == kPermissionPanelActionStart)
-        return macVNCPermissionsAllGranted();
-    if (action == kPermissionPanelActionRestart)
+    if (action == kPermissionPanelActionStart) {
+        if (macVNCPermissionsAllGranted())
+            [self startServer];
+        else
+            [self showPermissionsPanel];
+    } else if (action == kPermissionPanelActionRestart) {
         [self relaunchApplication];
-    else if (action == kPermissionPanelActionPreferences)
+    } else if (action == kPermissionPanelActionPreferences) {
         [self openPreferences:nil];
-    else if (action == kPermissionPanelActionQuit)
+    } else if (action == kPermissionPanelActionQuit) {
         [NSApp terminate:nil];
-    return NO;
+    }
+}
+
+- (void)handleScreenCaptureFailure
+{
+    /* ScreenCaptureKit failed at runtime: Screen Recording is not effectively
+       granted even if CGPreflight returned a stale YES. Stop the server and show
+       the single unified permission popup. */
+    macVNCNoteScreenCaptureFailure();
+    vncServerStop();
+    [self updateMenuStatus];
+    [self showPermissionsPanel];
 }
 
 /* -----------------------------------------------------------------------
@@ -711,14 +759,17 @@ static const NSInteger kPermissionPanelActionRestart = 3;
         dispatch_async(dispatch_get_main_queue(), ^{
             if (ok) {
                 [self updateMenuStatus];
-            } else {
+            } else if (configurationError) {
                 self.statusMenuItem.title = @"Failed to start";
                 NSAlert *alert = [[NSAlert alloc] init];
                 alert.messageText     = @"macVNC could not start";
-                alert.informativeText = configurationError ?: @"Check System Settings → Privacy & Security → "
-                                        @"Accessibility and Screen Recording, then relaunch.";
+                alert.informativeText = configurationError;
                 alert.alertStyle      = NSAlertStyleCritical;
                 [alert runModal];
+            } else {
+                /* Non-configuration failure (e.g. capture/permissions). The
+                   single permission popup is driven by the capture handler. */
+                [self updateMenuStatus];
             }
         });
     });

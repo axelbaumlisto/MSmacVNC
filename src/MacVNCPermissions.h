@@ -26,6 +26,9 @@ NSString *macVNCPermissionSettingsURL(MacVNCPermissionKind kind);
 NSString *macVNCPermissionStatusText(MacVNCPermissionStatus status);
 
 MacVNCPermissionStatus macVNCCheckPermission(MacVNCPermissionKind kind);
+void macVNCNoteScreenCaptureFailure(void);
+void macVNCResetScreenCaptureFailure(void);
+BOOL macVNCScreenCaptureFailureNoted(void);
 NSDictionary<NSString *, id> *macVNCPermissionSnapshot(MacVNCPermissionKind kind,
                                                        MacVNCPermissionStatus status);
 NSArray<NSDictionary<NSString *, id> *> *macVNCPermissionSnapshots(void);
