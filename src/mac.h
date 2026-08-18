@@ -2,6 +2,7 @@
 
 #include <rfb/rfb.h>
 #include <stdatomic.h>
+#include "NetworkPolicyResolver.h"
 
 /* -----------------------------------------------------------------------
  * Globals that AppDelegate may read or write before calling vncServerStart().
@@ -12,6 +13,16 @@ extern rfbBool viewOnly;
 
 /* Index of the display to share (-1 = primary). */
 extern int displayNumber;
+
+#define MACVNC_LISTEN_ADDRESS_MAX 64
+#define MACVNC_ALLOWED_CLIENTS_MAX 4096
+
+/* Optional IPv4 bind address. Empty means all interfaces. */
+extern char macVNCListenAddress[MACVNC_LISTEN_ADDRESS_MAX];
+
+/* Optional IPv4/CIDR client allowlist. Interpretation depends on access mode. */
+extern char macVNCAllowedClients[MACVNC_ALLOWED_CLIENTS_MAX];
+extern MacVNCClientAccessMode macVNCClientAccessMode;
 
 /* -----------------------------------------------------------------------
  * Live statistics (updated atomically from LibVNCServer threads).

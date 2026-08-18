@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.1.0 LANGUAGES C)
+project(macVNC VERSION 0.2.0 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -50,6 +50,14 @@ set(SOURCE_FILES
     src/FrameMailbox.c
     src/ReadinessPolicy.h
     src/ReadinessPolicy.c
+    src/NetworkAccess.h
+    src/NetworkAccess.c
+    src/NetworkCIDR.h
+    src/NetworkCIDR.c
+    src/NetworkInventory.h
+    src/NetworkInventory.c
+    src/NetworkPolicyResolver.h
+    src/NetworkPolicyResolver.c
     src/ScreenCapturer.h
     src/ScreenCapturer.m
     src/AppDelegate.h
@@ -150,6 +158,22 @@ if(BUILD_TESTING)
     target_include_directories(test_readiness_policy PRIVATE src)
     add_test(NAME readiness_policy COMMAND test_readiness_policy)
 
+    add_executable(test_network_access tests/test_network_access.c src/NetworkAccess.c)
+    target_include_directories(test_network_access PRIVATE src)
+    add_test(NAME network_access COMMAND test_network_access)
+
+    add_executable(test_network_cidr tests/test_network_cidr.c src/NetworkCIDR.c src/NetworkAccess.c)
+    target_include_directories(test_network_cidr PRIVATE src)
+    add_test(NAME network_cidr COMMAND test_network_cidr)
+
+    add_executable(test_network_inventory tests/test_network_inventory.c src/NetworkInventory.c src/NetworkCIDR.c src/NetworkAccess.c)
+    target_include_directories(test_network_inventory PRIVATE src)
+    add_test(NAME network_inventory COMMAND test_network_inventory)
+
+    add_executable(test_network_policy_resolver tests/test_network_policy_resolver.c src/NetworkPolicyResolver.c src/NetworkAccess.c)
+    target_include_directories(test_network_policy_resolver PRIVATE src)
+    add_test(NAME network_policy_resolver COMMAND test_network_policy_resolver)
+
     add_executable(test_server_init_failure
         tests/test_server_init_failure.m
         src/mac.m
@@ -161,6 +185,10 @@ if(BUILD_TESTING)
         src/CaptureRate.c
         src/FrameMailbox.c
         src/ReadinessPolicy.c
+        src/NetworkAccess.c
+        src/NetworkCIDR.c
+        src/NetworkInventory.c
+        src/NetworkPolicyResolver.c
         src/ScreenCapturer.m
     )
     target_include_directories(test_server_init_failure PRIVATE src)
@@ -179,7 +207,12 @@ if(BUILD_TESTING)
     add_test(NAME server_init_failure COMMAND test_server_init_failure)
     set_tests_properties(server_init_failure PROPERTIES SKIP_RETURN_CODE 77)
 
-    foreach(test_target test_keysym test_display_layout test_compositor test_pointer_state test_keyboard_modifiers test_capture_rate test_frame_mailbox test_readiness_policy test_server_init_failure)
+    add_test(NAME client_allowlist
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_client_allowlist.py
+                --app $<TARGET_FILE:${PROJECT_NAME}>
+    )
+
+    foreach(test_target test_keysym test_display_layout test_compositor test_pointer_state test_keyboard_modifiers test_capture_rate test_frame_mailbox test_readiness_policy test_network_access test_network_cidr test_network_inventory test_network_policy_resolver test_server_init_failure)
         target_compile_options(${test_target} PRIVATE -UNDEBUG)
     endforeach()
 endif()
