@@ -67,6 +67,9 @@ int main(void)
         preventDimming = FALSE;
         preventSleep = FALSE;
         displayNumber = -2;
+        macVNCClientAccessMode = MACVNC_CLIENT_ACCESS_ALLOW_ALL_CONFIRMED;
+        macVNCListenAddress[0] = '\0';
+        macVNCAllowedClients[0] = '\0';
 
         CGDirectDisplayID displays[32];
         CGDisplayCount displayCount = 0;
