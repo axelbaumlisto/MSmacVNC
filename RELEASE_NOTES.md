@@ -1,15 +1,12 @@
-# macVNC 0.2.6
+# macVNC 0.2.7
 
 ## Highlights
 
-- Added startup permission gate: macVNC starts the VNC server only when required macOS permissions are granted.
-- New startup popup uses two clickable permission chips:
-  - `Screen Recording` — required to share the display;
-  - `Accessibility` — required for remote keyboard/mouse control.
-- Clicking a missing permission chip opens the matching macOS Privacy & Security pane.
-- Permission chips auto-refresh while the popup is open; `Start macVNC` is enabled only after both permissions are granted.
-- No `Start anyway` path: no permissions → no VNC listener.
-- Permission logic is isolated in `MacVNCPermissions` instead of being mixed into server startup.
+- Fixed startup permission popup refresh behavior after granting permissions in System Settings.
+- Permission popup now refreshes when macVNC becomes active again.
+- If macOS reports a permission as still unavailable after opening System Settings, the chip shows `Restart required` instead of staying as plain `Not granted`.
+- `Start macVNC` becomes `Restart macVNC` when a permission is pending process restart.
+- Keeps the safety rule: no required permissions → no VNC listener.
 
 ## Validation
 
@@ -19,6 +16,17 @@
 - Notarization: accepted.
 - Stapler validation: passed.
 - Gatekeeper assessment: accepted as Notarized Developer ID.
+
+# macVNC 0.2.6
+
+- Added startup permission gate: macVNC starts the VNC server only when required macOS permissions are granted.
+- Startup popup uses two clickable permission chips:
+  - `Screen Recording` — required to share the display;
+  - `Accessibility` — required for remote keyboard/mouse control.
+- Clicking a missing permission chip opens the matching macOS Privacy & Security pane.
+- Permission chips auto-refresh while the popup is open; `Start macVNC` is enabled only after both permissions are granted.
+- No `Start anyway` path: no permissions → no VNC listener.
+- Permission logic is isolated in `MacVNCPermissions` instead of being mixed into server startup.
 
 # macVNC 0.2.5
 
