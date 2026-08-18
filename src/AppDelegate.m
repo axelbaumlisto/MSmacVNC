@@ -5,6 +5,7 @@
 #import "NetworkCIDR.h"
 #import "NetworkInventory.h"
 #import "NetworkPolicyResolver.h"
+#import "MacVNCPermissions.h"
 
 #import <ServiceManagement/ServiceManagement.h>
 #import <Security/Security.h>
@@ -128,6 +129,15 @@ static NSString *macVNCLoadPassword(NSUserDefaults *defaults)
     return password ?: @"";
 }
 
+static BOOL macVNCAllowsTestPermissionGateBypass(void)
+{
+    const char *flag = getenv("MACVNC_TEST_SKIP_PERMISSION_GATE");
+    if (!flag || strcmp(flag, "1") != 0)
+        return NO;
+    NSString *bundlePath = NSBundle.mainBundle.bundlePath ?: @"";
+    return [bundlePath containsString:@"/build-"] || [bundlePath containsString:@"/build/"];
+}
+
 static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
 {
     const char *fileSystemPath = path.fileSystemRepresentation;
@@ -204,6 +214,197 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
     return password;
 }
 
+static const NSInteger kPermissionPanelActionQuit = -1;
+static const NSInteger kPermissionPanelActionNone = 0;
+static const NSInteger kPermissionPanelActionStart = 1;
+static const NSInteger kPermissionPanelActionPreferences = 2;
+
+@interface MacVNCPermissionsPanelController : NSObject
+
+@property (nonatomic, retain) NSWindow *window;
+@property (nonatomic, retain) NSButton *screenButton;
+@property (nonatomic, retain) NSButton *accessibilityButton;
+@property (nonatomic, retain) NSTextField *hintLabel;
+@property (nonatomic, retain) NSButton *startButton;
+@property (nonatomic, retain) NSTimer *refreshTimer;
+@property (nonatomic, assign) NSInteger action;
+
+- (NSInteger)runModal;
+
+@end
+
+@implementation MacVNCPermissionsPanelController
+
+- (id)init
+{
+    self = [super init];
+    if (!self)
+        return nil;
+
+    self.action = kPermissionPanelActionNone;
+    self.window = [[[NSWindow alloc]
+        initWithContentRect:NSMakeRect(0, 0, 480, 246)
+                  styleMask:NSWindowStyleMaskTitled
+                    backing:NSBackingStoreBuffered
+                      defer:NO] autorelease];
+    self.window.title = @"macVNC Permissions";
+    self.window.releasedWhenClosed = NO;
+
+    NSView *content = self.window.contentView;
+
+    NSTextField *title = [NSTextField labelWithString:@"macVNC needs permissions before starting"];
+    title.frame = NSMakeRect(24, 202, 432, 22);
+    title.font = [NSFont boldSystemFontOfSize:14];
+    [content addSubview:title];
+
+    NSTextField *subtitle = [NSTextField labelWithString:@"Click a missing permission to open System Settings. Return here after granting it."];
+    subtitle.frame = NSMakeRect(24, 178, 432, 20);
+    subtitle.textColor = NSColor.secondaryLabelColor;
+    subtitle.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
+    [content addSubview:subtitle];
+
+    self.screenButton = [self permissionButtonWithFrame:NSMakeRect(24, 132, 432, 34)
+                                                   kind:MacVNCPermissionKindScreenRecording];
+    self.accessibilityButton = [self permissionButtonWithFrame:NSMakeRect(24, 90, 432, 34)
+                                                          kind:MacVNCPermissionKindAccessibility];
+    [content addSubview:self.screenButton];
+    [content addSubview:self.accessibilityButton];
+
+    self.hintLabel = [NSTextField labelWithString:@""];
+    self.hintLabel.frame = NSMakeRect(24, 58, 432, 20);
+    self.hintLabel.textColor = NSColor.secondaryLabelColor;
+    self.hintLabel.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
+    [content addSubview:self.hintLabel];
+
+    NSButton *quitButton = [NSButton buttonWithTitle:@"Quit" target:self action:@selector(quitClicked:)];
+    quitButton.frame = NSMakeRect(24, 18, 90, 28);
+    [content addSubview:quitButton];
+
+    NSButton *preferencesButton = [NSButton buttonWithTitle:@"Preferences" target:self action:@selector(preferencesClicked:)];
+    preferencesButton.frame = NSMakeRect(260, 18, 96, 28);
+    [content addSubview:preferencesButton];
+
+    self.startButton = [NSButton buttonWithTitle:@"Start macVNC" target:self action:@selector(startClicked:)];
+    self.startButton.frame = NSMakeRect(364, 18, 92, 28);
+    self.startButton.keyEquivalent = @"\r";
+    [content addSubview:self.startButton];
+
+    [self refreshPermissions];
+    return self;
+}
+
+- (void)dealloc
+{
+    [self.refreshTimer invalidate];
+    self.refreshTimer = nil;
+    self.window = nil;
+    self.screenButton = nil;
+    self.accessibilityButton = nil;
+    self.hintLabel = nil;
+    self.startButton = nil;
+    [super dealloc];
+}
+
+- (NSButton *)permissionButtonWithFrame:(NSRect)frame kind:(MacVNCPermissionKind)kind
+{
+    NSButton *button = [NSButton buttonWithTitle:@"" target:self action:@selector(permissionClicked:)];
+    button.frame = frame;
+    button.tag = kind;
+    button.bezelStyle = NSBezelStyleRounded;
+    button.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
+    button.toolTip = @"Click to open the matching macOS Privacy & Security pane.";
+    return button;
+}
+
+- (NSButton *)buttonForPermissionKind:(MacVNCPermissionKind)kind
+{
+    if (kind == MacVNCPermissionKindScreenRecording)
+        return self.screenButton;
+    if (kind == MacVNCPermissionKindAccessibility)
+        return self.accessibilityButton;
+    return nil;
+}
+
+- (void)refreshPermissions
+{
+    NSArray<NSDictionary<NSString *, id> *> *snapshots = macVNCPermissionSnapshots();
+    BOOL allGranted = macVNCPermissionsAllGrantedFromSnapshots(snapshots);
+    for (NSDictionary<NSString *, id> *snapshot in snapshots) {
+        MacVNCPermissionKind kind = (MacVNCPermissionKind)[snapshot[MacVNCPermissionSnapshotKindKey] integerValue];
+        MacVNCPermissionStatus status = (MacVNCPermissionStatus)[snapshot[MacVNCPermissionSnapshotStatusKey] integerValue];
+        NSButton *button = [self buttonForPermissionKind:kind];
+        if (!button)
+            continue;
+        BOOL granted = status == MacVNCPermissionStatusGranted;
+        button.title = [NSString stringWithFormat:@"%@  %@ — %@",
+                        granted ? @"✓" : @"⚠",
+                        snapshot[MacVNCPermissionSnapshotNameKey],
+                        macVNCPermissionStatusText(status)];
+        button.enabled = !granted;
+    }
+    self.startButton.enabled = allGranted;
+    self.hintLabel.stringValue = allGranted
+        ? @"All permissions granted. You can start macVNC now."
+        : @"Server is stopped until both permissions are granted.";
+}
+
+- (void)refreshTimerFired:(NSTimer *)timer
+{
+    (void)timer;
+    [self refreshPermissions];
+}
+
+- (void)permissionClicked:(NSButton *)sender
+{
+    macVNCRequestPermissionAndOpenSettings((MacVNCPermissionKind)sender.tag);
+    [self refreshPermissions];
+}
+
+- (void)startClicked:(id)sender
+{
+    (void)sender;
+    [self refreshPermissions];
+    if (!self.startButton.enabled)
+        return;
+    self.action = kPermissionPanelActionStart;
+    [NSApp stopModal];
+}
+
+- (void)preferencesClicked:(id)sender
+{
+    (void)sender;
+    self.action = kPermissionPanelActionPreferences;
+    [NSApp stopModal];
+}
+
+- (void)quitClicked:(id)sender
+{
+    (void)sender;
+    self.action = kPermissionPanelActionQuit;
+    [NSApp stopModal];
+}
+
+- (NSInteger)runModal
+{
+    [self refreshPermissions];
+    self.refreshTimer = [NSTimer timerWithTimeInterval:1.0
+                                                target:self
+                                              selector:@selector(refreshTimerFired:)
+                                              userInfo:nil
+                                               repeats:YES];
+    [[NSRunLoop currentRunLoop] addTimer:self.refreshTimer forMode:NSModalPanelRunLoopMode];
+    [[NSRunLoop currentRunLoop] addTimer:self.refreshTimer forMode:NSRunLoopCommonModes];
+    [self.window center];
+    [self.window makeKeyAndOrderFront:nil];
+    [NSApp runModalForWindow:self.window];
+    [self.refreshTimer invalidate];
+    self.refreshTimer = nil;
+    [self.window orderOut:nil];
+    return self.action;
+}
+
+@end
+
 @interface AppDelegate ()
 
 @property (nonatomic, strong) NSStatusItem  *statusItem;
@@ -225,7 +426,8 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
 {
     [self registerDefaults];
     [self setupStatusBarItem];
-    [self startServer];
+    if ([self ensureStartupPermissions])
+        [self startServer];
 
     /* Poll every 2 s to refresh client-count in the menu. */
     self.updateTimer = [NSTimer scheduledTimerWithTimeInterval:2.0
@@ -354,6 +556,29 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
 }
 
 /* -----------------------------------------------------------------------
+ * Startup permissions
+ * ----------------------------------------------------------------------- */
+
+- (BOOL)ensureStartupPermissions
+{
+    if (macVNCPermissionsAllGranted() || macVNCAllowsTestPermissionGateBypass())
+        return YES;
+
+    self.statusMenuItem.title = @"Not running  •  permissions required";
+    MacVNCPermissionsPanelController *controller = [[MacVNCPermissionsPanelController alloc] init];
+    NSInteger action = [controller runModal];
+    [controller release];
+
+    if (action == kPermissionPanelActionStart)
+        return macVNCPermissionsAllGranted();
+    if (action == kPermissionPanelActionPreferences)
+        [self openPreferences:nil];
+    else if (action == kPermissionPanelActionQuit)
+        [NSApp terminate:nil];
+    return NO;
+}
+
+/* -----------------------------------------------------------------------
  * Server lifecycle
  * ----------------------------------------------------------------------- */
 
@@ -462,6 +687,8 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
             bind = [defaults stringForKey:kKeyListenAddress] ?: @"";
         NSString *access = [defaults boolForKey:kKeyAllowAllConfirmed] ? @"allow all" : @"allowlist";
         self.statusMenuItem.title = [NSString stringWithFormat:@"Running  •  %@:%d  •  %@", bind, port, access];
+    } else if (!macVNCPermissionsAllGranted()) {
+        self.statusMenuItem.title = @"Not running  •  permissions required";
     } else {
         self.statusMenuItem.title = @"Not running";
     }
