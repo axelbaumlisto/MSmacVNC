@@ -1,24 +1,31 @@
-# macVNC 0.2.5
+# macVNC 0.2.6
 
 ## Highlights
 
-- Password is now stored in macOS Keychain instead of plaintext `NSUserDefaults`.
-- Existing plaintext password is migrated to Keychain automatically and removed from defaults.
-- Preferences window is more compact with less empty space.
-- `Extra allowed clients (advanced)` now shows the expected format:
-  - one IPv4/CIDR per line;
-  - examples: `100.x.y.z/32`, `192.168.100.0/24`.
-- Automatic allowed-client summary is shortened so it fits in the window.
+- Added startup permission gate: macVNC starts the VNC server only when required macOS permissions are granted.
+- New startup popup uses two clickable permission chips:
+  - `Screen Recording` — required to share the display;
+  - `Accessibility` — required for remote keyboard/mouse control.
+- Clicking a missing permission chip opens the matching macOS Privacy & Security pane.
+- Permission chips auto-refresh while the popup is open; `Start macVNC` is enabled only after both permissions are granted.
+- No `Start anyway` path: no permissions → no VNC listener.
+- Permission logic is isolated in `MacVNCPermissions` instead of being mixed into server startup.
 
 ## Validation
 
 - Release build: passed.
-- CTest: 14/14 passed.
+- CTest: 15/15 passed.
 - Developer ID Application signing: passed.
 - Notarization: accepted.
 - Stapler validation: passed.
 - Gatekeeper assessment: accepted as Notarized Developer ID.
-- Installed smoke: RFB banner passed; IPv6 disabled passed.
+
+# macVNC 0.2.5
+
+- Password is stored in macOS Keychain instead of plaintext `NSUserDefaults`.
+- Existing plaintext password is migrated to Keychain automatically and removed from defaults.
+- Preferences window is more compact with less empty space.
+- `Extra allowed clients (advanced)` shows the expected format.
 
 # macVNC 0.2.4
 
@@ -26,7 +33,6 @@
   - removed the confusing `Allow clients from` checkbox list;
   - removed `All interfaces` from the normal UI path;
   - allowed clients are now calculated automatically from `Accept connections on`.
-- Manual CIDRs are clearly labeled as `Extra allowed clients (advanced)`.
 
 # macVNC 0.2.3
 

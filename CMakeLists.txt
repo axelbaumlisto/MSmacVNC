@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.2.5 LANGUAGES C)
+project(macVNC VERSION 0.2.6 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -28,6 +28,7 @@ find_library(FOUNDATION             Foundation)
 find_library(APPKIT_LIBRARY         AppKit           REQUIRED)
 find_library(SERVICE_MANAGEMENT     ServiceManagement REQUIRED)
 find_library(SECURITY_LIBRARY       Security REQUIRED)
+find_library(APPLICATION_SERVICES   ApplicationServices REQUIRED)
 
 #
 # Sources
@@ -59,6 +60,8 @@ set(SOURCE_FILES
     src/NetworkInventory.c
     src/NetworkPolicyResolver.h
     src/NetworkPolicyResolver.c
+    src/MacVNCPermissions.h
+    src/MacVNCPermissions.m
     src/ScreenCapturer.h
     src/ScreenCapturer.m
     src/AppDelegate.h
@@ -100,6 +103,7 @@ target_link_libraries(${PROJECT_NAME}
     ${APPKIT_LIBRARY}
     ${SERVICE_MANAGEMENT}
     ${SECURITY_LIBRARY}
+    ${APPLICATION_SERVICES}
 )
 
 #
@@ -176,6 +180,11 @@ if(BUILD_TESTING)
     target_include_directories(test_network_policy_resolver PRIVATE src)
     add_test(NAME network_policy_resolver COMMAND test_network_policy_resolver)
 
+    add_executable(test_permissions tests/test_permissions.m src/MacVNCPermissions.m)
+    target_include_directories(test_permissions PRIVATE src)
+    target_link_libraries(test_permissions ${FOUNDATION} ${APPKIT_LIBRARY} ${APPLICATION_SERVICES})
+    add_test(NAME permissions COMMAND test_permissions)
+
     add_executable(test_server_init_failure
         tests/test_server_init_failure.m
         src/mac.m
@@ -214,7 +223,7 @@ if(BUILD_TESTING)
                 --app $<TARGET_FILE:${PROJECT_NAME}>
     )
 
-    foreach(test_target test_keysym test_display_layout test_compositor test_pointer_state test_keyboard_modifiers test_capture_rate test_frame_mailbox test_readiness_policy test_network_access test_network_cidr test_network_inventory test_network_policy_resolver test_server_init_failure)
+    foreach(test_target test_keysym test_display_layout test_compositor test_pointer_state test_keyboard_modifiers test_capture_rate test_frame_mailbox test_readiness_policy test_network_access test_network_cidr test_network_inventory test_network_policy_resolver test_permissions test_server_init_failure)
         target_compile_options(${test_target} PRIVATE -UNDEBUG)
     endforeach()
 endif()
