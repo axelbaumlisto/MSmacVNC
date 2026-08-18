@@ -39,6 +39,7 @@ def start_app(app, port, allowed, log_path, password_file):
         "MACVNC_PORT": str(port),
         "MACVNC_DISPLAY": "-1",
         "MACVNC_PASSWORD_FILE": str(password_file),
+        "MACVNC_TEST_SKIP_PERMISSION_GATE": "1",
     })
     if allowed is not None:
         env["MACVNC_ALLOWED_CLIENTS"] = allowed
