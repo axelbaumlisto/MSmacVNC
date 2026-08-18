@@ -1,9 +1,11 @@
-# macVNC 0.2.2
+# macVNC 0.2.3
 
 ## Highlights
 
-- Network Preferences no longer shows the safe localhost default (`127.0.0.1`) as a manual custom CIDR when using a network preset.
-- Keeps the explicit broad-range warning for `100.64.0.0/10` / Tailscale-like access.
+- Clarified the listen-address field in Network Preferences:
+  - selected interfaces now show `Selected address` as read-only;
+  - `Custom address` appears only for the explicit `Custom IPv4 address` mode.
+- This removes confusion where a selected Tailscale interface IP looked like a manually entered custom address.
 
 ## Validation
 
@@ -13,6 +15,11 @@
 - Notarization: accepted.
 - Stapler validation: passed.
 - Gatekeeper assessment: accepted as Notarized Developer ID.
+
+# macVNC 0.2.2
+
+- Network Preferences no longer shows the safe localhost default (`127.0.0.1`) as a manual custom CIDR when using a network preset.
+- Keeps the explicit broad-range warning for `100.64.0.0/10` / Tailscale-like access.
 
 # macVNC 0.2.1
 

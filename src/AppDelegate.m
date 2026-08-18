@@ -32,6 +32,9 @@ static NSString * const kKeyAllowAllConfirmed = @"allowAllConfirmed";
 /* Bundle identifier used for the LaunchAgent plist (must match Info.plist) */
 static NSString * const kBundleID = @"net.christianbeier.macVNC";
 
+static const NSInteger kPreferencesCustomAddressLabelTag = 9101;
+static const NSInteger kPreferencesCustomAddressFieldTag = 9102;
+
 static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
 {
     const char *fileSystemPath = path.fileSystemRepresentation;
@@ -437,6 +440,42 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
     return rows;
 }
 
+- (void)preferencesListenPopupChanged:(NSPopUpButton *)popup
+{
+    NSTextField *addressLabel = nil;
+    NSTextField *addressField = nil;
+    for (NSView *subview in popup.superview.subviews) {
+        if (subview.tag == kPreferencesCustomAddressLabelTag)
+            addressLabel = (NSTextField *)subview;
+        else if (subview.tag == kPreferencesCustomAddressFieldTag)
+            addressField = (NSTextField *)subview;
+    }
+    if (!addressLabel || !addressField)
+        return;
+
+    NSInteger tag = popup.selectedItem.tag;
+    if (tag == 2) {
+        addressLabel.stringValue = @"Custom address:";
+        addressField.enabled = YES;
+        addressField.editable = YES;
+        addressField.alphaValue = 1.0;
+    } else if (tag >= 1000) {
+        addressLabel.stringValue = @"Selected address:";
+        NSString *address = [popup.selectedItem.representedObject isKindOfClass:NSString.class]
+            ? popup.selectedItem.representedObject : @"";
+        addressField.stringValue = address;
+        addressField.enabled = NO;
+        addressField.editable = NO;
+        addressField.alphaValue = 0.65;
+    } else {
+        addressLabel.stringValue = @"Custom address:";
+        addressField.stringValue = @"";
+        addressField.enabled = NO;
+        addressField.editable = NO;
+        addressField.alphaValue = 0.35;
+    }
+}
+
 - (void)copyVNCAddress:(id)sender
 {
     int port = vncServerGetPort();
@@ -516,6 +555,7 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
         NSDictionary *row = networkRows[i];
         [listenPopup addItemWithTitle:[NSString stringWithFormat:@"%@", row[@"listenTitle"]]];
         listenPopup.lastItem.tag = 1000 + (NSInteger)i;
+        listenPopup.lastItem.representedObject = row[@"address"];
     }
 
     if ([currentMode isEqualToString:@"all"])
@@ -538,11 +578,15 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
     }
 
     NSTextField *customLabel = [NSTextField labelWithString:@"Custom address:"];
-    customLabel.frame = NSMakeRect(0, 246, 120, 22);
-    customLabel.toolTip = @"Used only when 'Custom IPv4 address' is selected above.";
+    customLabel.frame = NSMakeRect(0, 246, 150, 22);
+    customLabel.tag = kPreferencesCustomAddressLabelTag;
+    customLabel.toolTip = @"Editable only when 'Custom IPv4 address' is selected above.";
     NSTextField *customField = [NSTextField textFieldWithString:currentAddress];
-    customField.frame = NSMakeRect(130, 246, 170, 22);
+    customField.frame = NSMakeRect(160, 246, 190, 22);
+    customField.tag = kPreferencesCustomAddressFieldTag;
     customField.toolTip = @"Local IPv4 address to bind, for example 192.168.100.87 or 100.70.214.41.";
+    listenPopup.target = self;
+    listenPopup.action = @selector(preferencesListenPopupChanged:);
 
     NSTextField *netLabel = [NSTextField labelWithString:@"Allow clients from:"];
     netLabel.frame = NSMakeRect(0, 214, 180, 22);
@@ -600,6 +644,7 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
     [form addSubview:netLabel]; [form addSubview:netHint];
     [form addSubview:allowAllButton];
     [form addSubview:manualLabel]; [form addSubview:scroll];
+    [self preferencesListenPopupChanged:listenPopup];
     alert.accessoryView = form;
 
     if ([alert runModal] == NSAlertFirstButtonReturn) {
