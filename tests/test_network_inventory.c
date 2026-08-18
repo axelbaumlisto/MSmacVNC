@@ -38,6 +38,14 @@ int main(void)
     CHECK(row.selectable);
     CHECK(!row.allowPresetVisible);
 
+    CHECK(macVNCBuildNetworkInterfaceRow(&(MacVNCNetworkInterfaceSnapshot){"utun6", true, "10.13.13.3", "255.255.255.255"}, &row));
+    CHECK(row.selectable);
+    CHECK(!row.allowPresetVisible);
+
+    CHECK(macVNCBuildNetworkInterfaceRow(&(MacVNCNetworkInterfaceSnapshot){"en7", true, "169.254.10.1", "255.255.0.0"}, &row));
+    CHECK(row.selectable);
+    CHECK(!row.allowPresetVisible);
+
     CHECK(macVNCBuildNetworkInterfaceRow(&(MacVNCNetworkInterfaceSnapshot){"en9", false, NULL, NULL}, &row));
     CHECK(!row.active);
     CHECK(!row.selectable);

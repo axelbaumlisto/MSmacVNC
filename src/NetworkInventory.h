@@ -18,6 +18,7 @@ typedef struct {
     char cidr[MACVNC_NETWORK_ROW_TEXT_MAX];
     char suggestedAllowCIDR[MACVNC_NETWORK_ROW_TEXT_MAX];
     char displayName[MACVNC_NETWORK_ROW_TEXT_MAX];
+    unsigned prefixLength;
     bool active;
     bool selectable;
     bool allowPresetVisible;
