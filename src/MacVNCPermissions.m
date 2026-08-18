@@ -62,10 +62,32 @@ NSString *macVNCPermissionStatusText(MacVNCPermissionStatus status)
     return @"Unknown";
 }
 
+static volatile BOOL gScreenCaptureFailureNoted = NO;
+
+void macVNCNoteScreenCaptureFailure(void)
+{
+    gScreenCaptureFailureNoted = YES;
+}
+
+void macVNCResetScreenCaptureFailure(void)
+{
+    gScreenCaptureFailureNoted = NO;
+}
+
+BOOL macVNCScreenCaptureFailureNoted(void)
+{
+    return gScreenCaptureFailureNoted;
+}
+
 MacVNCPermissionStatus macVNCCheckPermission(MacVNCPermissionKind kind)
 {
     switch (kind) {
         case MacVNCPermissionKindScreenRecording:
+            /* CGPreflightScreenCaptureAccess() can return a stale YES right after
+               the binary changes (update/notarize). If ScreenCaptureKit already
+               failed at runtime, treat Screen Recording as not effectively granted. */
+            if (macVNCScreenCaptureFailureNoted())
+                return MacVNCPermissionStatusNotGranted;
             return CGPreflightScreenCaptureAccess()
                 ? MacVNCPermissionStatusGranted
                 : MacVNCPermissionStatusNotGranted;
