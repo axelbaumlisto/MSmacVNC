@@ -1,11 +1,18 @@
-# macVNC 0.2.3
+# macVNC 0.2.4
 
 ## Highlights
 
-- Clarified the listen-address field in Network Preferences:
-  - selected interfaces now show `Selected address` as read-only;
-  - `Custom address` appears only for the explicit `Custom IPv4 address` mode.
-- This removes confusion where a selected Tailscale interface IP looked like a manually entered custom address.
+- Simplified Network Preferences:
+  - removed the confusing `Allow clients from` checkbox list;
+  - removed `All interfaces` from the normal UI path;
+  - allowed clients are now calculated automatically from `Accept connections on`.
+- New behavior:
+  - `Localhost only` → allows `127.0.0.1` only;
+  - `Tailscale-like` interface → allows `100.64.0.0/10` automatically;
+  - LAN/Wi‑Fi interface → allows that interface subnet automatically;
+  - `Custom IPv4 address` → advanced mode; requires extra allowed client CIDRs.
+- Manual CIDRs are now clearly labeled as `Extra allowed clients (advanced)` and are optional for normal interface choices.
+- Removed repeated broad-range confirmation for the automatic Tailscale range; still warns for explicit `0.0.0.0/0`.
 
 ## Validation
 
@@ -16,16 +23,19 @@
 - Stapler validation: passed.
 - Gatekeeper assessment: accepted as Notarized Developer ID.
 
+# macVNC 0.2.3
+
+- Selected interfaces show `Selected address` as read-only.
+- `Custom address` appears only for explicit `Custom IPv4 address` mode.
+
 # macVNC 0.2.2
 
 - Network Preferences no longer shows the safe localhost default (`127.0.0.1`) as a manual custom CIDR when using a network preset.
-- Keeps the explicit broad-range warning for `100.64.0.0/10` / Tailscale-like access.
 
 # macVNC 0.2.1
 
 - Clarified Network Preferences wording and tooltips.
 - Reduced noisy network presets.
-- Tailscale-like/CGNAT rows show `100.64.0.0/10` as an explicit broad preset.
 
 # macVNC 0.2.0
 
