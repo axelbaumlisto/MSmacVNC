@@ -1,3 +1,20 @@
+# macVNC 0.2.9
+
+## Highlights
+
+- Permission chips now only open the relevant macOS Privacy & Security pane.
+- Removed the extra macOS system permission request dialog that popped up when clicking a chip (no more `CGRequestScreenCaptureAccess`/Accessibility prompt from our UI).
+- Behavior otherwise unchanged: single unified permission popup; no permissions → no VNC listener.
+
+## Validation
+
+- Release build: passed.
+- CTest: 15/15 passed.
+- Developer ID Application signing: passed.
+- Notarization: accepted.
+- Stapler validation: passed.
+- Gatekeeper assessment: accepted as Notarized Developer ID.
+
 # macVNC 0.2.8
 
 ## Highlights
