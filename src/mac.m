@@ -48,6 +48,8 @@
 #import "KeyboardModifierState.h"
 #import "ReadinessPolicy.h"
 #import "CaptureRate.h"
+#import "NetworkAccess.h"
+#import "NetworkPolicyResolver.h"
 #import "mac.h"
 #import <AppKit/AppKit.h>
 
@@ -61,6 +63,10 @@ void *frameBufferOne;
 
 /* -2 = all displays, -1 = primary, >=0 = one enumerated display. */
 int displayNumber = -1;
+char macVNCListenAddress[MACVNC_LISTEN_ADDRESS_MAX] = {0};
+char macVNCAllowedClients[MACVNC_ALLOWED_CLIENTS_MAX] = {0};
+MacVNCClientAccessMode macVNCClientAccessMode = MACVNC_CLIENT_ACCESS_FAIL_CLOSED;
+static MacVNCNetworkAccessList clientAccessList;
 static MacVNCDisplayLayout displayLayout;
 static NSMutableArray<ScreenCapturer *> *screenCapturers;
 static rfbBool rfbServerInitialized = FALSE;
@@ -813,20 +819,36 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
       return FALSE;
   }
 
-  /* Configure listen port. MACVNC_LISTEN restricts the server to a trusted
-     IPv4 interface (the Tailscale address in the LaunchAgent). */
+  /* Configure listen port from already-resolved GUI/headless policy. */
   rfbScreen->port = port;
-  const char *listenAddress = getenv("MACVNC_LISTEN");
+  const char *listenAddress = macVNCListenAddress;
   if (listenAddress && *listenAddress) {
       struct in_addr parsedAddress;
       if (inet_pton(AF_INET, listenAddress, &parsedAddress) != 1) {
-          rfbErr("Invalid MACVNC_LISTEN address: %s\n", listenAddress);
+          rfbErr("Invalid listen address: %s\n", listenAddress);
           return FALSE;
       }
       rfbScreen->listenInterface = parsedAddress.s_addr;
-      rfbScreen->ipv6port = 0;
-  } else {
-      rfbScreen->ipv6port = port;
+  }
+  /* v1 network policy is IPv4-only; do not expose an IPv6 listener. */
+  rfbScreen->ipv6port = 0;
+
+  char accessError[160] = {0};
+  clientAccessList.count = 0;
+  if (macVNCClientAccessMode == MACVNC_CLIENT_ACCESS_FAIL_CLOSED) {
+      rfbErr("Client access policy is fail-closed; no listener opened\n");
+      return FALSE;
+  }
+  if (macVNCClientAccessMode == MACVNC_CLIENT_ACCESS_ALLOW_LIST) {
+      if (!macVNCParseAccessList(macVNCAllowedClients, &clientAccessList,
+                                 accessError, sizeof(accessError))) {
+          rfbErr("Invalid allowed clients list: %s\n", accessError);
+          return FALSE;
+      }
+      if (clientAccessList.count == 0) {
+          rfbErr("Client access policy allowList has no entries\n");
+          return FALSE;
+      }
   }
 
   /* Configure password authentication if a password was supplied. */
@@ -1039,10 +1061,16 @@ void clientGone(rfbClientPtr cl)
 
 enum rfbNewClientAction newClient(rfbClientPtr cl)
 {
+  const char *host = cl->host ? cl->host : "";
+  if (!macVNCNetworkAccessAllows(&clientAccessList, host)) {
+      rfbLog("Refusing client %s: not in allowed clients list\n", host);
+      return RFB_CLIENT_REFUSE;
+  }
+
   MacVNCClientState *state = calloc(1, sizeof(*state));
   if (!state)
       return RFB_CLIENT_REFUSE;
-  rfbLog("New client connected from %s; capture waits for authenticated frame request\n", cl->host);
+  rfbLog("New client connected from %s; capture waits for authenticated frame request\n", host);
   cl->clientData = state;
   cl->clientGoneHook = clientGone;
   cl->viewOnly = viewOnly;

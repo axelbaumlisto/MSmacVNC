@@ -58,17 +58,38 @@ build-arm64/macVNC.app
 
 ## Configuration
 
-The server reads the existing app preferences and supports environment overrides:
+The app stores normal settings in macOS preferences. Use **Preferences…** from the menu bar icon to configure:
+
+- port;
+- VNC password;
+- listen mode: localhost, all interfaces, custom IPv4, or a selected active IPv4 network interface;
+- allowed client networks: checked active network rows plus manual IPv4/CIDR entries;
+- explicit allow-all mode.
+
+The network policy is IPv4-only in this version. The IPv6 listener is disabled in every mode until IPv6 allowlist semantics exist. Empty allowed-client lists are fail-closed unless **Allow all IPv4 clients** is explicitly checked.
+
+Examples:
+
+```text
+127.0.0.1
+192.168.100.0/24
+100.100.242.110/32
+```
+
+Interfaces in `100.64.0.0/10` are labeled CGNAT/Tailscale-like, but the app does not call Tailscale or infer identity from that range. If you manually allow `100.64.0.0/10`, keep Tailscale ACLs as the primary security boundary.
+
+Environment overrides remain for debug/headless launches:
 
 | Variable | Meaning | Example |
 |---|---|---|
-| `MACVNC_LISTEN` | IPv4 address to bind. IPv6 is disabled when set. | Tailscale address |
+| `MACVNC_LISTEN` | IPv4 address to bind. Overrides GUI listen address when non-empty. | Tailscale address |
+| `MACVNC_ALLOWED_CLIENTS` | IPv4/CIDR allowlist override. Empty value does not clear a non-empty GUI allowlist. | `100.64.0.0/10` |
 | `MACVNC_PORT` | RFB port. | `5903` |
 | `MACVNC_DISPLAY` | `-2`: all active displays; `-1`: primary; `0+`: enumerated display index. | `-2` |
 | `MACVNC_PASSWORD_FILE` | UTF-8 file containing the VNC password. | `~/.config/macvnc/password` |
 | `MACVNC_CAPTURE_FPS` | Integer capture rate for every selected display and the global per-client framebuffer-send ceiling; allowed `1..60`, default `12`. | `12` |
 
-A non-empty invalid `MACVNC_CAPTURE_FPS` value fails closed and opens no listener. The configured password path is also fail-closed: it must be a non-empty regular UTF-8 file owned by the current UID and inaccessible to group/others. Symlinks and special files are rejected.
+A non-empty invalid `MACVNC_CAPTURE_FPS`, invalid bind address, invalid allowed-client list, or missing password fails closed and opens no listener. The configured password path is also fail-closed: it must be a non-empty regular UTF-8 file owned by the current UID and inaccessible to group/others. Symlinks and special files are rejected.
 
 ```bash
 chmod 600 ~/.config/macvnc/password

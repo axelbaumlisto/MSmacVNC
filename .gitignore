@@ -2,6 +2,7 @@
 /build/
 /build-*/
 /bin/
+/dist/
 *.log
 *~
 /.cache/
