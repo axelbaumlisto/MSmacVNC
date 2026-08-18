@@ -58,6 +58,9 @@ rfbScreenInfoPtr rfbScreen;
 /* Operation modes set via AppDelegate */
 rfbBool viewOnly = FALSE;
 
+/* Set by AppDelegate; invoked on the main queue when capture fails at runtime. */
+void (*macVNCScreenCaptureFailureHandler)(void) = NULL;
+
 /* One composite framebuffer; uncovered regions remain black. */
 void *frameBufferOne;
 
@@ -894,19 +897,11 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
 
   void (^captureErrorHandler)(NSError *) = ^(NSError *error) {
       rfbLog("Screen capture error: %s\n", [error.description UTF8String]);
+      /* Do not show UI here. Report upward; AppDelegate owns the single
+         permission popup and decides how to recover. */
       dispatch_async(dispatch_get_main_queue(), ^{
-          NSAlert *alert = [[NSAlert alloc] init];
-          alert.alertStyle = NSAlertStyleCritical;
-          alert.messageText = @"Screen Recording permission required";
-          alert.informativeText = @"macVNC needs Screen Recording access to share your displays.";
-          [alert addButtonWithTitle:@"Open System Settings"];
-          [alert addButtonWithTitle:@"Quit"];
-          if ([alert runModal] == NSAlertFirstButtonReturn) {
-              [[NSWorkspace sharedWorkspace]
-                  openURL:[NSURL URLWithString:
-                           @"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"]];
-          }
-          [NSApp terminate:nil];
+          if (macVNCScreenCaptureFailureHandler)
+              macVNCScreenCaptureFailureHandler();
       });
   };
 
@@ -1128,17 +1123,8 @@ vncServerStart(int port, const char *password, int captureFramesPerSecond)
         return FALSE;
     }
     atomic_store_explicit(&publishedServerPort, -1, memory_order_release);
-    if (!viewOnly) {
-        /* Request Accessibility permission with a system prompt so the
-           user sees the dialog with the app name, not a terminal name. */
-        NSDictionary *opts = @{(__bridge id)kAXTrustedCheckOptionPrompt: @YES};
-        if (!AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)opts)) {
-            rfbLog("Server does not have Accessibility permission. "
-                   "Grant it in System Settings → Privacy & Security → Accessibility "
-                   "and relaunch macVNC.\n");
-            goto FAILURE;
-        }
-    }
+    /* Permission gating (Screen Recording + Accessibility) is owned by
+       AppDelegate via MacVNCPermissions before the server is ever started. */
 
     dimmingInit();
 

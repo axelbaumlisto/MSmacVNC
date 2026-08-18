@@ -43,6 +43,15 @@ int main(void)
     assert(missing.count == 1);
     assert([missing[0][MacVNCPermissionSnapshotNameKey] isEqualToString:@"Accessibility"]);
 
+    /* Runtime capture-failure flag forces Screen Recording to NotGranted. */
+    macVNCResetScreenCaptureFailure();
+    assert(!macVNCScreenCaptureFailureNoted());
+    macVNCNoteScreenCaptureFailure();
+    assert(macVNCScreenCaptureFailureNoted());
+    assert(macVNCCheckPermission(MacVNCPermissionKindScreenRecording) == MacVNCPermissionStatusNotGranted);
+    macVNCResetScreenCaptureFailure();
+    assert(!macVNCScreenCaptureFailureNoted());
+
     puts("permissions tests passed");
     [pool drain];
     return 0;

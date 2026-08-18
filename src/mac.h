@@ -31,6 +31,11 @@ extern MacVNCClientAccessMode macVNCClientAccessMode;
 /* Number of VNC clients currently connected. */
 extern _Atomic int vncConnectedClients;
 
+/* Optional handler invoked (on the main queue) when ScreenCaptureKit fails at
+ * runtime, e.g. Screen Recording permission is not effectively granted. The
+ * server does not show any UI itself; AppDelegate owns the permission popup. */
+extern void (*macVNCScreenCaptureFailureHandler)(void);
+
 /* -----------------------------------------------------------------------
  * Server lifecycle
  * ----------------------------------------------------------------------- */
