@@ -7,6 +7,7 @@
 #import "NetworkPolicyResolver.h"
 
 #import <ServiceManagement/ServiceManagement.h>
+#import <Security/Security.h>
 #include <arpa/inet.h>
 #include <ifaddrs.h>
 #include <net/if.h>
@@ -28,6 +29,8 @@ static NSString * const kKeyListenMode     = @"listenMode";
 static NSString * const kKeyListenAddress  = @"listenAddress";
 static NSString * const kKeyAllowedClients = @"allowedClients";
 static NSString * const kKeyAllowAllConfirmed = @"allowAllConfirmed";
+static NSString * const kKeychainService = @"net.christianbeier.macVNC";
+static NSString * const kKeychainPasswordAccount = @"rfbPassword";
 
 /* Bundle identifier used for the LaunchAgent plist (must match Info.plist) */
 static NSString * const kBundleID = @"net.christianbeier.macVNC";
@@ -35,6 +38,95 @@ static NSString * const kBundleID = @"net.christianbeier.macVNC";
 static const NSInteger kPreferencesCustomAddressLabelTag = 9101;
 static const NSInteger kPreferencesCustomAddressFieldTag = 9102;
 static const NSInteger kPreferencesAllowedSummaryTag = 9103;
+
+static NSData *macVNCUTF8Data(NSString *string)
+{
+    return [string dataUsingEncoding:NSUTF8StringEncoding];
+}
+
+static NSMutableDictionary *macVNCKeychainQuery(void)
+{
+    return [@{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: kKeychainService,
+        (__bridge id)kSecAttrAccount: kKeychainPasswordAccount,
+    } mutableCopy];
+}
+
+static NSString *macVNCReadKeychainPassword(void)
+{
+    NSMutableDictionary *query = macVNCKeychainQuery();
+    query[(__bridge id)kSecReturnData] = @YES;
+    query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
+
+    CFTypeRef result = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+    [query release];
+    if (status != errSecSuccess || !result)
+        return nil;
+
+    NSData *data = [(NSData *)result autorelease];
+    NSString *password = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
+    return password.length > 0 ? password : nil;
+}
+
+static BOOL macVNCDeleteKeychainPassword(void)
+{
+    NSMutableDictionary *query = macVNCKeychainQuery();
+    OSStatus status = SecItemDelete((__bridge CFDictionaryRef)query);
+    [query release];
+    return status == errSecSuccess || status == errSecItemNotFound;
+}
+
+static BOOL macVNCSaveKeychainPassword(NSString *password, NSString **errorMessage)
+{
+    if (password.length == 0) {
+        if (!macVNCDeleteKeychainPassword()) {
+            if (errorMessage)
+                *errorMessage = @"Could not delete password from Keychain";
+            return NO;
+        }
+        return YES;
+    }
+
+    NSData *data = macVNCUTF8Data(password);
+    NSMutableDictionary *query = macVNCKeychainQuery();
+    NSDictionary *update = @{(__bridge id)kSecValueData: data};
+    OSStatus status = SecItemUpdate((__bridge CFDictionaryRef)query,
+                                    (__bridge CFDictionaryRef)update);
+    if (status == errSecItemNotFound) {
+        query[(__bridge id)kSecValueData] = data;
+        status = SecItemAdd((__bridge CFDictionaryRef)query, NULL);
+    }
+    [query release];
+
+    if (status != errSecSuccess) {
+        if (errorMessage)
+            *errorMessage = [NSString stringWithFormat:@"Could not save password to Keychain (OSStatus %d)", (int)status];
+        return NO;
+    }
+    return YES;
+}
+
+static NSString *macVNCLoadPassword(NSUserDefaults *defaults)
+{
+    NSString *password = macVNCReadKeychainPassword();
+    NSString *legacy = [defaults objectForKey:kKeyPassword];
+    if (password.length == 0 && legacy.length > 0) {
+        NSString *error = nil;
+        if (macVNCSaveKeychainPassword(legacy, &error)) {
+            [defaults removeObjectForKey:kKeyPassword];
+            [defaults synchronize];
+            password = legacy;
+        } else {
+            NSLog(@"%@", error ?: @"Could not migrate password to Keychain");
+        }
+    } else if (legacy.length > 0) {
+        [defaults removeObjectForKey:kKeyPassword];
+        [defaults synchronize];
+    }
+    return password ?: @"";
+}
 
 static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
 {
@@ -272,7 +364,7 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
 
         int       port     = (int)[defaults integerForKey:kKeyPort];
-        NSString *password = [defaults stringForKey:kKeyPassword];
+        NSString *password = macVNCLoadPassword(defaults);
         NSString *configurationError = nil;
         NSDictionary<NSString *, NSString *> *environment = NSProcessInfo.processInfo.environment;
         NSString *portOverride = environment[@"MACVNC_PORT"];
@@ -425,6 +517,9 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
         NSString *allowTitle = row.cgnatLike
             ? [NSString stringWithFormat:@"Tailscale tailnet / CGNAT range — %@ (broad; use Tailscale ACLs)", allowCIDR]
             : [NSString stringWithFormat:@"Same network as %@ — %@", displayName, allowCIDR];
+        NSString *allowSummary = row.cgnatLike
+            ? [NSString stringWithFormat:@"Auto: Tailscale clients — %@", allowCIDR]
+            : [NSString stringWithFormat:@"Auto: same network — %@", allowCIDR];
         [rows addObject:@{
             @"name": name,
             @"displayName": displayName,
@@ -433,6 +528,7 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
             @"allowCIDR": allowCIDR,
             @"listenTitle": listenTitle,
             @"allowTitle": allowTitle,
+            @"allowSummary": allowSummary,
             @"allowPresetVisible": @(row.allowPresetVisible),
             @"cgnatLike": @(row.cgnatLike),
         }];
@@ -472,7 +568,8 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
         addressField.enabled = NO;
         addressField.editable = NO;
         addressField.alphaValue = 0.65;
-        allowedSummary.stringValue = row[@"allowTitle"] ?: @"Auto: matching client network.";
+        allowedSummary.stringValue = row[@"allowSummary"] ?: @"Auto: matching client network.";
+        allowedSummary.toolTip = row[@"allowTitle"] ?: allowedSummary.toolTip;
     } else {
         addressLabel.stringValue = @"Custom address:";
         addressField.stringValue = @"";
@@ -508,7 +605,7 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
 {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     int       port = (int)[defaults integerForKey:kKeyPort] ?: kDefaultPort;
-    NSString *pwd  = [defaults stringForKey:kKeyPassword] ?: @"";
+    NSString *pwd  = macVNCLoadPassword(defaults);
     NSString *currentMode = [defaults stringForKey:kKeyListenMode] ?: @"localhost";
     NSString *currentAddress = [defaults stringForKey:kKeyListenAddress] ?: @"";
     NSString *currentAllowed = [defaults stringForKey:kKeyAllowedClients] ?: @"";
@@ -533,23 +630,23 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
     [alert addButtonWithTitle:@"Save"];
     [alert addButtonWithTitle:@"Cancel"];
 
-    NSView *form = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 520, 340)];
+    NSView *form = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 520, 236)];
 
     NSTextField *portLabel = [NSTextField labelWithString:@"Port:"];
-    portLabel.frame = NSMakeRect(0, 310, 120, 22);
+    portLabel.frame = NSMakeRect(0, 206, 120, 22);
     NSTextField *portField = [NSTextField textFieldWithString:[NSString stringWithFormat:@"%d", port]];
-    portField.frame = NSMakeRect(130, 310, 120, 22);
+    portField.frame = NSMakeRect(130, 206, 120, 22);
 
     NSTextField *pwdLabel = [NSTextField labelWithString:@"Password:"];
-    pwdLabel.frame = NSMakeRect(270, 310, 90, 22);
-    NSSecureTextField *pwdField = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(360, 310, 160, 22)];
+    pwdLabel.frame = NSMakeRect(270, 206, 90, 22);
+    NSSecureTextField *pwdField = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(360, 206, 160, 22)];
     pwdField.placeholderString = @"(required)";
     pwdField.stringValue = pwd;
 
     NSTextField *listenLabel = [NSTextField labelWithString:@"Accept connections on:"];
-    listenLabel.frame = NSMakeRect(0, 276, 150, 22);
+    listenLabel.frame = NSMakeRect(0, 172, 150, 22);
     listenLabel.toolTip = @"Where the VNC server listens. Localhost means this Mac only; a network interface allows devices that can reach that interface.";
-    NSPopUpButton *listenPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(160, 274, 360, 26) pullsDown:NO];
+    NSPopUpButton *listenPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(160, 170, 360, 26) pullsDown:NO];
     listenPopup.toolTip = @"Choose the local address/interface that accepts incoming VNC connections. This is not the allowlist; it only chooses where to listen.";
     [listenPopup addItemWithTitle:@"Localhost only (127.0.0.1)"];
     listenPopup.lastItem.tag = 1;
@@ -580,33 +677,37 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
     }
 
     NSTextField *customLabel = [NSTextField labelWithString:@"Custom address:"];
-    customLabel.frame = NSMakeRect(0, 246, 150, 22);
+    customLabel.frame = NSMakeRect(0, 140, 150, 22);
     customLabel.tag = kPreferencesCustomAddressLabelTag;
     customLabel.toolTip = @"Editable only when 'Custom IPv4 address' is selected above.";
     NSTextField *customField = [NSTextField textFieldWithString:currentAddress];
-    customField.frame = NSMakeRect(160, 246, 190, 22);
+    customField.frame = NSMakeRect(160, 140, 190, 22);
     customField.tag = kPreferencesCustomAddressFieldTag;
     customField.toolTip = @"Local IPv4 address to bind, for example 192.168.100.87 or 100.70.214.41.";
     listenPopup.target = self;
     listenPopup.action = @selector(preferencesListenPopupChanged:);
 
     NSTextField *netLabel = [NSTextField labelWithString:@"Allowed clients:"];
-    netLabel.frame = NSMakeRect(0, 214, 150, 22);
+    netLabel.frame = NSMakeRect(0, 110, 150, 22);
     netLabel.toolTip = @"Calculated automatically from the selected listen interface.";
     NSTextField *allowedSummary = [NSTextField labelWithString:@""];
-    allowedSummary.frame = NSMakeRect(160, 214, 360, 22);
+    allowedSummary.frame = NSMakeRect(160, 110, 360, 22);
     allowedSummary.tag = kPreferencesAllowedSummaryTag;
     allowedSummary.textColor = NSColor.secondaryLabelColor;
     allowedSummary.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
     allowedSummary.toolTip = @"No checkbox needed: localhost allows localhost, a Tailscale interface allows Tailscale clients, and a LAN interface allows that LAN.";
 
     NSTextField *manualLabel = [NSTextField labelWithString:@"Extra allowed clients (advanced):"];
-    manualLabel.frame = NSMakeRect(0, 170, 210, 22);
+    manualLabel.frame = NSMakeRect(0, 76, 210, 22);
     manualLabel.toolTip = @"Optional extra client IPs/subnets, one per line. Leave empty for the automatic safe policy.";
-    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(210, 108, 310, 84)];
-    NSTextView *allowedText = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 310, 84)];
+    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(210, 42, 310, 56)];
+    NSTextView *allowedText = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 310, 56)];
     allowedText.string = manualAllowed;
-    allowedText.toolTip = @"Advanced only. Example: one phone's Tailscale IP as 100.x.y.z/32.";
+    allowedText.toolTip = @"Format: one IPv4 or CIDR per line. Examples: 100.101.102.103/32 or 192.168.100.0/24.";
+    NSTextField *manualHint = [NSTextField labelWithString:@"Format: one IPv4/CIDR per line, e.g. 100.x.y.z/32 or 192.168.100.0/24"];
+    manualHint.frame = NSMakeRect(210, 18, 310, 18);
+    manualHint.textColor = NSColor.secondaryLabelColor;
+    manualHint.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
     scroll.documentView = allowedText;
     scroll.hasVerticalScroller = YES;
     scroll.borderType = NSBezelBorder;
@@ -616,7 +717,7 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
     [form addSubview:listenLabel]; [form addSubview:listenPopup];
     [form addSubview:customLabel]; [form addSubview:customField];
     [form addSubview:netLabel]; [form addSubview:allowedSummary];
-    [form addSubview:manualLabel]; [form addSubview:scroll];
+    [form addSubview:manualLabel]; [form addSubview:scroll]; [form addSubview:manualHint];
     [self preferencesListenPopupChanged:listenPopup];
     alert.accessoryView = form;
 
@@ -682,9 +783,19 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
             return;
         }
 
+        NSString *passwordError = nil;
+        if (!macVNCSaveKeychainPassword(pwdField.stringValue, &passwordError)) {
+            NSAlert *errorAlert = [[NSAlert alloc] init];
+            errorAlert.messageText = @"Could not save password";
+            errorAlert.informativeText = passwordError ?: @"macVNC could not save the VNC password to Keychain.";
+            [errorAlert addButtonWithTitle:@"OK"];
+            [errorAlert runModal];
+            return;
+        }
+
         if (newPort > 0 && newPort <= 65535)
             [defaults setInteger:newPort forKey:kKeyPort];
-        [defaults setObject:pwdField.stringValue forKey:kKeyPassword];
+        [defaults removeObjectForKey:kKeyPassword];
         [defaults setObject:newMode forKey:kKeyListenMode];
         [defaults setObject:newAddress forKey:kKeyListenAddress];
         [defaults setObject:combinedAllowed forKey:kKeyAllowedClients];

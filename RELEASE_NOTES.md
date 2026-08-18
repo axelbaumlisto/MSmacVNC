@@ -1,18 +1,14 @@
-# macVNC 0.2.4
+# macVNC 0.2.5
 
 ## Highlights
 
-- Simplified Network Preferences:
-  - removed the confusing `Allow clients from` checkbox list;
-  - removed `All interfaces` from the normal UI path;
-  - allowed clients are now calculated automatically from `Accept connections on`.
-- New behavior:
-  - `Localhost only` → allows `127.0.0.1` only;
-  - `Tailscale-like` interface → allows `100.64.0.0/10` automatically;
-  - LAN/Wi‑Fi interface → allows that interface subnet automatically;
-  - `Custom IPv4 address` → advanced mode; requires extra allowed client CIDRs.
-- Manual CIDRs are now clearly labeled as `Extra allowed clients (advanced)` and are optional for normal interface choices.
-- Removed repeated broad-range confirmation for the automatic Tailscale range; still warns for explicit `0.0.0.0/0`.
+- Password is now stored in macOS Keychain instead of plaintext `NSUserDefaults`.
+- Existing plaintext password is migrated to Keychain automatically and removed from defaults.
+- Preferences window is more compact with less empty space.
+- `Extra allowed clients (advanced)` now shows the expected format:
+  - one IPv4/CIDR per line;
+  - examples: `100.x.y.z/32`, `192.168.100.0/24`.
+- Automatic allowed-client summary is shortened so it fits in the window.
 
 ## Validation
 
@@ -22,6 +18,15 @@
 - Notarization: accepted.
 - Stapler validation: passed.
 - Gatekeeper assessment: accepted as Notarized Developer ID.
+- Installed smoke: RFB banner passed; IPv6 disabled passed.
+
+# macVNC 0.2.4
+
+- Simplified Network Preferences:
+  - removed the confusing `Allow clients from` checkbox list;
+  - removed `All interfaces` from the normal UI path;
+  - allowed clients are now calculated automatically from `Accept connections on`.
+- Manual CIDRs are clearly labeled as `Extra allowed clients (advanced)`.
 
 # macVNC 0.2.3
 

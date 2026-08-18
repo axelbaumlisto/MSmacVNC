@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.2.4 LANGUAGES C)
+project(macVNC VERSION 0.2.5 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -27,6 +27,7 @@ find_library(CORE_VIDEO             CoreVideo)
 find_library(FOUNDATION             Foundation)
 find_library(APPKIT_LIBRARY         AppKit           REQUIRED)
 find_library(SERVICE_MANAGEMENT     ServiceManagement REQUIRED)
+find_library(SECURITY_LIBRARY       Security REQUIRED)
 
 #
 # Sources
@@ -98,6 +99,7 @@ target_link_libraries(${PROJECT_NAME}
     ${FOUNDATION}
     ${APPKIT_LIBRARY}
     ${SERVICE_MANAGEMENT}
+    ${SECURITY_LIBRARY}
 )
 
 #
