@@ -382,8 +382,10 @@ static const NSInteger kPermissionPanelActionRestart = 3;
 
 - (void)permissionClicked:(NSButton *)sender
 {
+    /* Only open System Settings. Do not call the CGRequest/AX prompt APIs:
+       those trigger macOS's own permission dialog, which we don't want here. */
     [self.openedPermissionKinds addObject:@(sender.tag)];
-    macVNCRequestPermissionAndOpenSettings((MacVNCPermissionKind)sender.tag);
+    macVNCOpenPermissionSettings((MacVNCPermissionKind)sender.tag);
     [self refreshPermissions];
 }
 
