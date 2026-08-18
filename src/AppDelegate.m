@@ -476,7 +476,8 @@ static NSString *readSecurePasswordFile(NSString *path, NSString **errorMessage)
     NSMutableArray<NSString *> *manualLines = [NSMutableArray array];
     for (NSString *line in [currentAllowed componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
         NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-        if (trimmed.length > 0 && ![presetCIDRs containsObject:trimmed])
+        BOOL isSafeLocalhostDefault = [trimmed isEqualToString:@"127.0.0.1"] || [trimmed isEqualToString:@"127.0.0.1/32"];
+        if (trimmed.length > 0 && ![presetCIDRs containsObject:trimmed] && !isSafeLocalhostDefault)
             [manualLines addObject:trimmed];
     }
     NSString *manualAllowed = [manualLines componentsJoinedByString:@"\n"];

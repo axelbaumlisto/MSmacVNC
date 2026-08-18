@@ -1,15 +1,9 @@
-# macVNC 0.2.1
+# macVNC 0.2.2
 
 ## Highlights
 
-- Clarified Network Preferences wording:
-  - `Accept connections on` = local interface/address where macVNC listens.
-  - `Allow clients from` = remote client IP ranges allowed to connect.
-- Reduced noisy network presets:
-  - hidden loopback, bridge, AWDL/LLW, link-local, and non-CGNAT `/32` tunnel rows from allow presets.
-- Tailscale-like/CGNAT rows now present a clear broad `100.64.0.0/10` preset with tooltip warning instead of a useless local `/32` client range.
-- Manual CIDR field now shows only custom entries, not duplicated checked presets.
-- Added tooltips/help text for listen vs allowlist behavior.
+- Network Preferences no longer shows the safe localhost default (`127.0.0.1`) as a manual custom CIDR when using a network preset.
+- Keeps the explicit broad-range warning for `100.64.0.0/10` / Tailscale-like access.
 
 ## Validation
 
@@ -20,11 +14,15 @@
 - Stapler validation: passed.
 - Gatekeeper assessment: accepted as Notarized Developer ID.
 
+# macVNC 0.2.1
+
+- Clarified Network Preferences wording and tooltips.
+- Reduced noisy network presets.
+- Tailscale-like/CGNAT rows show `100.64.0.0/10` as an explicit broad preset.
+
 # macVNC 0.2.0
 
-- Added GUI-managed IPv4 network security settings.
-- Added active network picker for listen/bind address selection.
-- Added explicit client allowlist with IPv4/CIDR support.
-- Added explicit allow-all mode; empty allowlist no longer silently means allow all.
-- Disabled IPv6 listener in v1 network policy until IPv6 allowlist semantics exist.
+- Added GUI-managed IPv4 network security settings and active network picker.
+- Added explicit client allowlist and allow-all mode.
+- Disabled IPv6 listener in v1 network policy.
 - Bundled Homebrew dylib dependencies in the notarized standalone DMG.
