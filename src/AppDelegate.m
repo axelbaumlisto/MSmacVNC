@@ -40,11 +40,6 @@ static const NSInteger kPreferencesCustomAddressLabelTag = 9101;
 static const NSInteger kPreferencesCustomAddressFieldTag = 9102;
 static const NSInteger kPreferencesAllowedSummaryTag = 9103;
 
-static NSData *macVNCUTF8Data(NSString *string)
-{
-    return [string dataUsingEncoding:NSUTF8StringEncoding];
-}
-
 static NSMutableDictionary *macVNCKeychainQuery(void)
 {
     return [@{
@@ -79,54 +74,24 @@ static BOOL macVNCDeleteKeychainPassword(void)
     return status == errSecSuccess || status == errSecItemNotFound;
 }
 
-static BOOL macVNCSaveKeychainPassword(NSString *password, NSString **errorMessage)
-{
-    if (password.length == 0) {
-        if (!macVNCDeleteKeychainPassword()) {
-            if (errorMessage)
-                *errorMessage = @"Could not delete password from Keychain";
-            return NO;
-        }
-        return YES;
-    }
-
-    NSData *data = macVNCUTF8Data(password);
-    NSMutableDictionary *query = macVNCKeychainQuery();
-    NSDictionary *update = @{(__bridge id)kSecValueData: data};
-    OSStatus status = SecItemUpdate((__bridge CFDictionaryRef)query,
-                                    (__bridge CFDictionaryRef)update);
-    if (status == errSecItemNotFound) {
-        query[(__bridge id)kSecValueData] = data;
-        status = SecItemAdd((__bridge CFDictionaryRef)query, NULL);
-    }
-    [query release];
-
-    if (status != errSecSuccess) {
-        if (errorMessage)
-            *errorMessage = [NSString stringWithFormat:@"Could not save password to Keychain (OSStatus %d)", (int)status];
-        return NO;
-    }
-    return YES;
-}
-
 static NSString *macVNCLoadPassword(NSUserDefaults *defaults)
 {
-    NSString *password = macVNCReadKeychainPassword();
-    NSString *legacy = [defaults objectForKey:kKeyPassword];
-    if (password.length == 0 && legacy.length > 0) {
-        NSString *error = nil;
-        if (macVNCSaveKeychainPassword(legacy, &error)) {
-            [defaults removeObjectForKey:kKeyPassword];
-            [defaults synchronize];
-            password = legacy;
-        } else {
-            NSLog(@"%@", error ?: @"Could not migrate password to Keychain");
-        }
-    } else if (legacy.length > 0) {
-        [defaults removeObjectForKey:kKeyPassword];
+    /* Plaintext storage in NSUserDefaults by request. Migrate any legacy
+       Keychain-stored password back into defaults, then drop it from Keychain.
+       Trim surrounding whitespace/newlines so a pasted value with a hidden
+       trailing newline cannot break VNC DES auth (matches the file path). */
+    NSCharacterSet *ws = NSCharacterSet.whitespaceAndNewlineCharacterSet;
+    NSString *plain = [[defaults stringForKey:kKeyPassword] stringByTrimmingCharactersInSet:ws];
+    if (plain.length > 0)
+        return plain;
+    NSString *legacy = [macVNCReadKeychainPassword() stringByTrimmingCharactersInSet:ws];
+    if (legacy.length > 0) {
+        [defaults setObject:legacy forKey:kKeyPassword];
         [defaults synchronize];
+        macVNCDeleteKeychainPassword();
+        return legacy;
     }
-    return password ?: @"";
+    return @"";
 }
 
 static BOOL macVNCAllowsTestPermissionGateBypass(void)
@@ -1118,19 +1083,15 @@ static void macVNCScreenCaptureFailed(void)
             return;
         }
 
-        NSString *passwordError = nil;
-        if (!macVNCSaveKeychainPassword(pwdField.stringValue, &passwordError)) {
-            NSAlert *errorAlert = [[NSAlert alloc] init];
-            errorAlert.messageText = @"Could not save password";
-            errorAlert.informativeText = passwordError ?: @"macVNC could not save the VNC password to Keychain.";
-            [errorAlert addButtonWithTitle:@"OK"];
-            [errorAlert runModal];
-            return;
-        }
+        /* Store password in plaintext defaults (by request) and remove any
+           previously stored Keychain copy. */
+        macVNCDeleteKeychainPassword();
 
+        NSString *trimmedPassword = [pwdField.stringValue
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
         if (newPort > 0 && newPort <= 65535)
             [defaults setInteger:newPort forKey:kKeyPort];
-        [defaults removeObjectForKey:kKeyPassword];
+        [defaults setObject:trimmedPassword forKey:kKeyPassword];
         [defaults setObject:newMode forKey:kKeyListenMode];
         [defaults setObject:newAddress forKey:kKeyListenAddress];
         [defaults setObject:combinedAllowed forKey:kKeyAllowedClients];
