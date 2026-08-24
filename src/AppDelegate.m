@@ -10,6 +10,7 @@
 #import "MacVNCPassword.h"
 #import "MacVNCPreferences.h"
 #import "MacVNCDefaultsKeys.h"
+#import "MacVNCListenMode.h"
 
 #import <ServiceManagement/ServiceManagement.h>
 #include <string.h>
@@ -98,7 +99,7 @@ static void macVNCScreenCaptureFailed(void)
         kKeyViewOnly: @NO,
         kKeyDisplay:        @(-1),
         kKeyPassword:       @"",
-        kKeyListenMode:        @"localhost",
+        kKeyListenMode:        MacVNCListenModeLocalhost,
         kKeyListenAddress:     @"",
         kKeyAllowedClients:    @"127.0.0.1",
         kKeyAllowAllConfirmed: @NO,
@@ -320,7 +321,7 @@ static void macVNCScreenCaptureFailed(void)
             displayNumber = (int)displayOverride.integerValue;
 
         MacVNCPolicyInput policyInput = {
-            .listenMode = ([defaults stringForKey:kKeyListenMode] ?: @"localhost").UTF8String,
+            .listenMode = ([defaults stringForKey:kKeyListenMode] ?: MacVNCListenModeLocalhost).UTF8String,
             .listenAddress = ([defaults stringForKey:kKeyListenAddress] ?: @"").UTF8String,
             .allowedClients = ([defaults stringForKey:kKeyAllowedClients] ?: @"").UTF8String,
             .allowAllConfirmed = [defaults boolForKey:kKeyAllowAllConfirmed],
@@ -380,12 +381,8 @@ static void macVNCScreenCaptureFailed(void)
 
     if (port > 0) {
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-        NSString *mode = [defaults stringForKey:kKeyListenMode] ?: @"localhost";
-        NSString *bind = @"all interfaces";
-        if ([mode isEqualToString:@"localhost"])
-            bind = @"127.0.0.1";
-        else if ([mode isEqualToString:@"custom"] || [mode isEqualToString:@"selected"])
-            bind = [defaults stringForKey:kKeyListenAddress] ?: @"";
+        NSString *mode = [defaults stringForKey:kKeyListenMode] ?: MacVNCListenModeLocalhost;
+        NSString *bind = macVNCBindHostForMode(mode, [defaults stringForKey:kKeyListenAddress]) ?: @"all interfaces";
         NSString *access = [defaults boolForKey:kKeyAllowAllConfirmed] ? @"allow all" : @"allowlist";
         self.statusMenuItem.title = [NSString stringWithFormat:@"Running  •  %@:%d  •  %@", bind, port, access];
     } else if (!macVNCPermissionsAllGranted()) {
@@ -409,12 +406,8 @@ static void macVNCScreenCaptureFailed(void)
     if (port <= 0) return;
 
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    NSString *mode = [defaults stringForKey:kKeyListenMode] ?: @"localhost";
-    NSString *hostname = nil;
-    if ([mode isEqualToString:@"localhost"])
-        hostname = @"127.0.0.1";
-    else if ([mode isEqualToString:@"custom"] || [mode isEqualToString:@"selected"])
-        hostname = [defaults stringForKey:kKeyListenAddress];
+    NSString *mode = [defaults stringForKey:kKeyListenMode] ?: MacVNCListenModeLocalhost;
+    NSString *hostname = macVNCBindHostForMode(mode, [defaults stringForKey:kKeyListenAddress]);
     if (hostname.length == 0)
         hostname = [NSHost currentHost].localizedName;
     NSString *address  = [NSString stringWithFormat:@"vnc://%@:%d", hostname, port];
