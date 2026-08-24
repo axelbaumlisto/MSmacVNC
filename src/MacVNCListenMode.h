@@ -2,6 +2,9 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+/* Loopback IPv4 as an NSString, derived from the shared C macro. */
+extern NSString * const MacVNCLoopbackIPv4; /* @"127.0.0.1" */
+
 /* Single source of truth for the listenMode string values. */
 extern NSString * const MacVNCListenModeLocalhost; /* @"localhost" */
 extern NSString * const MacVNCListenModeAll;       /* @"all"       */

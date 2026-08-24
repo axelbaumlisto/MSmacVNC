@@ -5,6 +5,7 @@
 #define MACVNC_NSSTR2(x) @x
 #define MACVNC_NSSTR(x)  MACVNC_NSSTR2(x)
 
+NSString * const MacVNCLoopbackIPv4        = MACVNC_NSSTR(MACVNC_LOOPBACK_IPV4);
 NSString * const MacVNCListenModeLocalhost = MACVNC_NSSTR(MACVNC_LISTEN_MODE_LOCALHOST);
 NSString * const MacVNCListenModeAll       = MACVNC_NSSTR(MACVNC_LISTEN_MODE_ALL);
 NSString * const MacVNCListenModeCustom    = MACVNC_NSSTR(MACVNC_LISTEN_MODE_CUSTOM);

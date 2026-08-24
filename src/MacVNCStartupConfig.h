@@ -19,7 +19,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) BOOL usedEnvironmentOverride;
 
 /* Build from defaults + environment (e.g. NSProcessInfo.processInfo.environment).
-   passwordFileReader mirrors macVNCReadSecurePasswordFile; injectable for tests. */
+   Both inputs are injectable, which is what makes this unit-testable. */
 + (instancetype)configWithDefaults:(NSUserDefaults *)defaults
                        environment:(NSDictionary<NSString *, NSString *> *)environment;
 
