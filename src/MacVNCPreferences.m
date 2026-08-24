@@ -5,6 +5,11 @@
 #import "MacVNCListenMode.h"
 #import "NetworkPolicyResolver.h"
 
+/* Listen-popup item tags (implicit contract shared by build + save paths). */
+static const NSInteger kListenTagLocalhost = 1;
+static const NSInteger kListenTagCustom    = 2;
+static const NSInteger kListenTagRowBase   = 1000; /* + interface row index */
+
 static const NSInteger kCustomAddressLabelTag = 9101;
 static const NSInteger kCustomAddressFieldTag = 9102;
 static const NSInteger kAllowedSummaryTag = 9103;
@@ -19,6 +24,26 @@ static NSArray<NSString *> *macVNCTrimmedNonEmptyLines(NSString *text)
             [lines addObject:trimmed];
     }
     return lines;
+}
+
+/* Extra manual allowlist lines = stored allowlist minus preset CIDRs and the
+   safe localhost default. Pure model helper, kept out of the view builder. */
+static NSString *macVNCManualAllowedText(NSString *currentAllowed,
+                                         NSArray<NSDictionary *> *networkRows)
+{
+    NSMutableArray<NSString *> *presetCIDRs = [NSMutableArray array];
+    for (NSDictionary *row in networkRows) {
+        if ([row[MacVNCRowKeyAllowPresetVisible] boolValue])
+            [presetCIDRs addObject:row[MacVNCRowKeyAllowCIDR]];
+    }
+    NSMutableArray<NSString *> *manualLines = [NSMutableArray array];
+    for (NSString *trimmed in macVNCTrimmedNonEmptyLines(currentAllowed)) {
+        BOOL isSafeLocalhostDefault = [trimmed isEqualToString:@"127.0.0.1"] ||
+                                      [trimmed isEqualToString:@"127.0.0.1/32"];
+        if (![presetCIDRs containsObject:trimmed] && !isSafeLocalhostDefault)
+            [manualLines addObject:trimmed];
+    }
+    return [manualLines componentsJoinedByString:@"\n"];
 }
 
 @implementation MacVNCPreferencesController
@@ -40,22 +65,22 @@ static NSArray<NSString *> *macVNCTrimmedNonEmptyLines(NSString *text)
         return;
 
     NSInteger tag = popup.selectedItem.tag;
-    if (tag == 2) {
+    if (tag == kListenTagCustom) {
         addressLabel.stringValue = @"Custom address:";
         addressField.enabled = YES;
         addressField.editable = YES;
         addressField.alphaValue = 1.0;
         allowedSummary.stringValue = @"Advanced: enter allowed client IP/CIDR below.";
-    } else if (tag >= 1000) {
+    } else if (tag >= kListenTagRowBase) {
         NSDictionary *row = [popup.selectedItem.representedObject isKindOfClass:NSDictionary.class]
             ? popup.selectedItem.representedObject : nil;
         addressLabel.stringValue = @"Selected address:";
-        addressField.stringValue = row[@"address"] ?: @"";
+        addressField.stringValue = row[MacVNCRowKeyAddress] ?: @"";
         addressField.enabled = NO;
         addressField.editable = NO;
         addressField.alphaValue = 0.65;
-        allowedSummary.stringValue = row[@"allowSummary"] ?: @"Auto: matching client network.";
-        allowedSummary.toolTip = row[@"allowTitle"] ?: allowedSummary.toolTip;
+        allowedSummary.stringValue = row[MacVNCRowKeyAllowSummary] ?: @"Auto: matching client network.";
+        allowedSummary.toolTip = row[MacVNCRowKeyAllowTitle] ?: allowedSummary.toolTip;
     } else {
         addressLabel.stringValue = @"Custom address:";
         addressField.stringValue = @"";
@@ -75,18 +100,7 @@ static NSArray<NSString *> *macVNCTrimmedNonEmptyLines(NSString *text)
     NSString *currentAddress = [defaults stringForKey:MacVNCKeyListenAddress] ?: @"";
     NSString *currentAllowed = [defaults stringForKey:MacVNCKeyAllowedClients] ?: @"";
     NSArray<NSDictionary *> *networkRows = macVNCActiveNetworkRows();
-    NSMutableArray<NSString *> *presetCIDRs = [NSMutableArray array];
-    for (NSDictionary *row in networkRows) {
-        if ([row[@"allowPresetVisible"] boolValue])
-            [presetCIDRs addObject:row[@"allowCIDR"]];
-    }
-    NSMutableArray<NSString *> *manualLines = [NSMutableArray array];
-    for (NSString *trimmed in macVNCTrimmedNonEmptyLines(currentAllowed)) {
-        BOOL isSafeLocalhostDefault = [trimmed isEqualToString:@"127.0.0.1"] || [trimmed isEqualToString:@"127.0.0.1/32"];
-        if (![presetCIDRs containsObject:trimmed] && !isSafeLocalhostDefault)
-            [manualLines addObject:trimmed];
-    }
-    NSString *manualAllowed = [manualLines componentsJoinedByString:@"\n"];
+    NSString *manualAllowed = macVNCManualAllowedText(currentAllowed, networkRows);
 
     NSAlert *alert = [[[NSAlert alloc] init] autorelease];
     alert.messageText     = @"macVNC Preferences";
@@ -113,31 +127,31 @@ static NSArray<NSString *> *macVNCTrimmedNonEmptyLines(NSString *text)
     NSPopUpButton *listenPopup = [[[NSPopUpButton alloc] initWithFrame:NSMakeRect(160, 170, 360, 26) pullsDown:NO] autorelease];
     listenPopup.toolTip = @"Choose the local address/interface that accepts incoming VNC connections. This is not the allowlist; it only chooses where to listen.";
     [listenPopup addItemWithTitle:@"Localhost only (127.0.0.1)"];
-    listenPopup.lastItem.tag = 1;
+    listenPopup.lastItem.tag = kListenTagLocalhost;
     [listenPopup addItemWithTitle:@"Custom IPv4 address (advanced)"];
-    listenPopup.lastItem.tag = 2;
+    listenPopup.lastItem.tag = kListenTagCustom;
     for (NSUInteger i = 0; i < networkRows.count; ++i) {
         NSDictionary *row = networkRows[i];
-        [listenPopup addItemWithTitle:[NSString stringWithFormat:@"%@", row[@"listenTitle"]]];
-        listenPopup.lastItem.tag = 1000 + (NSInteger)i;
+        [listenPopup addItemWithTitle:[NSString stringWithFormat:@"%@", row[MacVNCRowKeyListenTitle]]];
+        listenPopup.lastItem.tag = kListenTagRowBase + (NSInteger)i;
         listenPopup.lastItem.representedObject = row;
     }
 
     if ([currentMode isEqualToString:MacVNCListenModeCustom])
-        [listenPopup selectItemWithTag:2];
+        [listenPopup selectItemWithTag:kListenTagCustom];
     else if ([currentMode isEqualToString:MacVNCListenModeSelected]) {
         BOOL selected = NO;
         for (NSUInteger i = 0; i < networkRows.count; ++i) {
-            if ([networkRows[i][@"address"] isEqualToString:currentAddress]) {
-                [listenPopup selectItemWithTag:1000 + (NSInteger)i];
+            if ([networkRows[i][MacVNCRowKeyAddress] isEqualToString:currentAddress]) {
+                [listenPopup selectItemWithTag:kListenTagRowBase + (NSInteger)i];
                 selected = YES;
                 break;
             }
         }
         if (!selected)
-            [listenPopup selectItemWithTag:1];
+            [listenPopup selectItemWithTag:kListenTagLocalhost];
     } else {
-        [listenPopup selectItemWithTag:1];
+        [listenPopup selectItemWithTag:kListenTagLocalhost];
     }
 
     NSTextField *customLabel = [NSTextField labelWithString:@"Custom address:"];
@@ -189,29 +203,31 @@ static NSArray<NSString *> *macVNCTrimmedNonEmptyLines(NSString *text)
         return;
 
     int newPort = portField.intValue;
+
+    /* Decode the popup selection into (mode, address). */
     NSString *newMode = MacVNCListenModeLocalhost;
     NSString *newAddress = @"";
     NSInteger tag = listenPopup.selectedItem.tag;
-    if (tag == 1) {
-        newMode = MacVNCListenModeLocalhost;
-    } else if (tag == 2) {
+    if (tag == kListenTagCustom) {
         newMode = MacVNCListenModeCustom;
         newAddress = customField.stringValue;
-    } else if (tag >= 1000) {
-        NSUInteger rowIndex = (NSUInteger)(tag - 1000);
+    } else if (tag >= kListenTagRowBase) {
+        NSUInteger rowIndex = (NSUInteger)(tag - kListenTagRowBase);
         if (rowIndex < networkRows.count) {
             newMode = MacVNCListenModeSelected;
-            newAddress = networkRows[rowIndex][@"address"];
+            newAddress = networkRows[rowIndex][MacVNCRowKeyAddress];
         }
     }
 
+    /* Assemble the combined allowlist: the auto CIDR for the chosen interface
+       plus any manual advanced lines, de-duplicated in order. */
     NSMutableOrderedSet<NSString *> *allowedSet = [NSMutableOrderedSet orderedSet];
     if ([newMode isEqualToString:MacVNCListenModeLocalhost]) {
         [allowedSet addObject:@"127.0.0.1"];
-    } else if ([newMode isEqualToString:MacVNCListenModeSelected] && tag >= 1000) {
-        NSUInteger rowIndex = (NSUInteger)(tag - 1000);
+    } else if ([newMode isEqualToString:MacVNCListenModeSelected] && tag >= kListenTagRowBase) {
+        NSUInteger rowIndex = (NSUInteger)(tag - kListenTagRowBase);
         if (rowIndex < networkRows.count)
-            [allowedSet addObject:networkRows[rowIndex][@"allowCIDR"]];
+            [allowedSet addObject:networkRows[rowIndex][MacVNCRowKeyAllowCIDR]];
     }
     for (NSString *trimmed in macVNCTrimmedNonEmptyLines(allowedText.string))
         [allowedSet addObject:trimmed];
@@ -228,6 +244,9 @@ static NSArray<NSString *> *macVNCTrimmedNonEmptyLines(NSString *text)
         [warning addButtonWithTitle:@"Cancel"];
         if ([warning runModal] != NSAlertFirstButtonReturn)
             return;
+        /* User explicitly confirmed allow-all: record it so the resolved policy
+           uses ALLOW_ALL_CONFIRMED and the status label reflects reality. */
+        newAllowAll = YES;
     }
 
     MacVNCPolicyInput input = {

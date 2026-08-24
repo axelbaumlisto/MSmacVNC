@@ -1,3 +1,26 @@
+# macVNC 0.3.15
+
+## Highlights
+
+- Completed the full SOLID/DRY/KISS scoring-review TOP-10 punch list:
+  1. `MacVNCPowerMgmt` — fixed resource leak + mutex-init UB on `dimmingInit` intermediate error paths (single rollback via `releasePowerResources` + `pthread_mutex_destroy`).
+  2. Wired the previously-dead `allowAllConfirmed` path: confirming the 0.0.0.0/0 warning now sets ALLOW_ALL_CONFIRMED so mode + status label reflect reality.
+  3. Throttled `undim()` to at most once/second (was 3 IOKit syscalls under a lock on every keystroke/mouse-move).
+  4. `MacVNCDisplayWake` now reuses one user-activity assertion ID and releases it (per Apple guidance) instead of leaking a fresh one per wake.
+  5. Split the ~190-line `MacVNCPreferences -runModal` — extracted pure model helpers (`macVNCManualAllowedText`, selection/allowlist assembly) out of the view builder.
+  6. Replaced magic listen-popup tags (1/2/1000) with named constants shared by build + save paths.
+  7. Network-row dictionary keys are now shared `MacVNCRowKey*` constants (single source of truth for producer + consumer; no more typo-masking).
+  8. `specialKeyMap` converted from fragile pair-stride `int[]` to a typed `{sym, code}` struct array.
+  9. `main.m` autoreleases the app delegate (balances the one unbalanced MRC alloc).
+  10. Added `src/ARCHITECTURE.md` documenting the pure-C-core ↔ ObjC-glue split, seams, and concurrency/lock model.
+
+## Validation
+
+- Release build: passed.
+- clang static analyzer: 0 warnings across changed Objective-C modules.
+- CTest: 17/17 passed (lsof-based `client_allowlist` skipped on this host; listener + auth verified directly: AUTH_OK, composite 5552x2715).
+- Developer ID + hardened runtime + entitlements: signed, notarized, stapled.
+
 # macVNC 0.3.14
 
 ## Highlights
