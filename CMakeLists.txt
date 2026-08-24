@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.8 LANGUAGES C)
+project(macVNC VERSION 0.3.9 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -66,6 +66,8 @@ set(SOURCE_FILES
     src/MacVNCPowerMgmt.m
     src/MacVNCDefaultsKeys.h
     src/MacVNCDefaultsKeys.m
+    src/MacVNCListenMode.h
+    src/MacVNCListenMode.m
     src/MacVNCNetworkRows.h
     src/MacVNCNetworkRows.m
     src/MacVNCPreferences.h
@@ -199,6 +201,11 @@ if(BUILD_TESTING)
     target_link_libraries(test_permissions ${FOUNDATION} ${APPKIT_LIBRARY} ${APPLICATION_SERVICES})
     add_test(NAME permissions COMMAND test_permissions)
 
+    add_executable(test_listen_mode tests/test_listen_mode.m src/MacVNCListenMode.m)
+    target_include_directories(test_listen_mode PRIVATE src)
+    target_link_libraries(test_listen_mode ${FOUNDATION})
+    add_test(NAME listen_mode COMMAND test_listen_mode)
+
     add_executable(test_server_init_failure
         tests/test_server_init_failure.m
         src/mac.m
@@ -239,7 +246,7 @@ if(BUILD_TESTING)
                 --app $<TARGET_FILE:${PROJECT_NAME}>
     )
 
-    foreach(test_target test_keysym test_display_layout test_compositor test_pointer_state test_keyboard_modifiers test_capture_rate test_frame_mailbox test_readiness_policy test_network_access test_network_cidr test_network_inventory test_network_policy_resolver test_permissions test_server_init_failure)
+    foreach(test_target test_keysym test_display_layout test_compositor test_pointer_state test_keyboard_modifiers test_capture_rate test_frame_mailbox test_readiness_policy test_network_access test_network_cidr test_network_inventory test_network_policy_resolver test_permissions test_listen_mode test_server_init_failure)
         target_compile_options(${test_target} PRIVATE -UNDEBUG)
     endforeach()
 endif()
