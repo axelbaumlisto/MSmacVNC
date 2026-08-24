@@ -1,3 +1,21 @@
+# macVNC 0.3.6
+
+## Highlights
+
+- Multi-monitor: default capture is now all displays (`displayNumber = -2`), so a second monitor is no longer "lost" in the remote session (composited into one framebuffer).
+- More SOLID/DRY/KISS refactor (no behavior change):
+  - `MacVNCDefaultsKeys` — single source of truth for NSUserDefaults keys / bundle id / default port.
+  - `MacVNCNetworkRows` — active-interface enumeration extracted from AppDelegate.
+  - `MacVNCPreferences` — the entire Preferences window moved out of AppDelegate.
+- `AppDelegate.m` reduced from 1169 → 500 lines; concerns now split across focused units.
+
+## Validation
+
+- Release build: passed.
+- CTest: 15/15 passed.
+- Reference libvncclient auth: AUTH_OK, composite 5552x2715 (both displays).
+- Developer ID + hardened runtime + entitlements: signed, notarized, stapled.
+
 # macVNC 0.3.5
 
 ## Highlights
