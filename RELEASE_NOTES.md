@@ -1,3 +1,16 @@
+# macVNC 0.3.8
+
+## Highlights
+
+- Removed the built-in "caffeinate" behavior: macVNC no longer holds a persistent NoDisplaySleep power assertion.
+- Display wake is now KISS: on start and on client connect it only declares local user activity (a one-shot nudge that lights up a sleeping/dimmed screen), without forcing the display to stay awake indefinitely.
+
+## Validation
+
+- Release build: passed.
+- CTest: 15/15 passed.
+- Verified: no persistent NoDisplaySleep assertion is held by the process; UserIsActive nudge on connect.
+
 # macVNC 0.3.7
 
 ## Highlights
