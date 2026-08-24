@@ -218,6 +218,10 @@
     [NSApp runModalForWindow:self.window];
     [self.refreshTimer invalidate];
     self.refreshTimer = nil;
+    [[NSNotificationCenter defaultCenter]
+        removeObserver:self
+                  name:NSApplicationDidBecomeActiveNotification
+                object:nil];
     [self.window orderOut:nil];
     return self.action;
 }

@@ -4,25 +4,25 @@
 #include <stdatomic.h>
 #include "NetworkPolicyResolver.h"
 
-/* -----------------------------------------------------------------------
- * Globals that AppDelegate may read or write before calling vncServerStart().
- * ----------------------------------------------------------------------- */
-
-/* When TRUE the server accepts connections but ignores all input events. */
-extern rfbBool viewOnly;
-
-/* Index of the display to share (-1 = primary). */
-extern int displayNumber;
-
 #define MACVNC_LISTEN_ADDRESS_MAX 64
 #define MACVNC_ALLOWED_CLIENTS_MAX 4096
 
-/* Optional IPv4 bind address. Empty means all interfaces. */
-extern char macVNCListenAddress[MACVNC_LISTEN_ADDRESS_MAX];
-
-/* Optional IPv4/CIDR client allowlist. Interpretation depends on access mode. */
-extern char macVNCAllowedClients[MACVNC_ALLOWED_CLIENTS_MAX];
-extern MacVNCClientAccessMode macVNCClientAccessMode;
+/* -----------------------------------------------------------------------
+ * Immutable server configuration passed by value to vncServerStart().
+ * Replaces the former ambient mutable globals: AppDelegate builds this from
+ * the resolved network policy and defaults, and the server owns a private
+ * copy for its lifetime.
+ * ----------------------------------------------------------------------- */
+typedef struct {
+    int port;                    /* TCP port (5900 = VNC default). */
+    const char *password;        /* Shared password; must be non-empty. */
+    int captureFramesPerSecond;  /* Validated capture rate for every display. */
+    rfbBool viewOnly;            /* TRUE = accept clients but ignore input. */
+    int displayNumber;           /* -2 = all displays, -1 = primary, >=0 = one. */
+    const char *listenAddress;   /* IPv4 bind address; NULL/empty = all. */
+    const char *allowedClients;  /* IPv4/CIDR allowlist; meaning per access mode. */
+    MacVNCClientAccessMode clientAccessMode;
+} MacVNCServerConfig;
 
 /* -----------------------------------------------------------------------
  * Live statistics (updated atomically from LibVNCServer threads).
@@ -41,17 +41,15 @@ extern void (*macVNCScreenCaptureFailureHandler)(void);
  * ----------------------------------------------------------------------- */
 
 /*
- * Initialise and start the VNC server.
- *
- * port     – TCP port to listen on (5900 is the VNC default).
- * password – Shared password string, or NULL to disable authentication.
- * captureFramesPerSecond – Validated immutable capture rate for every display.
+ * Initialise and start the VNC server from an immutable configuration.
+ * config->password must be non-empty (authentication is mandatory); a NULL
+ * or empty password makes this fail.
  *
  * Returns TRUE on success. On failure the reason is printed via rfbLog().
  * Must not be called on the main thread because rfbInitServer() briefly
  * blocks while binding the listen socket.
  */
-rfbBool vncServerStart(int port, const char *password, int captureFramesPerSecond);
+rfbBool vncServerStart(const MacVNCServerConfig *config);
 
 /*
  * Disconnect all clients, stop the server and free all resources.

@@ -18,6 +18,11 @@ typedef struct {
     uint64_t deadlineNanoseconds;
 } MacVNCReadinessBudget;
 
+/* Current CLOCK_MONOTONIC time in nanoseconds — the clock the readiness
+ * budget is measured against. Single source for both the server core and the
+ * capturer so they cannot drift apart. */
+uint64_t macVNCReadinessNow(void);
+
 /* Creates one total monotonic deadline shared by every display wait. */
 MacVNCReadinessBudget macVNCReadinessBudgetStart(uint64_t nowNanoseconds,
                                                  uint64_t totalNanoseconds);

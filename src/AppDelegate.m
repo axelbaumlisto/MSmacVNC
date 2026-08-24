@@ -73,6 +73,19 @@ static void macVNCScreenCaptureFailed(void)
     vncServerStop();
 }
 
+- (void)dealloc
+{
+    [_updateTimer invalidate];
+    [_statusItem release];
+    [_statusMenuItem release];
+    [_clientsMenuItem release];
+    [_loginItemMenuItem release];
+    [_updateTimer release];
+    if (gSharedAppDelegate == self)
+        gSharedAppDelegate = nil;
+    [super dealloc];
+}
+
 /* -----------------------------------------------------------------------
  * Defaults
  * ----------------------------------------------------------------------- */
@@ -118,55 +131,55 @@ static void macVNCScreenCaptureFailed(void)
 
 - (void)buildMenu
 {
-    NSMenu *menu = [[NSMenu alloc] init];
+    NSMenu *menu = [[[NSMenu alloc] init] autorelease];
 
     /* Title row */
-    NSMenuItem *titleItem = [[NSMenuItem alloc] initWithTitle:@"macVNC"
-                                                       action:nil
-                                                keyEquivalent:@""];
+    NSMenuItem *titleItem = [[[NSMenuItem alloc] initWithTitle:@"macVNC"
+                                                        action:nil
+                                                 keyEquivalent:@""] autorelease];
     titleItem.enabled = NO;
-    titleItem.attributedTitle = [[NSAttributedString alloc]
+    titleItem.attributedTitle = [[[NSAttributedString alloc]
         initWithString:@"macVNC"
             attributes:@{NSFontAttributeName:
-                             [NSFont boldSystemFontOfSize:[NSFont systemFontSize]]}];
+                             [NSFont boldSystemFontOfSize:[NSFont systemFontSize]]}] autorelease];
     [menu addItem:titleItem];
 
     /* Status row (port) */
-    self.statusMenuItem = [[NSMenuItem alloc] initWithTitle:@"Starting…"
-                                                     action:nil
-                                              keyEquivalent:@""];
+    self.statusMenuItem = [[[NSMenuItem alloc] initWithTitle:@"Starting…"
+                                                      action:nil
+                                               keyEquivalent:@""] autorelease];
     self.statusMenuItem.enabled = NO;
     [menu addItem:self.statusMenuItem];
 
     /* Status row (client count) */
-    self.clientsMenuItem = [[NSMenuItem alloc] initWithTitle:@"No clients connected"
-                                                      action:nil
-                                               keyEquivalent:@""];
+    self.clientsMenuItem = [[[NSMenuItem alloc] initWithTitle:@"No clients connected"
+                                                       action:nil
+                                                keyEquivalent:@""] autorelease];
     self.clientsMenuItem.enabled = NO;
     [menu addItem:self.clientsMenuItem];
 
     [menu addItem:[NSMenuItem separatorItem]];
 
     /* Copy address */
-    NSMenuItem *copyItem = [[NSMenuItem alloc] initWithTitle:@"Copy VNC Address"
-                                                      action:@selector(copyVNCAddress:)
-                                               keyEquivalent:@"c"];
+    NSMenuItem *copyItem = [[[NSMenuItem alloc] initWithTitle:@"Copy VNC Address"
+                                                       action:@selector(copyVNCAddress:)
+                                                keyEquivalent:@"c"] autorelease];
     copyItem.target = self;
     [menu addItem:copyItem];
 
     /* Preferences */
-    NSMenuItem *prefsItem = [[NSMenuItem alloc] initWithTitle:@"Preferences…"
-                                                       action:@selector(openPreferences:)
-                                                keyEquivalent:@","];
+    NSMenuItem *prefsItem = [[[NSMenuItem alloc] initWithTitle:@"Preferences…"
+                                                        action:@selector(openPreferences:)
+                                                 keyEquivalent:@","] autorelease];
     prefsItem.target = self;
     [menu addItem:prefsItem];
 
     [menu addItem:[NSMenuItem separatorItem]];
 
     /* Start at Login */
-    self.loginItemMenuItem = [[NSMenuItem alloc] initWithTitle:@"Start at Login"
-                                                        action:@selector(toggleLoginItem:)
-                                                 keyEquivalent:@""];
+    self.loginItemMenuItem = [[[NSMenuItem alloc] initWithTitle:@"Start at Login"
+                                                         action:@selector(toggleLoginItem:)
+                                                  keyEquivalent:@""] autorelease];
     self.loginItemMenuItem.target = self;
     self.loginItemMenuItem.state  = [self isLoginItemEnabled]
                                         ? NSControlStateValueOn
@@ -176,9 +189,9 @@ static void macVNCScreenCaptureFailed(void)
     [menu addItem:[NSMenuItem separatorItem]];
 
     /* Quit */
-    NSMenuItem *quitItem = [[NSMenuItem alloc] initWithTitle:@"Quit macVNC"
-                                                      action:@selector(terminate:)
-                                               keyEquivalent:@"q"];
+    NSMenuItem *quitItem = [[[NSMenuItem alloc] initWithTitle:@"Quit macVNC"
+                                                       action:@selector(terminate:)
+                                                keyEquivalent:@"q"] autorelease];
     [menu addItem:quitItem];
 
     self.statusItem.menu = menu;
@@ -298,9 +311,8 @@ static void macVNCScreenCaptureFailed(void)
             NSLog(@"%@", captureRateError);
         }
 
-        /* Copy these globals before calling vncServerStart(). */
-        viewOnly = (rfbBool)[defaults boolForKey:MacVNCKeyViewOnly];
-        displayNumber = (int)[defaults integerForKey:MacVNCKeyDisplay];
+        rfbBool viewOnly = (rfbBool)[defaults boolForKey:MacVNCKeyViewOnly];
+        int displayNumber = (int)[defaults integerForKey:MacVNCKeyDisplay];
         NSString *displayOverride = environment[@"MACVNC_DISPLAY"];
         if (displayOverride.length > 0)
             displayNumber = (int)displayOverride.integerValue;
@@ -322,27 +334,31 @@ static void macVNCScreenCaptureFailed(void)
         if (!macVNCResolveNetworkPolicy(&policyInput, &policyEnv, &resolvedPolicy)) {
             configurationError = [NSString stringWithUTF8String:resolvedPolicy.error];
             NSLog(@"Network policy error: %@", configurationError);
-        } else {
-            snprintf(macVNCListenAddress, sizeof(macVNCListenAddress), "%s", resolvedPolicy.bindAddress);
-            snprintf(macVNCAllowedClients, sizeof(macVNCAllowedClients), "%s", resolvedPolicy.allowedClients);
-            macVNCClientAccessMode = resolvedPolicy.accessMode;
-            if (resolvedPolicy.envOverrideActive)
-                NSLog(@"macVNC network policy uses environment override(s)");
+        } else if (resolvedPolicy.envOverrideActive) {
+            NSLog(@"macVNC network policy uses environment override(s)");
         }
 
         if (port <= 0 || port > 65535)
             port = MacVNCDefaultPort;
 
-        BOOL ok = configurationError == nil &&
-            vncServerStart(port, password.length > 0 ? password.UTF8String : NULL,
-                           captureFramesPerSecond);
+        MacVNCServerConfig serverConfig = {
+            .port = port,
+            .password = password.length > 0 ? password.UTF8String : NULL,
+            .captureFramesPerSecond = captureFramesPerSecond,
+            .viewOnly = viewOnly,
+            .displayNumber = displayNumber,
+            .listenAddress = resolvedPolicy.bindAddress,
+            .allowedClients = resolvedPolicy.allowedClients,
+            .clientAccessMode = resolvedPolicy.accessMode,
+        };
+        BOOL ok = configurationError == nil && vncServerStart(&serverConfig);
 
         dispatch_async(dispatch_get_main_queue(), ^{
             if (ok) {
                 [self updateMenuStatus];
             } else if (configurationError) {
                 self.statusMenuItem.title = @"Failed to start";
-                NSAlert *alert = [[NSAlert alloc] init];
+                NSAlert *alert = [[[NSAlert alloc] init] autorelease];
                 alert.messageText     = @"macVNC could not start";
                 alert.informativeText = configurationError;
                 alert.alertStyle      = NSAlertStyleCritical;

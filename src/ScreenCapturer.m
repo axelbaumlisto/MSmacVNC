@@ -1,11 +1,20 @@
 #import "ScreenCapturer.h"
 #import "ReadinessPolicy.h"
+#import "FrameMailbox.h"
+#include <pthread.h>
 #include <errno.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <time.h>
 
-@interface ScreenCapturer ()
+@interface ScreenCapturer () {
+    pthread_mutex_t _readinessMutex;
+    pthread_cond_t _readinessCondition;
+    BOOL _firstFrameReady;
+    NSUInteger _readinessGeneration;
+    MacVNCFrameMailbox _frameMailbox;
+    BOOL _frameMailboxInitialized;
+}
 
 @property (nonatomic, assign) CGDirectDisplayID displayID;
 @property (nonatomic, strong) SCStream *stream;
@@ -41,14 +50,6 @@ macVNCCaptureInitializationFaultWasConsumed(void)
     return atomic_load(&captureInitializationFaultConsumed);
 }
 #endif
-
-static uint64_t
-monotonicNanoseconds(void)
-{
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    return (uint64_t)now.tv_sec * NSEC_PER_SEC + (uint64_t)now.tv_nsec;
-}
 
 static void releaseMailboxFrame(void *frame)
 {
@@ -328,12 +329,12 @@ static void endMailboxActivity(void *context)
             : (uint64_t)scaled;
     }
     MacVNCReadinessBudget budget = macVNCReadinessBudgetStart(
-        monotonicNanoseconds(), durationNanoseconds);
+        macVNCReadinessNow(), durationNanoseconds);
 
     pthread_mutex_lock(&_readinessMutex);
     while (_readinessGeneration == generation && !_firstFrameReady) {
         uint64_t remaining = macVNCReadinessBudgetRemaining(
-            &budget, monotonicNanoseconds());
+            &budget, macVNCReadinessNow());
         if (remaining == 0)
             break;
         struct timespec relativeWait = macVNCReadinessRelativeWait(remaining);
@@ -371,6 +372,7 @@ static void endMailboxActivity(void *context)
         macVNCFrameMailboxDestroy(&_frameMailbox);
     pthread_cond_destroy(&_readinessCondition);
     pthread_mutex_destroy(&_readinessMutex);
+    [_stream release];
     [_frameHandler release];
     [_errorHandler release];
     dispatch_release(_operationGroup);
