@@ -1,3 +1,17 @@
+# macVNC 0.3.7
+
+## Highlights
+
+- Further SOLID/DRY/KISS refactor (no behavior change): extracted the legacy IOPM screen dim/sleep control into `MacVNCPowerMgmt`.
+- `mac.m` reduced from 1226 → 1030 lines; the remaining code is the cohesive server/capture/input core.
+
+## Validation
+
+- Release build: passed.
+- CTest: 15/15 passed.
+- Reference libvncclient auth: AUTH_OK, composite 5552x2715 (both displays).
+- Developer ID + hardened runtime + entitlements: signed, notarized, stapled.
+
 # macVNC 0.3.6
 
 ## Highlights
