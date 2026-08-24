@@ -1,3 +1,21 @@
+# macVNC 0.3.5
+
+## Highlights
+
+- Internal refactor for SOLID/DRY/KISS (no behavior change):
+  - `MacVNCPassword` — single source of truth for password load/store/file read with one trim helper.
+  - `MacVNCPermissionsPanel` — the startup permission chip panel moved out of AppDelegate.
+  - `MacVNCDisplayWake` — display wake + NoDisplaySleep assertion extracted from mac.m.
+- `AppDelegate.m` reduced from 1169 to ~800 lines; each concern now lives in its own unit.
+
+## Validation
+
+- Release build: passed.
+- CTest: 15/15 passed.
+- Reference libvncclient auth: AUTH_OK.
+- NoDisplaySleep assertion held while running.
+- Developer ID + hardened runtime + entitlements: signed, notarized, stapled.
+
 # macVNC 0.3.4
 
 ## Highlights
