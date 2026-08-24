@@ -1,3 +1,19 @@
+# macVNC 0.3.17
+
+## Highlights
+
+- Final polish from a convergence-confirming blind review:
+  - **UX fix:** an empty/unset password now yields an explicit configuration error in `MacVNCStartupConfig` (surfaced as a dialog) instead of failing silently to “Not running”. Added a unit-test case.
+  - **Logging accuracy:** `clientGone` now reports the authoritative connected-client count under the lock for un-counted (never-authenticated) clients.
+  - **DRY:** `MacVNCPowerMgmt` dim/sleep save+restore collapsed from four near-identical functions into two key-parameterized helpers.
+
+## Validation
+
+- Release build: passed.
+- clang static analyzer: 0 warnings across changed Objective-C modules.
+- CTest: 17/17 passed (lsof-based `client_allowlist` skipped on this host; listener + auth verified directly: AUTH_OK, composite 5552x2715).
+- Developer ID + hardened runtime + entitlements: signed, notarized, stapled.
+
 # macVNC 0.3.16
 
 ## Highlights

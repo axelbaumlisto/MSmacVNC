@@ -27,47 +27,33 @@ static rfbBool          initialized      = FALSE;
 static rfbBool          dim_time_saved   = FALSE;
 static rfbBool          sleep_time_saved = FALSE;
 
+/* Save/restore an IOPM aggressiveness setting, parameterized by key + storage,
+   so dim and sleep share one implementation instead of four copies. */
 static int
-saveDimSettings(void)
+saveAggressiveness(unsigned long key, unsigned long *store, rfbBool *saved)
 {
-    if (IOPMGetAggressiveness(power_mgt, kPMMinutesToDim, &dim_time) != kIOReturnSuccess)
+    if (IOPMGetAggressiveness(power_mgt, key, store) != kIOReturnSuccess)
         return -1;
-    dim_time_saved = TRUE;
+    *saved = TRUE;
     return 0;
 }
 
 static int
-restoreDimSettings(void)
+restoreAggressiveness(unsigned long key, unsigned long *store, rfbBool *saved)
 {
-    if (!dim_time_saved)
+    if (!*saved)
         return -1;
-    if (IOPMSetAggressiveness(power_mgt, kPMMinutesToDim, dim_time) != kIOReturnSuccess)
+    if (IOPMSetAggressiveness(power_mgt, key, *store) != kIOReturnSuccess)
         return -1;
-    dim_time_saved = FALSE;
-    dim_time = 0;
+    *saved = FALSE;
+    *store = 0;
     return 0;
 }
 
-static int
-saveSleepSettings(void)
-{
-    if (IOPMGetAggressiveness(power_mgt, kPMMinutesToSleep, &sleep_time) != kIOReturnSuccess)
-        return -1;
-    sleep_time_saved = TRUE;
-    return 0;
-}
-
-static int
-restoreSleepSettings(void)
-{
-    if (!sleep_time_saved)
-        return -1;
-    if (IOPMSetAggressiveness(power_mgt, kPMMinutesToSleep, sleep_time) != kIOReturnSuccess)
-        return -1;
-    sleep_time_saved = FALSE;
-    sleep_time = 0;
-    return 0;
-}
+static int saveDimSettings(void)    { return saveAggressiveness(kPMMinutesToDim, &dim_time, &dim_time_saved); }
+static int restoreDimSettings(void) { return restoreAggressiveness(kPMMinutesToDim, &dim_time, &dim_time_saved); }
+static int saveSleepSettings(void)  { return saveAggressiveness(kPMMinutesToSleep, &sleep_time, &sleep_time_saved); }
+static int restoreSleepSettings(void){ return restoreAggressiveness(kPMMinutesToSleep, &sleep_time, &sleep_time_saved); }
 
 /* Release everything dimmingInit acquired. Safe to call partially-initialised. */
 static void releasePowerResources(void)
