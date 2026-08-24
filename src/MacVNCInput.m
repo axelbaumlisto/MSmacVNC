@@ -216,6 +216,13 @@ PtrAddEvent(int buttonMask, int x, int y, rfbClientPtr cl)
 
     undim();
 
+    /* The injected context is set in ScreenInit before client threads start and
+       cleared in macVNCInputShutdown only after rfbShutdownServer(TRUE) has
+       joined every client thread. A NULL here means a late/stray event outside
+       that window: refuse it locally instead of relying on that invariant. */
+    if (!inputScreen || !inputLayout)
+        return;
+
     if (x < 0) x = 0;
     if (y < 0) y = 0;
     if (x >= (int)inputScreen->width) x = (int)inputScreen->width - 1;
@@ -227,26 +234,28 @@ PtrAddEvent(int buttonMask, int x, int y, rfbClientPtr cl)
     pthread_mutex_lock(&pointerMutex);
     bool shouldPost = macVNCResolvePointerEvent(
         &pointerState, validPosition, globalX, globalY, buttonMask, &globalX, &globalY);
+    /* Tell LibVNCServer where the cursor is. Clients that advertise the
+       PointerPos encoding receive a position update in the next
+       FramebufferUpdate, so they can render the cursor locally at the
+       exact position without waiting for framebuffer data. Written under
+       pointerMutex so concurrent multi-client events cannot tear the fields. */
+    inputScreen->cursorX = x;
+    inputScreen->cursorY = y;
     pthread_mutex_unlock(&pointerMutex);
     if (!shouldPost)
         return;
     CGPoint position = CGPointMake(globalX, globalY);
 
-    /* Tell LibVNCServer where the cursor is. Clients that advertise the
-       PointerPos encoding receive a position update in the next
-       FramebufferUpdate, so they can render the cursor locally at the
-       exact position without waiting for framebuffer data. */
-    inputScreen->cursorX = x;
-    inputScreen->cursorY = y;
-
-    /* map buttons 4 5 6 7 to scroll events as per https://github.com/rfbproto/rfbproto/blob/master/rfbproto.rst#745pointerevent */
+    /* map buttons 4 5 6 7 to scroll events as per https://github.com/rfbproto/rfbproto/blob/master/rfbproto.rst#745pointerevent
+       Scroll directions are mutually exclusive; use else-if so at most one
+       event is created (avoids overwriting/leaking a prior CGEvent). */
     if(buttonMask & (1 << 3))
 	mouseEvent = CGEventCreateScrollWheelEvent(eventSource, kCGScrollEventUnitLine, 2, 1, 0);
-    if(buttonMask & (1 << 4))
+    else if(buttonMask & (1 << 4))
 	mouseEvent = CGEventCreateScrollWheelEvent(eventSource, kCGScrollEventUnitLine, 2, -1, 0);
-    if(buttonMask & (1 << 5))
+    else if(buttonMask & (1 << 5))
 	mouseEvent = CGEventCreateScrollWheelEvent(eventSource, kCGScrollEventUnitLine, 2, 0, 1);
-    if(buttonMask & (1 << 6))
+    else if(buttonMask & (1 << 6))
 	mouseEvent = CGEventCreateScrollWheelEvent(eventSource, kCGScrollEventUnitLine, 2, 0, -1);
 
     if (mouseEvent) {

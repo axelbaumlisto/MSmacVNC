@@ -1,3 +1,22 @@
+# macVNC 0.3.12
+
+## Highlights
+
+- Addressed every finding from a 3-critic “ideal code” blind areview (scores 8-9/10, no blockers) plus a memory-safety pass:
+  - **Config struct:** `vncServerStart(const MacVNCServerConfig *)` replaces five ambient mutable globals (viewOnly/displayNumber/listenAddress/allowedClients/accessMode). AppDelegate now forwards the resolved policy as an immutable value object; the server keeps a private copy. Mirrors the clean `macVNCInputSetContext` seam.
+  - **DRY:** single `macVNCReadinessNow()` clock in ReadinessPolicy (removed two identical `monotonicNanoseconds`); MacVNCPassword reuses `MacVNCKeyPassword`/`MacVNCBundleID` instead of re-hardcoding `@"rfbPassword"` and the bundle id.
+  - **Contract fix:** mac.h no longer claims `password==NULL disables auth` (it is mandatory).
+  - **Encapsulation:** ScreenCapturer private ivars moved out of the public header; `newClient`/`clientGone` made `static`.
+  - **Memory safety:** fixed a real `_stream` leak in ScreenCapturer -dealloc; hardened the MACVNC_PASSWORD_FILE invalid-UTF-8 path (explicit free); PtrAddEvent now null-guards the injected context and writes cursorX/Y under the pointer mutex; permissions-panel observer removed symmetrically in runModal.
+
+## Validation
+
+- Release build: passed.
+- clang static analyzer: 0 warnings across all Objective-C modules.
+- CTest: 17/17 passed.
+- Reference libvncclient auth: AUTH_OK, composite 5552x2715.
+- Developer ID + hardened runtime + entitlements: signed, notarized, stapled.
+
 # macVNC 0.3.11
 
 ## Highlights

@@ -1,4 +1,5 @@
 #import "MacVNCPassword.h"
+#import "MacVNCDefaultsKeys.h"
 
 #import <Security/Security.h>
 #include <errno.h>
@@ -7,9 +8,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static NSString * const kKeyPassword = @"rfbPassword";
-static NSString * const kKeychainService = @"net.christianbeier.macVNC";
-static NSString * const kKeychainPasswordAccount = @"rfbPassword";
+/* Reuse the single-source-of-truth defaults key + bundle id (no re-hardcoding).
+ * The legacy Keychain account name matches the defaults key by historical design. */
+#define kKeyPassword               MacVNCKeyPassword
+#define kKeychainService           MacVNCBundleID
+#define kKeychainPasswordAccount   MacVNCKeyPassword
 
 static NSString *macVNCTrim(NSString *value)
 {
@@ -135,10 +138,13 @@ NSString *macVNCReadSecurePasswordFile(NSString *path, NSString **errorMessage)
         return nil;
     }
 
-    NSString *raw = [[[NSString alloc] initWithBytesNoCopy:bytes
-                                                     length:size
-                                                   encoding:NSUTF8StringEncoding
-                                               freeWhenDone:YES] autorelease];
+    /* Copy into the NSString (initWithBytes:) and free the buffer explicitly.
+       initWithBytesNoCopy:freeWhenDone:YES does not reliably free the buffer
+       when the bytes are invalid UTF-8 and the initializer returns nil. */
+    NSString *raw = [[[NSString alloc] initWithBytes:bytes
+                                              length:size
+                                            encoding:NSUTF8StringEncoding] autorelease];
+    free(bytes);
     NSString *password = macVNCTrim(raw);
     if (!raw || password.length == 0) {
         if (errorMessage)

@@ -49,7 +49,17 @@ static void *startServer(void *opaque)
 {
     StartContext *context = opaque;
     waitAtGate(context->gate);
-    context->result = vncServerStart(0, "test-password", 12);
+    MacVNCServerConfig config = {
+        .port = 0,
+        .password = "test-password",
+        .captureFramesPerSecond = 12,
+        .viewOnly = TRUE,
+        .displayNumber = -2,
+        .listenAddress = NULL,
+        .allowedClients = NULL,
+        .clientAccessMode = MACVNC_CLIENT_ACCESS_ALLOW_ALL_CONFIRMED,
+    };
+    context->result = vncServerStart(&config);
     return NULL;
 }
 
@@ -63,13 +73,8 @@ static void *stopServer(void *opaque)
 int main(void)
 {
     @autoreleasepool {
-        viewOnly = TRUE;
         preventDimming = FALSE;
         preventSleep = FALSE;
-        displayNumber = -2;
-        macVNCClientAccessMode = MACVNC_CLIENT_ACCESS_ALLOW_ALL_CONFIRMED;
-        macVNCListenAddress[0] = '\0';
-        macVNCAllowedClients[0] = '\0';
 
         CGDirectDisplayID displays[32];
         CGDisplayCount displayCount = 0;
