@@ -7,6 +7,10 @@
 #include <stdatomic.h>
 #include <time.h>
 
+/* Identity key for the sample-handler queue (see -dealloc). The address of this
+   static is the key; its value is irrelevant. */
+static const void * const kMacVNCSampleQueueKey = &kMacVNCSampleQueueKey;
+
 @interface ScreenCapturer () {
     pthread_mutex_t _readinessMutex;
     pthread_cond_t _readinessCondition;
@@ -82,6 +86,14 @@ static void endMailboxActivity(void *context)
             DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
         _sampleHandlerQueue = dispatch_queue_create(
             "net.christianbeier.macVNC.capture-sample", qosAttr);
+        /* Tag the queue so -dealloc can detect it is already running on it and
+           skip the final dispatch_sync (which would self-deadlock). This can
+           happen when GCD releases the last block-captured self reference on
+           this very queue after stopCaptureAndWait has returned. */
+        dispatch_queue_set_specific(_sampleHandlerQueue,
+                                    kMacVNCSampleQueueKey,
+                                    (void *)kMacVNCSampleQueueKey,
+                                    NULL);
         _operationGroup = dispatch_group_create();
         _captureRequested = NO;
         _generation = 0;
@@ -366,8 +378,12 @@ static void endMailboxActivity(void *context)
 
 - (void)dealloc {
     /* vncServerStop quiesces each capturer first. This final serial drain keeps
-       the owned sample queue alive until no callback can still touch state. */
-    dispatch_sync(_sampleHandlerQueue, ^{});
+       the owned sample queue alive until no callback can still touch state.
+       If we are ALREADY executing on that queue (last reference dropped by GCD
+       while releasing a completed block), the drain has by definition happened
+       and dispatch_sync would deadlock on ourselves — so skip it. */
+    if (dispatch_get_specific(kMacVNCSampleQueueKey) == NULL)
+        dispatch_sync(_sampleHandlerQueue, ^{});
     if (_frameMailboxInitialized)
         macVNCFrameMailboxDestroy(&_frameMailbox);
     pthread_cond_destroy(&_readinessCondition);

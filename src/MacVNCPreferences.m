@@ -3,6 +3,7 @@
 #import "MacVNCPassword.h"
 #import "MacVNCNetworkRows.h"
 #import "MacVNCListenMode.h"
+#import "NetworkAccess.h"
 #import "NetworkPolicyResolver.h"
 
 /* Listen-popup item tags (implicit contract shared by build + save paths). */
@@ -132,6 +133,9 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
     pwdLabel.frame = NSMakeRect(270, kRowPort, 90, kRowHeight);
     NSSecureTextField *pwdField = [[[NSSecureTextField alloc] initWithFrame:NSMakeRect(360, kRowPort, 160, kRowHeight)] autorelease];
     pwdField.placeholderString = @"(required)";
+    pwdField.toolTip = @"The VNC protocol uses only the first 8 characters (DES). "
+                        "Longer passwords add no security, and changing only the part "
+                        "after character 8 does not change the credential.";
     pwdField.stringValue = pwd;
 
     NSTextField *listenLabel = [NSTextField labelWithString:@"Accept connections on:"];
@@ -286,10 +290,17 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
         [combinedAllowed appendFormat:@"%@\n", entry];
     BOOL newAllowAll = NO;
 
-    if ([combinedAllowed containsString:@"0.0.0.0/0"]) {
+    /* Semantic check: ANY /0 entry (e.g. 10.0.0.0/0, 1.2.3.4/0) matches every
+       IPv4 address, not just the literal "0.0.0.0/0". Parse the list and ask
+       the access module rather than substring-matching. */
+    MacVNCNetworkAccessList probeList;
+    BOOL allowsEveryone = macVNCParseAccessList(combinedAllowed.UTF8String, &probeList, NULL, 0) &&
+                          macVNCNetworkAccessContainsAllowAll(&probeList);
+
+    if (allowsEveryone) {
         NSAlert *warning = [[[NSAlert alloc] init] autorelease];
         warning.messageText = @"Allow all clients?";
-        warning.informativeText = @"0.0.0.0/0 allows every IPv4 client that can reach macVNC. This is unsafe outside a trusted VPN.";
+        warning.informativeText = @"This allowlist contains an entry that matches every IPv4 client that can reach macVNC (a /0 prefix). This is unsafe outside a trusted VPN.";
         [warning addButtonWithTitle:@"Continue"];
         [warning addButtonWithTitle:@"Cancel"];
         if ([warning runModal] != NSAlertFirstButtonReturn)
@@ -315,9 +326,30 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
         return;
     }
 
+    /* The RFB DES auth only uses the first 8 characters. Tell the user rather
+       than silently truncating their "long" password's security to 8 bytes. */
+    NSString *trimmedPwd = [pwdField.stringValue stringByTrimmingCharactersInSet:
+                            NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (trimmedPwd.length > MACVNC_VNC_PASSWORD_EFFECTIVE_MAX) {
+        NSAlert *pwdWarning = [[[NSAlert alloc] init] autorelease];
+        pwdWarning.messageText = @"Only the first 8 characters are used";
+        pwdWarning.informativeText = [NSString stringWithFormat:
+            @"The VNC protocol derives its key from the first %d characters (DES). "
+            @"Your password is %lu characters, so the rest is ignored \u2014 and changing only "
+            @"the part after character %d would NOT change the credential.\n\n"
+            @"Save anyway, or go back and choose a different first %d characters?",
+            MACVNC_VNC_PASSWORD_EFFECTIVE_MAX, (unsigned long)trimmedPwd.length,
+            MACVNC_VNC_PASSWORD_EFFECTIVE_MAX, MACVNC_VNC_PASSWORD_EFFECTIVE_MAX];
+        [pwdWarning addButtonWithTitle:@"Save anyway"];
+        [pwdWarning addButtonWithTitle:@"Cancel"];
+        if ([pwdWarning runModal] != NSAlertFirstButtonReturn)
+            return;
+    }
+
     /* Store password in plaintext defaults (by request), trimmed, and remove
        any previously stored Keychain copy. */
     macVNCStorePassword(defaults, pwdField.stringValue);
+
 
     if (newPort > 0 && newPort <= 65535)
         [defaults setInteger:newPort forKey:MacVNCKeyPort];
