@@ -1,15 +1,12 @@
 #import "AppDelegate.h"
 #import "mac.h"
-#import "CaptureRate.h"
-#import "NetworkPolicyResolver.h"
 #import "MacVNCPermissions.h"
 #import "MacVNCPermissionsPanel.h"
-#import "MacVNCPassword.h"
 #import "MacVNCPreferences.h"
 #import "MacVNCDefaultsKeys.h"
 #import "MacVNCListenMode.h"
-
-#import <ServiceManagement/ServiceManagement.h>
+#import "MacVNCLoginItem.h"
+#import "MacVNCStartupConfig.h"
 #include <string.h>
 #include <unistd.h>
 
@@ -181,7 +178,7 @@ static void macVNCScreenCaptureFailed(void)
                                                          action:@selector(toggleLoginItem:)
                                                   keyEquivalent:@""] autorelease];
     self.loginItemMenuItem.target = self;
-    self.loginItemMenuItem.state  = [self isLoginItemEnabled]
+    self.loginItemMenuItem.state  = [MacVNCLoginItem isEnabled]
                                         ? NSControlStateValueOn
                                         : NSControlStateValueOff;
     [menu addItem:self.loginItemMenuItem];
@@ -284,74 +281,14 @@ static void macVNCScreenCaptureFailed(void)
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
 
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+        MacVNCStartupConfig *startup = [MacVNCStartupConfig
+            configWithDefaults:defaults
+                   environment:NSProcessInfo.processInfo.environment];
+        NSString *configurationError = startup.error;
 
-        int       port     = (int)[defaults integerForKey:MacVNCKeyPort];
-        NSString *password = macVNCLoadPassword(defaults);
-        NSString *configurationError = nil;
-        NSDictionary<NSString *, NSString *> *environment = NSProcessInfo.processInfo.environment;
-        NSString *portOverride = environment[@"MACVNC_PORT"];
-        if (portOverride.integerValue > 0 && portOverride.integerValue <= 65535)
-            port = (int)portOverride.integerValue;
-        NSString *passwordFile = environment[@"MACVNC_PASSWORD_FILE"];
-        if (passwordFile.length > 0) {
-            password = macVNCReadSecurePasswordFile(passwordFile, &configurationError);
-            if (configurationError)
-                NSLog(@"%@", configurationError);
-        }
-
-        int captureFramesPerSecond = MACVNC_CAPTURE_FPS_DEFAULT;
-        NSString *captureFPSOverride = environment[@"MACVNC_CAPTURE_FPS"];
-        if (macVNCParseCaptureFPS(captureFPSOverride.UTF8String,
-                                  &captureFramesPerSecond) == MACVNC_CAPTURE_RATE_INVALID) {
-            NSString *captureRateError = [NSString stringWithFormat:
-                @"Invalid MACVNC_CAPTURE_FPS '%@'; expected an integer from %d to %d",
-                captureFPSOverride, MACVNC_CAPTURE_FPS_MIN, MACVNC_CAPTURE_FPS_MAX];
-            if (!configurationError)
-                configurationError = captureRateError;
-            NSLog(@"%@", captureRateError);
-        }
-
-        rfbBool viewOnly = (rfbBool)[defaults boolForKey:MacVNCKeyViewOnly];
-        int displayNumber = (int)[defaults integerForKey:MacVNCKeyDisplay];
-        NSString *displayOverride = environment[@"MACVNC_DISPLAY"];
-        if (displayOverride.length > 0)
-            displayNumber = (int)displayOverride.integerValue;
-
-        MacVNCPolicyInput policyInput = {
-            .listenMode = ([defaults stringForKey:MacVNCKeyListenMode] ?: MacVNCListenModeLocalhost).UTF8String,
-            .listenAddress = ([defaults stringForKey:MacVNCKeyListenAddress] ?: @"").UTF8String,
-            .allowedClients = ([defaults stringForKey:MacVNCKeyAllowedClients] ?: @"").UTF8String,
-            .allowAllConfirmed = [defaults boolForKey:MacVNCKeyAllowAllConfirmed],
-        };
-        MacVNCPolicyEnv policyEnv = {
-            .listenAddress = environment[@"MACVNC_LISTEN"].length > 0
-                ? environment[@"MACVNC_LISTEN"].UTF8String : NULL,
-            .allowedClients = environment[@"MACVNC_ALLOWED_CLIENTS"]
-                ? environment[@"MACVNC_ALLOWED_CLIENTS"].UTF8String : NULL,
-            .hasAllowedClients = environment[@"MACVNC_ALLOWED_CLIENTS"] != nil,
-        };
-        MacVNCResolvedPolicy resolvedPolicy;
-        if (!macVNCResolveNetworkPolicy(&policyInput, &policyEnv, &resolvedPolicy)) {
-            configurationError = [NSString stringWithUTF8String:resolvedPolicy.error];
-            NSLog(@"Network policy error: %@", configurationError);
-        } else if (resolvedPolicy.envOverrideActive) {
-            NSLog(@"macVNC network policy uses environment override(s)");
-        }
-
-        if (port <= 0 || port > 65535)
-            port = MacVNCDefaultPort;
-
-        MacVNCServerConfig serverConfig = {
-            .port = port,
-            .password = password.length > 0 ? password.UTF8String : NULL,
-            .captureFramesPerSecond = captureFramesPerSecond,
-            .viewOnly = viewOnly,
-            .displayNumber = displayNumber,
-            .listenAddress = resolvedPolicy.bindAddress,
-            .allowedClients = resolvedPolicy.allowedClients,
-            .clientAccessMode = resolvedPolicy.accessMode,
-        };
-        BOOL ok = configurationError == nil && vncServerStart(&serverConfig);
+        MacVNCServerConfig serverConfig;
+        BOOL ok = [startup fillServerConfig:&serverConfig] &&
+                  vncServerStart(&serverConfig);
 
         dispatch_async(dispatch_get_main_queue(), ^{
             if (ok) {
@@ -429,63 +366,10 @@ static void macVNCScreenCaptureFailed(void)
  * Login-item (autostart) support
  * ----------------------------------------------------------------------- */
 
-- (BOOL)isLoginItemEnabled
-{
-    if (@available(macOS 13.0, *)) {
-        return [SMAppService mainAppService].status == SMAppServiceStatusEnabled;
-    }
-    /* macOS 12.x fallback: check whether our LaunchAgent plist exists. */
-    return [[NSFileManager defaultManager] fileExistsAtPath:[self launchAgentPlistPath]];
-}
-
-- (void)setLoginItemEnabled:(BOOL)enabled
-{
-    if (@available(macOS 13.0, *)) {
-        NSError *error = nil;
-        if (enabled)
-            [[SMAppService mainAppService] registerAndReturnError:&error];
-        else
-            [[SMAppService mainAppService] unregisterAndReturnError:&error];
-        if (error)
-            NSLog(@"SMAppService %@ failed: %@",
-                  enabled ? @"register" : @"unregister", error);
-        return;
-    }
-
-    /* macOS 12.x fallback: write / remove a LaunchAgent plist. */
-    if (enabled) {
-        NSString *exe = [[[NSBundle mainBundle] bundlePath]
-                         stringByAppendingPathComponent:@"Contents/MacOS/macVNC"];
-        NSDictionary *plist = @{
-            @"Label":            MacVNCBundleID,
-            @"ProgramArguments": @[exe],
-            @"RunAtLoad":        @YES,
-            @"KeepAlive":        @NO,
-        };
-        NSString *path = [self launchAgentPlistPath];
-        [[NSFileManager defaultManager]
-            createDirectoryAtPath:[path stringByDeletingLastPathComponent]
-          withIntermediateDirectories:YES
-                         attributes:nil
-                              error:nil];
-        [plist writeToFile:path atomically:YES];
-    } else {
-        [[NSFileManager defaultManager] removeItemAtPath:[self launchAgentPlistPath]
-                                                   error:nil];
-    }
-}
-
-- (NSString *)launchAgentPlistPath
-{
-    return [NSHomeDirectory()
-            stringByAppendingPathComponent:
-                [NSString stringWithFormat:@"Library/LaunchAgents/%@.plist", MacVNCBundleID]];
-}
-
 - (void)toggleLoginItem:(id)sender
 {
-    BOOL wasEnabled = [self isLoginItemEnabled];
-    [self setLoginItemEnabled:!wasEnabled];
+    BOOL wasEnabled = [MacVNCLoginItem isEnabled];
+    [MacVNCLoginItem setEnabled:!wasEnabled];
     self.loginItemMenuItem.state = (!wasEnabled)
                                     ? NSControlStateValueOn
                                     : NSControlStateValueOff;

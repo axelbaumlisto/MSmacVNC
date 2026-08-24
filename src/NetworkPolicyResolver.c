@@ -1,5 +1,6 @@
 #include "NetworkPolicyResolver.h"
 #include "NetworkAccess.h"
+#include "MacVNCListenModeNames.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -49,11 +50,12 @@ macVNCResolveNetworkPolicy(const MacVNCPolicyInput *input,
     }
 
     const char *bind = "";
-    if (strcmp(mode, "all") == 0) {
+    if (strcmp(mode, MACVNC_LISTEN_MODE_ALL) == 0) {
         bind = "";
-    } else if (strcmp(mode, "localhost") == 0) {
-        bind = "127.0.0.1";
-    } else if (strcmp(mode, "custom") == 0 || strcmp(mode, "selected") == 0) {
+    } else if (strcmp(mode, MACVNC_LISTEN_MODE_LOCALHOST) == 0) {
+        bind = MACVNC_LOOPBACK_IPV4;
+    } else if (strcmp(mode, MACVNC_LISTEN_MODE_CUSTOM) == 0 ||
+               strcmp(mode, MACVNC_LISTEN_MODE_SELECTED) == 0) {
         bind = input->listenAddress;
         if (isEmpty(bind)) {
             setError(out, "selected listen address is missing");
