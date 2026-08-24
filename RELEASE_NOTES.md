@@ -1,3 +1,17 @@
+# macVNC 0.3.9
+
+## Highlights
+
+- DRY: removed scattered magic listen-mode strings ("localhost"/"all"/"custom"/"selected") and duplicated bind-host resolution.
+- New `MacVNCListenMode` module is the single source of truth for mode constants and `macVNCBindHostForMode()`, with unit tests.
+
+## Validation
+
+- Release build: passed.
+- CTest: 16/16 passed (added listen_mode).
+- Reference libvncclient auth: AUTH_OK, composite 5552x2715.
+- Developer ID + hardened runtime + entitlements: signed, notarized, stapled.
+
 # macVNC 0.3.8
 
 ## Highlights

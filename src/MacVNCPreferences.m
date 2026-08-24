@@ -2,6 +2,7 @@
 #import "MacVNCDefaultsKeys.h"
 #import "MacVNCPassword.h"
 #import "MacVNCNetworkRows.h"
+#import "MacVNCListenMode.h"
 #import "NetworkPolicyResolver.h"
 
 static const NSInteger kCustomAddressLabelTag = 9101;
@@ -58,7 +59,7 @@ static const NSInteger kAllowedSummaryTag = 9103;
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     int       port = (int)[defaults integerForKey:MacVNCKeyPort] ?: MacVNCDefaultPort;
     NSString *pwd  = macVNCLoadPassword(defaults);
-    NSString *currentMode = [defaults stringForKey:MacVNCKeyListenMode] ?: @"localhost";
+    NSString *currentMode = [defaults stringForKey:MacVNCKeyListenMode] ?: MacVNCListenModeLocalhost;
     NSString *currentAddress = [defaults stringForKey:MacVNCKeyListenAddress] ?: @"";
     NSString *currentAllowed = [defaults stringForKey:MacVNCKeyAllowedClients] ?: @"";
     NSArray<NSDictionary *> *networkRows = macVNCActiveNetworkRows();
@@ -111,9 +112,9 @@ static const NSInteger kAllowedSummaryTag = 9103;
         listenPopup.lastItem.representedObject = row;
     }
 
-    if ([currentMode isEqualToString:@"custom"])
+    if ([currentMode isEqualToString:MacVNCListenModeCustom])
         [listenPopup selectItemWithTag:2];
-    else if ([currentMode isEqualToString:@"selected"]) {
+    else if ([currentMode isEqualToString:MacVNCListenModeSelected]) {
         BOOL selected = NO;
         for (NSUInteger i = 0; i < networkRows.count; ++i) {
             if ([networkRows[i][@"address"] isEqualToString:currentAddress]) {
@@ -177,26 +178,26 @@ static const NSInteger kAllowedSummaryTag = 9103;
         return;
 
     int newPort = portField.intValue;
-    NSString *newMode = @"localhost";
+    NSString *newMode = MacVNCListenModeLocalhost;
     NSString *newAddress = @"";
     NSInteger tag = listenPopup.selectedItem.tag;
     if (tag == 1) {
-        newMode = @"localhost";
+        newMode = MacVNCListenModeLocalhost;
     } else if (tag == 2) {
-        newMode = @"custom";
+        newMode = MacVNCListenModeCustom;
         newAddress = customField.stringValue;
     } else if (tag >= 1000) {
         NSUInteger rowIndex = (NSUInteger)(tag - 1000);
         if (rowIndex < networkRows.count) {
-            newMode = @"selected";
+            newMode = MacVNCListenModeSelected;
             newAddress = networkRows[rowIndex][@"address"];
         }
     }
 
     NSMutableOrderedSet<NSString *> *allowedSet = [NSMutableOrderedSet orderedSet];
-    if ([newMode isEqualToString:@"localhost"]) {
+    if ([newMode isEqualToString:MacVNCListenModeLocalhost]) {
         [allowedSet addObject:@"127.0.0.1"];
-    } else if ([newMode isEqualToString:@"selected"] && tag >= 1000) {
+    } else if ([newMode isEqualToString:MacVNCListenModeSelected] && tag >= 1000) {
         NSUInteger rowIndex = (NSUInteger)(tag - 1000);
         if (rowIndex < networkRows.count)
             [allowedSet addObject:networkRows[rowIndex][@"allowCIDR"]];
