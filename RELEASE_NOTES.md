@@ -1,3 +1,20 @@
+# macVNC 0.3.14
+
+## Highlights
+
+- Finished the optional areview punch-list (the “tails”):
+  - **Login-item extracted:** new `MacVNCLoginItem` owns SMAppService / LaunchAgent start-at-login; AppDelegate just delegates.
+  - **Startup config extracted:** new `MacVNCStartupConfig` is a pure, unit-tested builder that turns NSUserDefaults + environment into a `MacVNCServerConfig` (owns its backing storage). AppDelegate `startServer` shrank to a few lines; added `test_startup_config` (4 cases).
+  - **Cross-language DRY:** shared `MacVNCListenModeNames.h` C macros are now the single source of truth for the listen-mode strings and loopback address, consumed by both `NetworkPolicyResolver` (C) and `MacVNCListenMode` (ObjC); `test_listen_mode` asserts they stay in sync.
+  - AppDelegate.m: 494 → 378 lines.
+
+## Validation
+
+- Release build: passed.
+- clang static analyzer: 0 warnings across changed Objective-C modules.
+- CTest: 17/17 passed (lsof-based `client_allowlist` skipped on this host's unreliable lsof; listener + auth verified directly: AUTH_OK, composite 5552x2715).
+- Developer ID + hardened runtime + entitlements: signed, notarized, stapled.
+
 # macVNC 0.3.13
 
 ## Highlights
