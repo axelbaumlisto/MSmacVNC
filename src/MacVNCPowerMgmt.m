@@ -9,8 +9,14 @@
 #include <mach/mach_port.h>
 #include "ReadinessPolicy.h" /* macVNCReadinessNow() — shared monotonic clock */
 
-rfbBool preventDimming = FALSE;
-rfbBool preventSleep   = TRUE;
+static rfbBool preventDimming = FALSE;
+static rfbBool preventSleep   = TRUE;
+
+void macVNCSetPowerPolicy(rfbBool dim, rfbBool sleep)
+{
+    preventDimming = dim;
+    preventSleep   = sleep;
+}
 
 static pthread_mutex_t  dimming_mutex;
 static unsigned long    dim_time;

@@ -38,8 +38,8 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
     }
     NSMutableArray<NSString *> *manualLines = [NSMutableArray array];
     for (NSString *trimmed in macVNCTrimmedNonEmptyLines(currentAllowed)) {
-        BOOL isSafeLocalhostDefault = [trimmed isEqualToString:@"127.0.0.1"] ||
-                                      [trimmed isEqualToString:@"127.0.0.1/32"];
+        BOOL isSafeLocalhostDefault = [trimmed isEqualToString:MacVNCLoopbackIPv4] ||
+                                      [trimmed isEqualToString:[MacVNCLoopbackIPv4 stringByAppendingString:@"/32"]];
         if (![presetCIDRs containsObject:trimmed] && !isSafeLocalhostDefault)
             [manualLines addObject:trimmed];
     }
@@ -91,23 +91,20 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
     }
 }
 
-- (void)runModal
+/* Builds the Preferences form view, populated from the given values, and
+ * returns the save-time controls the caller reads back after the modal. */
+- (NSView *)buildFormForPort:(int)port
+                    password:(NSString *)pwd
+                 currentMode:(NSString *)currentMode
+              currentAddress:(NSString *)currentAddress
+               manualAllowed:(NSString *)manualAllowed
+                 networkRows:(NSArray<NSDictionary *> *)networkRows
+                   portField:(NSTextField **)outPortField
+                    pwdField:(NSSecureTextField **)outPwdField
+                 listenPopup:(NSPopUpButton **)outListenPopup
+                 customField:(NSTextField **)outCustomField
+                 allowedText:(NSTextView **)outAllowedText
 {
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    int       port = (int)[defaults integerForKey:MacVNCKeyPort] ?: MacVNCDefaultPort;
-    NSString *pwd  = macVNCLoadPassword(defaults);
-    NSString *currentMode = [defaults stringForKey:MacVNCKeyListenMode] ?: MacVNCListenModeLocalhost;
-    NSString *currentAddress = [defaults stringForKey:MacVNCKeyListenAddress] ?: @"";
-    NSString *currentAllowed = [defaults stringForKey:MacVNCKeyAllowedClients] ?: @"";
-    NSArray<NSDictionary *> *networkRows = macVNCActiveNetworkRows();
-    NSString *manualAllowed = macVNCManualAllowedText(currentAllowed, networkRows);
-
-    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
-    alert.messageText     = @"macVNC Preferences";
-    alert.informativeText = @"Changes take effect after restarting macVNC. IPv4 only in this version.";
-    [alert addButtonWithTitle:@"Save"];
-    [alert addButtonWithTitle:@"Cancel"];
-
     NSView *form = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, 520, 236)] autorelease];
 
     NSTextField *portLabel = [NSTextField labelWithString:@"Port:"];
@@ -197,6 +194,43 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
     [form addSubview:netLabel]; [form addSubview:allowedSummary];
     [form addSubview:manualLabel]; [form addSubview:scroll]; [form addSubview:manualHint];
     [self listenPopupChanged:listenPopup];
+
+    *outPortField = portField;
+    *outPwdField = pwdField;
+    *outListenPopup = listenPopup;
+    *outCustomField = customField;
+    *outAllowedText = allowedText;
+    return form;
+}
+
+- (void)runModal
+{
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    int       port = (int)[defaults integerForKey:MacVNCKeyPort] ?: MacVNCDefaultPort;
+    NSString *pwd  = macVNCLoadPassword(defaults);
+    NSString *currentMode = [defaults stringForKey:MacVNCKeyListenMode] ?: MacVNCListenModeLocalhost;
+    NSString *currentAddress = [defaults stringForKey:MacVNCKeyListenAddress] ?: @"";
+    NSString *currentAllowed = [defaults stringForKey:MacVNCKeyAllowedClients] ?: @"";
+    NSArray<NSDictionary *> *networkRows = macVNCActiveNetworkRows();
+    NSString *manualAllowed = macVNCManualAllowedText(currentAllowed, networkRows);
+
+    NSTextField *portField = nil;
+    NSSecureTextField *pwdField = nil;
+    NSPopUpButton *listenPopup = nil;
+    NSTextField *customField = nil;
+    NSTextView *allowedText = nil;
+    NSView *form = [self buildFormForPort:port password:pwd
+                              currentMode:currentMode currentAddress:currentAddress
+                            manualAllowed:manualAllowed networkRows:networkRows
+                                portField:&portField pwdField:&pwdField
+                              listenPopup:&listenPopup customField:&customField
+                              allowedText:&allowedText];
+
+    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+    alert.messageText     = @"macVNC Preferences";
+    alert.informativeText = @"Changes take effect after restarting macVNC. IPv4 only in this version.";
+    [alert addButtonWithTitle:@"Save"];
+    [alert addButtonWithTitle:@"Cancel"];
     alert.accessoryView = form;
 
     if ([alert runModal] != NSAlertFirstButtonReturn)
@@ -223,7 +257,7 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
        plus any manual advanced lines, de-duplicated in order. */
     NSMutableOrderedSet<NSString *> *allowedSet = [NSMutableOrderedSet orderedSet];
     if ([newMode isEqualToString:MacVNCListenModeLocalhost]) {
-        [allowedSet addObject:@"127.0.0.1"];
+        [allowedSet addObject:MacVNCLoopbackIPv4];
     } else if ([newMode isEqualToString:MacVNCListenModeSelected] && tag >= kListenTagRowBase) {
         NSUInteger rowIndex = (NSUInteger)(tag - kListenTagRowBase);
         if (rowIndex < networkRows.count)

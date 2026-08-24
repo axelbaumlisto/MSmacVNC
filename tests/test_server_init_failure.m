@@ -7,8 +7,7 @@
 #include <pthread.h>
 #include <stdio.h>
 
-extern rfbBool preventDimming;
-extern rfbBool preventSleep;
+void macVNCSetPowerPolicy(rfbBool preventDimming, rfbBool preventSleep);
 
 enum { STOP_THREAD_COUNT = 8 };
 
@@ -73,8 +72,7 @@ static void *stopServer(void *opaque)
 int main(void)
 {
     @autoreleasepool {
-        preventDimming = FALSE;
-        preventSleep = FALSE;
+        macVNCSetPowerPolicy(FALSE, FALSE);
 
         CGDirectDisplayID displays[32];
         CGDisplayCount displayCount = 0;

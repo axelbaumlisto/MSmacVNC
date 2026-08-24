@@ -11,12 +11,11 @@
  * server lifecycle.
  */
 
-/* When TRUE, prevent the display from dimming while the server runs. */
-extern rfbBool preventDimming;
-/* When TRUE, prevent the system from sleeping while the server runs. */
-extern rfbBool preventSleep;
+/* Configure prevent-dim / prevent-sleep before dimmingInit(). Replaces the
+ * former mutable extern globals with an explicit setter (config, not state). */
+void macVNCSetPowerPolicy(rfbBool preventDimming, rfbBool preventSleep);
 
-/* Initialise power management and apply prevent-dim/prevent-sleep. */
+/* Initialise power management and apply the configured prevent-dim/sleep. */
 int dimmingInit(void);
 
 /* Temporarily bump activity to undim/keep awake (called on input events). */

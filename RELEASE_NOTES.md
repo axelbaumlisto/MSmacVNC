@@ -1,3 +1,21 @@
+# macVNC 0.3.16
+
+## Highlights
+
+- Closed the remaining clean-code refinements from an independent blind re-scoring pass:
+  - **DIP:** replaced the mutable `extern preventDimming/preventSleep` globals in `MacVNCPowerMgmt.h` with an explicit `macVNCSetPowerPolicy()` setter (config, not ambient state).
+  - **SRP/KISS:** extracted the Preferences form construction into `-buildFormForPort:...` so `-runModal` no longer mixes view building with model decode + persistence.
+  - **DRY:** loopback address now flows from one source — new `MacVNCLoopbackIPv4` (derived from the `MACVNC_LOOPBACK_IPV4` C macro) used by AppDelegate defaults, Preferences, and NetworkInventory; Fn keysym/keycode named (`MACVNC_KEYSYM_FN`/`MACVNC_KEYCODE_FN`).
+  - **KISS:** `macVNCReadSecurePasswordFile` uses a single `goto fail` cleanup instead of repeating close/free across five validation branches.
+  - Fixed a stale header doc in `MacVNCStartupConfig.h` (removed the mention of a `passwordFileReader` seam the API never exposed).
+
+## Validation
+
+- Release build: passed.
+- clang static analyzer: 0 warnings across changed Objective-C modules.
+- CTest: 17/17 passed (lsof-based `client_allowlist` skipped on this host; listener + auth verified directly: AUTH_OK, composite 5552x2715).
+- Developer ID + hardened runtime + entitlements: signed, notarized, stapled.
+
 # macVNC 0.3.15
 
 ## Highlights

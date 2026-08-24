@@ -1,6 +1,7 @@
 #include "NetworkInventory.h"
 #include "NetworkCIDR.h"
 #include "NetworkAccess.h"
+#include "MacVNCListenModeNames.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,7 +68,7 @@ macVNCBuildNetworkInterfaceRow(const MacVNCNetworkInterfaceSnapshot *snapshot,
                  "Tailscale-like (%s)", snapshot->name ? snapshot->name : "network");
         copyText(row->suggestedAllowCIDR, sizeof(row->suggestedAllowCIDR), "100.64.0.0/10");
     } else if (strcmp(snapshot->name ? snapshot->name : "", "lo0") == 0) {
-        copyText(row->suggestedAllowCIDR, sizeof(row->suggestedAllowCIDR), "127.0.0.1/32");
+        copyText(row->suggestedAllowCIDR, sizeof(row->suggestedAllowCIDR), MACVNC_LOOPBACK_IPV4 "/32");
     } else {
         copyText(row->suggestedAllowCIDR, sizeof(row->suggestedAllowCIDR), row->cidr);
     }

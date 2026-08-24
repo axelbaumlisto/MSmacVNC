@@ -28,6 +28,10 @@ static MacVNCKeyboardModifierState keyboardModifierState;
 static rfbScreenInfoPtr inputScreen;
 static const MacVNCDisplayLayout *inputLayout;
 
+/* Fn key: X keysym and the macOS virtual keycode (used in several places). */
+#define MACVNC_KEYSYM_FN   0x1008FF2BU
+#define MACVNC_KEYCODE_FN  63
+
 /* A table mapping special keys to keycodes. Static as these are layout-independent.
  * A typed {sym, code} struct avoids the fragile pair-stride of a flat int[]. */
 typedef struct { rfbKeySym sym; CGKeyCode code; } MacVNCSpecialKey;
@@ -97,7 +101,7 @@ static const MacVNCSpecialKey specialKeyMap[] = {
     {XK_Alt_L, 55},      /* Alt Left (-> Command) */
     {XK_Alt_R, 55},      /* Alt Right (-> Command) */
     {XK_ISO_Level3_Shift, 61},      /* Alt-Gr (-> Option Right) */
-    {0x1008FF2B, 63},      /* Fn */
+    {MACVNC_KEYSYM_FN, MACVNC_KEYCODE_FN},      /* Fn */
 };
 
 void macVNCInputSetContext(rfbScreenInfoPtr screen, const MacVNCDisplayLayout *layout)
@@ -121,7 +125,7 @@ currentKeyboardFlags(void)
 
 void macVNCInputResetModifiers(void)
 {
-    static const CGKeyCode modifierKeyCodes[] = {56, 59, 58, 55, 61, 63};
+    static const CGKeyCode modifierKeyCodes[] = {56, 59, 58, 55, 61, MACVNC_KEYCODE_FN};
     pthread_mutex_lock(&keyboardMutex);
     macVNCClearModifiers(&keyboardModifierState);
     for (size_t i = 0; i < sizeof(modifierKeyCodes) / sizeof(modifierKeyCodes[0]); ++i) {
@@ -197,8 +201,8 @@ KbdAddEvent(rfbBool down, rfbKeySym keySym, struct _rfbClientRec* cl)
 
     /* Mobile viewers can leave Fn latched. Treat it as a one-key modifier. */
     if (!isModifier && autoReleaseFn) {
-        macVNCUpdateModifier(&keyboardModifierState, 0x1008ff2bU, false);
-        CGEventRef fnUp = CGEventCreateKeyboardEvent(eventSource, 63, false);
+        macVNCUpdateModifier(&keyboardModifierState, MACVNC_KEYSYM_FN, false);
+        CGEventRef fnUp = CGEventCreateKeyboardEvent(eventSource, MACVNC_KEYCODE_FN, false);
         if (fnUp) {
             CGEventSetFlags(fnUp, currentKeyboardFlags());
             CGEventPost(kCGSessionEventTap, fnUp);
