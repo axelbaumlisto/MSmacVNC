@@ -88,13 +88,13 @@ static NSArray<NSString *> *macVNCTrimmedNonEmptyLines(NSString *text)
     }
     NSString *manualAllowed = [manualLines componentsJoinedByString:@"\n"];
 
-    NSAlert *alert = [[NSAlert alloc] init];
+    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
     alert.messageText     = @"macVNC Preferences";
     alert.informativeText = @"Changes take effect after restarting macVNC. IPv4 only in this version.";
     [alert addButtonWithTitle:@"Save"];
     [alert addButtonWithTitle:@"Cancel"];
 
-    NSView *form = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 520, 236)];
+    NSView *form = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, 520, 236)] autorelease];
 
     NSTextField *portLabel = [NSTextField labelWithString:@"Port:"];
     portLabel.frame = NSMakeRect(0, 206, 120, 22);
@@ -103,14 +103,14 @@ static NSArray<NSString *> *macVNCTrimmedNonEmptyLines(NSString *text)
 
     NSTextField *pwdLabel = [NSTextField labelWithString:@"Password:"];
     pwdLabel.frame = NSMakeRect(270, 206, 90, 22);
-    NSSecureTextField *pwdField = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(360, 206, 160, 22)];
+    NSSecureTextField *pwdField = [[[NSSecureTextField alloc] initWithFrame:NSMakeRect(360, 206, 160, 22)] autorelease];
     pwdField.placeholderString = @"(required)";
     pwdField.stringValue = pwd;
 
     NSTextField *listenLabel = [NSTextField labelWithString:@"Accept connections on:"];
     listenLabel.frame = NSMakeRect(0, 172, 150, 22);
     listenLabel.toolTip = @"Where the VNC server listens. Localhost means this Mac only; a network interface allows devices that can reach that interface.";
-    NSPopUpButton *listenPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(160, 170, 360, 26) pullsDown:NO];
+    NSPopUpButton *listenPopup = [[[NSPopUpButton alloc] initWithFrame:NSMakeRect(160, 170, 360, 26) pullsDown:NO] autorelease];
     listenPopup.toolTip = @"Choose the local address/interface that accepts incoming VNC connections. This is not the allowlist; it only chooses where to listen.";
     [listenPopup addItemWithTitle:@"Localhost only (127.0.0.1)"];
     listenPopup.lastItem.tag = 1;
@@ -164,8 +164,8 @@ static NSArray<NSString *> *macVNCTrimmedNonEmptyLines(NSString *text)
     NSTextField *manualLabel = [NSTextField labelWithString:@"Extra allowed clients (advanced):"];
     manualLabel.frame = NSMakeRect(0, 76, 210, 22);
     manualLabel.toolTip = @"Optional extra client IPs/subnets, one per line. Leave empty for the automatic safe policy.";
-    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(210, 42, 310, 56)];
-    NSTextView *allowedText = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 310, 56)];
+    NSScrollView *scroll = [[[NSScrollView alloc] initWithFrame:NSMakeRect(210, 42, 310, 56)] autorelease];
+    NSTextView *allowedText = [[[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 310, 56)] autorelease];
     allowedText.string = manualAllowed;
     allowedText.toolTip = @"Format: one IPv4 or CIDR per line. Examples: 100.101.102.103/32 or 192.168.100.0/24.";
     NSTextField *manualHint = [NSTextField labelWithString:@"Format: one IPv4/CIDR per line, e.g. 100.x.y.z/32 or 192.168.100.0/24"];
@@ -221,7 +221,7 @@ static NSArray<NSString *> *macVNCTrimmedNonEmptyLines(NSString *text)
     BOOL newAllowAll = NO;
 
     if ([combinedAllowed containsString:@"0.0.0.0/0"]) {
-        NSAlert *warning = [[NSAlert alloc] init];
+        NSAlert *warning = [[[NSAlert alloc] init] autorelease];
         warning.messageText = @"Allow all clients?";
         warning.informativeText = @"0.0.0.0/0 allows every IPv4 client that can reach macVNC. This is unsafe outside a trusted VPN.";
         [warning addButtonWithTitle:@"Continue"];
@@ -238,7 +238,7 @@ static NSArray<NSString *> *macVNCTrimmedNonEmptyLines(NSString *text)
     };
     MacVNCResolvedPolicy resolved;
     if (!macVNCResolveNetworkPolicy(&input, NULL, &resolved)) {
-        NSAlert *errorAlert = [[NSAlert alloc] init];
+        NSAlert *errorAlert = [[[NSAlert alloc] init] autorelease];
         errorAlert.messageText = @"Invalid network policy";
         errorAlert.informativeText = [NSString stringWithUTF8String:resolved.error];
         [errorAlert addButtonWithTitle:@"OK"];

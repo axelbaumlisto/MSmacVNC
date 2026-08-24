@@ -1,20 +1,11 @@
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <CoreMedia/CoreMedia.h>
-#include <pthread.h>
 #include <stdbool.h>
-#import "FrameMailbox.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface ScreenCapturer : NSObject <SCStreamDelegate, SCStreamOutput> {
-    pthread_mutex_t _readinessMutex;
-    pthread_cond_t _readinessCondition;
-    BOOL _firstFrameReady;
-    NSUInteger _readinessGeneration;
-    MacVNCFrameMailbox _frameMailbox;
-    BOOL _frameMailboxInitialized;
-}
+@interface ScreenCapturer : NSObject <SCStreamDelegate, SCStreamOutput>
 
 - (instancetype)initWithDisplay:(CGDirectDisplayID)displayID
         captureFramesPerSecond:(NSInteger)captureFramesPerSecond

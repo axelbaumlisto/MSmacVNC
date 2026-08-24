@@ -39,8 +39,6 @@
 
 /* The main LibVNCServer screen object */
 rfbScreenInfoPtr rfbScreen;
-/* Operation modes set via AppDelegate */
-rfbBool viewOnly = FALSE;
 
 /* Set by AppDelegate; invoked on the main queue when capture fails at runtime. */
 void (*macVNCScreenCaptureFailureHandler)(void) = NULL;
@@ -48,11 +46,13 @@ void (*macVNCScreenCaptureFailureHandler)(void) = NULL;
 /* One composite framebuffer; uncovered regions remain black. */
 void *frameBufferOne;
 
-/* -2 = all displays, -1 = primary, >=0 = one enumerated display. */
-int displayNumber = -1;
-char macVNCListenAddress[MACVNC_LISTEN_ADDRESS_MAX] = {0};
-char macVNCAllowedClients[MACVNC_ALLOWED_CLIENTS_MAX] = {0};
-MacVNCClientAccessMode macVNCClientAccessMode = MACVNC_CLIENT_ACCESS_FAIL_CLOSED;
+/* Private copy of the immutable server configuration for this run, populated
+ * by vncServerStart() from the caller's MacVNCServerConfig. */
+static rfbBool viewOnly = FALSE;
+static int displayNumber = -1;               /* -2 all, -1 primary, >=0 one. */
+static char macVNCListenAddress[MACVNC_LISTEN_ADDRESS_MAX] = {0};
+static char macVNCAllowedClients[MACVNC_ALLOWED_CLIENTS_MAX] = {0};
+static MacVNCClientAccessMode macVNCClientAccessMode = MACVNC_CLIENT_ACCESS_FAIL_CLOSED;
 static MacVNCNetworkAccessList clientAccessList;
 static MacVNCDisplayLayout displayLayout;
 static NSMutableArray<ScreenCapturer *> *screenCapturers;
@@ -74,14 +74,6 @@ static rfbBool macVNCPasswordCheck(rfbClientPtr client,
 /* Tile size (pixels) for dirty-region comparison */
 #define TILE_SIZE 64
 #define INITIAL_READINESS_TIMEOUT_NANOSECONDS (3ULL * NSEC_PER_SEC)
-
-static uint64_t
-monotonicNanoseconds(void)
-{
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    return (uint64_t)now.tv_sec * NSEC_PER_SEC + (uint64_t)now.tv_nsec;
-}
 
 /* Number of currently connected clients (read by AppDelegate for status display) */
 _Atomic int vncConnectedClients = 0;
@@ -440,11 +432,11 @@ prepareAuthenticatedClient(rfbClientPtr cl)
     BOOL allReady = alreadyReady;
     if (!alreadyReady) {
         MacVNCReadinessBudget budget = macVNCReadinessBudgetStart(
-            monotonicNanoseconds(), INITIAL_READINESS_TIMEOUT_NANOSECONDS);
+            macVNCReadinessNow(), INITIAL_READINESS_TIMEOUT_NANOSECONDS);
         allReady = YES;
         for (ScreenCapturer *capturer in screenCapturers) {
             uint64_t remaining = macVNCReadinessBudgetRemaining(
-                &budget, monotonicNanoseconds());
+                &budget, macVNCReadinessNow());
             if (remaining == 0 ||
                 ![capturer waitForFirstFrameWithTimeout:
                     (NSTimeInterval)remaining / NSEC_PER_SEC]) {
@@ -503,7 +495,7 @@ displayHook(rfbClientPtr cl)
         rfbLog("All display captures became ready after the initial timeout\n");
 }
 
-void clientGone(rfbClientPtr cl)
+static void clientGone(rfbClientPtr cl)
 {
     int remaining = atomic_load(&vncConnectedClients);
     pthread_mutex_lock(&clientLifecycleMutex);
@@ -525,7 +517,7 @@ void clientGone(rfbClientPtr cl)
     rfbLog("Client %s disconnected (%d authenticated remaining)\n", cl->host, remaining);
 }
 
-enum rfbNewClientAction newClient(rfbClientPtr cl)
+static enum rfbNewClientAction newClient(rfbClientPtr cl)
 {
   const char *host = cl->host ? cl->host : "";
   if (!macVNCNetworkAccessAllows(&clientAccessList, host)) {
@@ -585,8 +577,12 @@ vncServerStopLocked(void)
 }
 
 rfbBool
-vncServerStart(int port, const char *password, int captureFramesPerSecond)
+vncServerStart(const MacVNCServerConfig *config)
 {
+    if (!config) {
+        rfbErr("vncServerStart: NULL configuration\n");
+        return FALSE;
+    }
     pthread_mutex_lock(&serverLifecycleMutex);
     if (serverHasLifecycleResourcesLocked()) {
         rfbErr("VNC server lifecycle is already initialized\n");
@@ -597,12 +593,21 @@ vncServerStart(int port, const char *password, int captureFramesPerSecond)
     /* Permission gating (Screen Recording + Accessibility) is owned by
        AppDelegate via MacVNCPermissions before the server is ever started. */
 
+    /* Adopt the immutable configuration into the server's private state. */
+    viewOnly = config->viewOnly;
+    displayNumber = config->displayNumber;
+    macVNCClientAccessMode = config->clientAccessMode;
+    snprintf(macVNCListenAddress, sizeof(macVNCListenAddress), "%s",
+             config->listenAddress ? config->listenAddress : "");
+    snprintf(macVNCAllowedClients, sizeof(macVNCAllowedClients), "%s",
+             config->allowedClients ? config->allowedClients : "");
+
     dimmingInit();
 
     if (!macVNCInputStart())
         goto FAILURE;
 
-    if (!ScreenInit(port, password, captureFramesPerSecond))
+    if (!ScreenInit(config->port, config->password, config->captureFramesPerSecond))
         goto FAILURE;
 
     rfbScreen->newClientHook = newClient;
