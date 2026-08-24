@@ -29,6 +29,16 @@ int main(void)
     CHECK_STR(row.suggestedAllowCIDR, "100.64.0.0/10");
     CHECK_STR(row.displayName, "Tailscale-like (utun4)");
 
+    /* A CGNAT address on a normal broadcast interface (carrier/campus CGNAT LAN)
+       must keep its real subnet, NOT be widened to the 100.64.0.0/10 tailnet
+       preset, and must not be labelled as a tailnet. */
+    CHECK(macVNCBuildNetworkInterfaceRow(&(MacVNCNetworkInterfaceSnapshot){"en0", true, "100.92.13.7", "255.255.255.0"}, &row));
+    CHECK(row.selectable);
+    CHECK(row.cgnatLike);
+    CHECK_STR(row.cidr, "100.92.13.0/24");
+    CHECK_STR(row.suggestedAllowCIDR, "100.92.13.0/24");
+    CHECK_STR(row.displayName, "en0");
+
     CHECK(macVNCBuildNetworkInterfaceRow(&(MacVNCNetworkInterfaceSnapshot){"lo0", true, "127.0.0.1", "255.0.0.0"}, &row));
     CHECK(row.selectable);
     CHECK(!row.allowPresetVisible);

@@ -1,5 +1,11 @@
 #import <Foundation/Foundation.h>
 
+/* The VNC (RFB) protocol's DES-based VncAuth derives its key from the first 8
+ * bytes of the password only (LibVNCServer MAXPWLEN). Anything beyond byte 8 is
+ * ignored, so a "longer" password adds no entropy and rotating only the tail
+ * does not change the credential. UI/config paths must surface this. */
+#define MACVNC_VNC_PASSWORD_EFFECTIVE_MAX 8
+
 NS_ASSUME_NONNULL_BEGIN
 
 /*

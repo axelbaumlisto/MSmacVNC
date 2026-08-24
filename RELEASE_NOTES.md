@@ -1,3 +1,37 @@
+# macVNC 0.3.20
+
+## Security fixes (found by an adversarial security review)
+
+- **CGNAT interface no longer silently widens the allowlist.** Selecting an interface that
+  merely *has* a CGNAT (100.64.0.0/10) address — e.g. a carrier/campus LAN — previously
+  replaced its real subnet with the whole `100.64.0.0/10` range (~4.2M addresses) and
+  labelled it "Tailscale clients". The broad tailnet preset now applies only to an actual
+  point-to-point tailnet interface (`utunN`, /32); a CGNAT address on a normal broadcast
+  interface keeps its true subnet and is labelled honestly. Added the missing regression
+  test for that case.
+- **"Allow all" confirmation is now semantic, not a substring match.** Any `/0` prefix
+  (e.g. `10.0.0.0/0`) matches every IPv4 client but previously bypassed the warning, which
+  only looked for the literal `0.0.0.0/0`. The gate now parses the list and uses
+  `macVNCNetworkAccessContainsAllowAll()` (which existed but was unused).
+- **The 8-character VNC password limit is now surfaced.** RFB's DES auth derives its key
+  from only the first 8 characters, so a longer password added no entropy and rotating only
+  its tail did not change the credential — silently. Preferences now warns explicitly on
+  save (with a tooltip on the field).
+
+## Other fixes
+
+- Fixed a latent teardown self-deadlock: `ScreenCapturer -dealloc` could run on its own
+  sample-handler queue (when GCD dropped the last block-captured reference there) and
+  `dispatch_sync` to that same serial queue. It now detects that case via a queue-specific
+  key and skips the redundant drain.
+
+## Validation
+
+- Release build: passed. clang static analyzer: 0 warnings.
+- CTest: 17/17 passed, including the new CGNAT-on-broadcast-interface regression test.
+- Reference libvncclient auth: AUTH_OK, composite 5552x2715.
+- Developer ID + hardened runtime + entitlements: signed, notarized, stapled.
+
 # macVNC 0.3.19
 
 ## Highlights

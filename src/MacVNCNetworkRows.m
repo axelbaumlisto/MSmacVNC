@@ -55,10 +55,14 @@ NSArray<NSDictionary<NSString *, id> *> *macVNCActiveNetworkRows(void)
         NSString *cidr = [NSString stringWithUTF8String:row.cidr];
         NSString *allowCIDR = [NSString stringWithUTF8String:row.suggestedAllowCIDR];
         NSString *listenTitle = [NSString stringWithFormat:@"%@ — %@", displayName, ip];
-        NSString *allowTitle = row.cgnatLike
+        /* Only label it a tailnet when the broad CGNAT preset was actually applied
+           (point-to-point utun). A CGNAT address on a normal LAN keeps its own
+           subnet and must not be presented as "Tailscale clients". */
+        BOOL usesTailnetPreset = [allowCIDR isEqualToString:@"100.64.0.0/10"];
+        NSString *allowTitle = usesTailnetPreset
             ? [NSString stringWithFormat:@"Tailscale tailnet / CGNAT range — %@ (broad; use Tailscale ACLs)", allowCIDR]
             : [NSString stringWithFormat:@"Same network as %@ — %@", displayName, allowCIDR];
-        NSString *allowSummary = row.cgnatLike
+        NSString *allowSummary = usesTailnetPreset
             ? [NSString stringWithFormat:@"Auto: Tailscale clients — %@", allowCIDR]
             : [NSString stringWithFormat:@"Auto: same network — %@", allowCIDR];
         [rows addObject:@{
