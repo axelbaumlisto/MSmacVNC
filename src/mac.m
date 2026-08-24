@@ -17,6 +17,7 @@
 #include <rfb/rfb.h>
 #include <rfb/keysym.h>
 #include <stdio.h>
+#include <string.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <stdatomic.h>
@@ -38,13 +39,13 @@
 #import <AppKit/AppKit.h>
 
 /* The main LibVNCServer screen object */
-rfbScreenInfoPtr rfbScreen;
+static rfbScreenInfoPtr rfbScreen;
 
 /* Set by AppDelegate; invoked on the main queue when capture fails at runtime. */
 void (*macVNCScreenCaptureFailureHandler)(void) = NULL;
 
 /* One composite framebuffer; uncovered regions remain black. */
-void *frameBufferOne;
+static void *frameBufferOne;
 
 /* Private copy of the immutable server configuration for this run, populated
  * by vncServerStart() from the caller's MacVNCServerConfig. */
@@ -54,6 +55,19 @@ static char macVNCListenAddress[MACVNC_LISTEN_ADDRESS_MAX] = {0};
 static char macVNCAllowedClients[MACVNC_ALLOWED_CLIENTS_MAX] = {0};
 static MacVNCClientAccessMode macVNCClientAccessMode = MACVNC_CLIENT_ACCESS_FAIL_CLOSED;
 static MacVNCNetworkAccessList clientAccessList;
+
+/* Password handed to LibVNCServer; must outlive rfbScreen. Zeroized + freed on
+ * every (re)start and on server stop so cleartext does not linger. */
+static char *gPasswdList[2] = {NULL, NULL};
+
+static void macVNCClearStoredPassword(void)
+{
+    if (gPasswdList[0]) {
+        memset(gPasswdList[0], 0, strlen(gPasswdList[0]));
+        free(gPasswdList[0]);
+        gPasswdList[0] = NULL;
+    }
+}
 static MacVNCDisplayLayout displayLayout;
 static NSMutableArray<ScreenCapturer *> *screenCapturers;
 static rfbBool rfbServerInitialized = FALSE;
@@ -318,11 +332,9 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
 
   /* Configure password authentication if a password was supplied. */
   if (password && strlen(password) > 0) {
-      /* passwdList must outlive rfbScreen; static storage guarantees this. */
-      static char *passwdList[2] = {NULL, NULL};
-      if (passwdList[0]) { free(passwdList[0]); passwdList[0] = NULL; }
-      passwdList[0] = strdup(password);
-      rfbScreen->authPasswdData = passwdList;
+      macVNCClearStoredPassword();
+      gPasswdList[0] = strdup(password);
+      rfbScreen->authPasswdData = gPasswdList;
       rfbScreen->passwordCheck = macVNCPasswordCheck;
   } else {
       rfbErr("A non-empty VNC password is required\n");
@@ -338,6 +350,7 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
   rfbScreen->deferUpdateTime = framebufferDeferMilliseconds;
 
   gethostname(rfbScreen->thisHost, 255);
+  rfbScreen->thisHost[254] = '\0'; /* gethostname need not NUL-terminate on truncation */
 
   /* A single zeroed composite canvas keeps uncovered display gaps black. */
   size_t bufSize = (size_t)displayLayout.width * (size_t)displayLayout.height * 4;
@@ -573,6 +586,7 @@ vncServerStopLocked(void)
     dimmingShutdown();
     macVNCReleaseDisplayAssertion();
     macVNCInputShutdown();
+    macVNCClearStoredPassword();
     free(frameBufferOne); frameBufferOne = NULL;
 }
 

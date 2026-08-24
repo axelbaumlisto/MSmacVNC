@@ -1,5 +1,6 @@
 #import "MacVNCPermissions.h"
 
+#include <stdatomic.h>
 #import <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
 #import <CoreGraphics/CoreGraphics.h>
@@ -62,21 +63,21 @@ NSString *macVNCPermissionStatusText(MacVNCPermissionStatus status)
     return @"Unknown";
 }
 
-static volatile BOOL gScreenCaptureFailureNoted = NO;
+static _Atomic BOOL gScreenCaptureFailureNoted = NO;
 
 void macVNCNoteScreenCaptureFailure(void)
 {
-    gScreenCaptureFailureNoted = YES;
+    atomic_store(&gScreenCaptureFailureNoted, YES);
 }
 
 void macVNCResetScreenCaptureFailure(void)
 {
-    gScreenCaptureFailureNoted = NO;
+    atomic_store(&gScreenCaptureFailureNoted, NO);
 }
 
 BOOL macVNCScreenCaptureFailureNoted(void)
 {
-    return gScreenCaptureFailureNoted;
+    return atomic_load(&gScreenCaptureFailureNoted);
 }
 
 MacVNCPermissionStatus macVNCCheckPermission(MacVNCPermissionKind kind)

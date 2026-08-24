@@ -312,7 +312,14 @@ static rfbBool keyboardInit(void)
 
     keyboardLayout = (const UCKeyboardLayout *)CFDataGetBytePtr(TISGetInputSourceProperty(currentKeyboard, kTISPropertyUnicodeKeyLayoutData));
 
-    printf("Found keyboard layout '%s'\n", CFStringGetCStringPtr(TISGetInputSourceProperty(currentKeyboard, kTISPropertyInputSourceID), kCFStringEncodingUTF8));
+    /* CFStringGetCStringPtr may return NULL when no direct buffer exists; copy
+       into a local buffer for a safe printf. */
+    CFStringRef sourceID = (CFStringRef)TISGetInputSourceProperty(
+        currentKeyboard, kTISPropertyInputSourceID);
+    char layoutName[256] = "unknown";
+    if (sourceID)
+        CFStringGetCString(sourceID, layoutName, sizeof(layoutName), kCFStringEncodingUTF8);
+    printf("Found keyboard layout '%s'\n", layoutName);
 
     charKeyMap = CFDictionaryCreateMutable(kCFAllocatorDefault, keyCodeCount, &kCFCopyStringDictionaryKeyCallBacks, NULL);
     charShiftKeyMap = CFDictionaryCreateMutable(kCFAllocatorDefault, keyCodeCount, &kCFCopyStringDictionaryKeyCallBacks, NULL);
