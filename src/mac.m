@@ -31,8 +31,6 @@
 #include <ScreenCaptureKit/ScreenCaptureKit.h>
 #include <rfb/rfb.h>
 #include <rfb/keysym.h>
-#include <IOKit/pwr_mgt/IOPMLib.h>
-#include <IOKit/pwr_mgt/IOPM.h>
 #include <stdio.h>
 #include <pthread.h>
 #include <stdlib.h>
