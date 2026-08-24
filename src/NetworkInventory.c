@@ -63,9 +63,16 @@ macVNCBuildNetworkInterfaceRow(const MacVNCNetworkInterfaceSnapshot *snapshot,
     const char *slash = strrchr(row->cidr, '/');
     row->prefixLength = slash ? (unsigned)atoi(slash + 1) : 32;
 
-    if (row->cgnatLike) {
+    /* Only a point-to-point CGNAT interface (a real tailnet utunN, /32) gets the
+       broad 100.64.0.0/10 tailnet preset. A CGNAT address on a normal broadcast
+       interface (carrier/campus CGNAT LAN) keeps its actual subnet: widening a
+       /24 to a /10 would silently allow ~4.2M unrelated hosts. */
+    const char *ifName = snapshot->name ? snapshot->name : "";
+    bool pointToPointCGNAT = row->cgnatLike && row->prefixLength == 32 &&
+                             strncmp(ifName, "utun", 4) == 0;
+    if (pointToPointCGNAT) {
         snprintf(row->displayName, sizeof(row->displayName),
-                 "Tailscale-like (%s)", snapshot->name ? snapshot->name : "network");
+                 "Tailscale-like (%s)", ifName);
         copyText(row->suggestedAllowCIDR, sizeof(row->suggestedAllowCIDR), "100.64.0.0/10");
     } else if (strcmp(snapshot->name ? snapshot->name : "", "lo0") == 0) {
         copyText(row->suggestedAllowCIDR, sizeof(row->suggestedAllowCIDR), MACVNC_LOOPBACK_IPV4 "/32");
