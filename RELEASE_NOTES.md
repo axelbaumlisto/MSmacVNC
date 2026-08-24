@@ -1,3 +1,18 @@
+# macVNC 0.3.4
+
+## Highlights
+
+- macVNC now wakes the display automatically so a remote client never sees a blank/black screen when the Mac has dimmed or slept the display.
+- On server start it nudges the display awake and retries if the active display count is 0 (previously it failed with "Unsupported active display count: 0").
+- On each client connection it declares user activity to wake the screen.
+- Holds a `NoDisplaySleep` power assertion for the lifetime of the session and releases it on stop.
+
+## Validation
+
+- Release build: passed.
+- CTest: 15/15 passed.
+- Verified: NoDisplaySleep + UserIsActive assertions held while running; frames delivered.
+
 # macVNC 0.3.3
 
 ## Highlights

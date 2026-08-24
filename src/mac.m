@@ -207,6 +207,38 @@ monotonicNanoseconds(void)
     return (uint64_t)now.tv_sec * NSEC_PER_SEC + (uint64_t)now.tv_nsec;
 }
 
+/* Persistent assertion that keeps the display awake while the server runs, so a
+ * remote client always has a live display to capture (no more blank/checker when
+ * the Mac dims the screen). */
+static IOPMAssertionID macVNCDisplayAssertion = kIOPMNullAssertionID;
+
+/* Wake the display now and declare user activity so a sleeping/dimmed screen
+ * lights up when a client connects. Safe to call repeatedly. */
+static void
+macVNCWakeDisplays(void)
+{
+    IOPMAssertionID activityID = kIOPMNullAssertionID;
+    IOPMAssertionDeclareUserActivity(CFSTR("macVNC remote session"),
+                                     kIOPMUserActiveLocal, &activityID);
+
+    /* Hold a display-awake assertion for the lifetime of the server. */
+    if (macVNCDisplayAssertion == kIOPMNullAssertionID) {
+        IOPMAssertionCreateWithName(kIOPMAssertionTypeNoDisplaySleep,
+                                    kIOPMAssertionLevelOn,
+                                    CFSTR("macVNC keeps display awake for remote viewing"),
+                                    &macVNCDisplayAssertion);
+    }
+}
+
+static void
+macVNCReleaseDisplayAssertion(void)
+{
+    if (macVNCDisplayAssertion != kIOPMNullAssertionID) {
+        IOPMAssertionRelease(macVNCDisplayAssertion);
+        macVNCDisplayAssertion = kIOPMNullAssertionID;
+    }
+}
+
 /* Number of currently connected clients (read by AppDelegate for status display) */
 _Atomic int vncConnectedClients = 0;
 
@@ -758,7 +790,17 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
   char  progName[]      = "macVNC";
   char *dummyArgv[2]    = {progName, NULL};
 
-  CGGetActiveDisplayList(32, displays, &displayCount);
+  /* Wake the display first: if the Mac dimmed/slept the screen there are 0
+     active displays and capture would fail. Nudge it awake, then retry. */
+  macVNCWakeDisplays();
+  displayCount = 0;
+  for (int attempt = 0; attempt < 20; ++attempt) {
+      CGGetActiveDisplayList(32, displays, &displayCount);
+      if (displayCount > 0)
+          break;
+      macVNCWakeDisplays();
+      usleep(250000); /* 250ms */
+  }
   if (displayCount == 0 || displayCount > MACVNC_MAX_DISPLAYS) {
       rfbErr("Unsupported active display count: %u\n", displayCount);
       return FALSE;
@@ -1062,6 +1104,10 @@ enum rfbNewClientAction newClient(rfbClientPtr cl)
       return RFB_CLIENT_REFUSE;
   }
 
+  /* A client is connecting: make sure the display is awake so it has something
+     live to capture instead of a blank/dimmed screen. */
+  macVNCWakeDisplays();
+
   MacVNCClientState *state = calloc(1, sizeof(*state));
   if (!state)
       return RFB_CLIENT_REFUSE;
@@ -1105,6 +1151,7 @@ vncServerStopLocked(void)
         rfbScreen = NULL;
     }
     dimmingShutdown();
+    macVNCReleaseDisplayAssertion();
     if (eventSource) {
         CFRelease(eventSource);
         eventSource = NULL;
