@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.5 LANGUAGES C)
+project(macVNC VERSION 0.3.6 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -62,6 +62,12 @@ set(SOURCE_FILES
     src/NetworkPolicyResolver.c
     src/MacVNCDisplayWake.h
     src/MacVNCDisplayWake.m
+    src/MacVNCDefaultsKeys.h
+    src/MacVNCDefaultsKeys.m
+    src/MacVNCNetworkRows.h
+    src/MacVNCNetworkRows.m
+    src/MacVNCPreferences.h
+    src/MacVNCPreferences.m
     src/MacVNCPermissions.h
     src/MacVNCPermissions.m
     src/MacVNCPassword.h
