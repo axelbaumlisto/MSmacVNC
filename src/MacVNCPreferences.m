@@ -10,6 +10,22 @@ static const NSInteger kListenTagLocalhost = 1;
 static const NSInteger kListenTagCustom    = 2;
 static const NSInteger kListenTagRowBase   = 1000; /* + interface row index */
 
+/* Preferences form layout grid (points). Rows are laid out top-down; columns
+   give a label column and a control column so the magic NSMakeRect numbers read
+   as intent, not arbitrary constants. */
+static const CGFloat kFormWidth   = 520;
+static const CGFloat kFormHeight  = 236;
+static const CGFloat kColLabelX   = 0;
+static const CGFloat kColCtrlX    = 160;
+static const CGFloat kRowHeight   = 22;
+static const CGFloat kRowPort     = 206;
+static const CGFloat kRowListen   = 170;
+static const CGFloat kRowCustom   = 140;
+static const CGFloat kRowAllowed  = 110;
+static const CGFloat kRowManual   = 76;
+static const CGFloat kRowScroll   = 42;
+static const CGFloat kRowHint     = 18;
+
 static const NSInteger kCustomAddressLabelTag = 9101;
 static const NSInteger kCustomAddressFieldTag = 9102;
 static const NSInteger kAllowedSummaryTag = 9103;
@@ -105,23 +121,23 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
                  customField:(NSTextField **)outCustomField
                  allowedText:(NSTextView **)outAllowedText
 {
-    NSView *form = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, 520, 236)] autorelease];
+    NSView *form = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, kFormWidth, kFormHeight)] autorelease];
 
     NSTextField *portLabel = [NSTextField labelWithString:@"Port:"];
-    portLabel.frame = NSMakeRect(0, 206, 120, 22);
+    portLabel.frame = NSMakeRect(kColLabelX, kRowPort, 120, kRowHeight);
     NSTextField *portField = [NSTextField textFieldWithString:[NSString stringWithFormat:@"%d", port]];
-    portField.frame = NSMakeRect(130, 206, 120, 22);
+    portField.frame = NSMakeRect(130, kRowPort, 120, kRowHeight);
 
     NSTextField *pwdLabel = [NSTextField labelWithString:@"Password:"];
-    pwdLabel.frame = NSMakeRect(270, 206, 90, 22);
-    NSSecureTextField *pwdField = [[[NSSecureTextField alloc] initWithFrame:NSMakeRect(360, 206, 160, 22)] autorelease];
+    pwdLabel.frame = NSMakeRect(270, kRowPort, 90, kRowHeight);
+    NSSecureTextField *pwdField = [[[NSSecureTextField alloc] initWithFrame:NSMakeRect(360, kRowPort, 160, kRowHeight)] autorelease];
     pwdField.placeholderString = @"(required)";
     pwdField.stringValue = pwd;
 
     NSTextField *listenLabel = [NSTextField labelWithString:@"Accept connections on:"];
-    listenLabel.frame = NSMakeRect(0, 172, 150, 22);
+    listenLabel.frame = NSMakeRect(kColLabelX, kRowListen + 2, 150, kRowHeight);
     listenLabel.toolTip = @"Where the VNC server listens. Localhost means this Mac only; a network interface allows devices that can reach that interface.";
-    NSPopUpButton *listenPopup = [[[NSPopUpButton alloc] initWithFrame:NSMakeRect(160, 170, 360, 26) pullsDown:NO] autorelease];
+    NSPopUpButton *listenPopup = [[[NSPopUpButton alloc] initWithFrame:NSMakeRect(kColCtrlX, kRowListen, 360, 26) pullsDown:NO] autorelease];
     listenPopup.toolTip = @"Choose the local address/interface that accepts incoming VNC connections. This is not the allowlist; it only chooses where to listen.";
     [listenPopup addItemWithTitle:@"Localhost only (127.0.0.1)"];
     listenPopup.lastItem.tag = kListenTagLocalhost;
@@ -152,35 +168,35 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
     }
 
     NSTextField *customLabel = [NSTextField labelWithString:@"Custom address:"];
-    customLabel.frame = NSMakeRect(0, 140, 150, 22);
+    customLabel.frame = NSMakeRect(kColLabelX, kRowCustom, 150, kRowHeight);
     customLabel.tag = kCustomAddressLabelTag;
     customLabel.toolTip = @"Editable only when 'Custom IPv4 address' is selected above.";
     NSTextField *customField = [NSTextField textFieldWithString:currentAddress];
-    customField.frame = NSMakeRect(160, 140, 190, 22);
+    customField.frame = NSMakeRect(kColCtrlX, kRowCustom, 190, kRowHeight);
     customField.tag = kCustomAddressFieldTag;
     customField.toolTip = @"Local IPv4 address to bind, for example 192.168.100.87 or 100.70.214.41.";
     listenPopup.target = self;
     listenPopup.action = @selector(listenPopupChanged:);
 
     NSTextField *netLabel = [NSTextField labelWithString:@"Allowed clients:"];
-    netLabel.frame = NSMakeRect(0, 110, 150, 22);
+    netLabel.frame = NSMakeRect(kColLabelX, kRowAllowed, 150, kRowHeight);
     netLabel.toolTip = @"Calculated automatically from the selected listen interface.";
     NSTextField *allowedSummary = [NSTextField labelWithString:@""];
-    allowedSummary.frame = NSMakeRect(160, 110, 360, 22);
+    allowedSummary.frame = NSMakeRect(kColCtrlX, kRowAllowed, 360, kRowHeight);
     allowedSummary.tag = kAllowedSummaryTag;
     allowedSummary.textColor = NSColor.secondaryLabelColor;
     allowedSummary.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
     allowedSummary.toolTip = @"No checkbox needed: localhost allows localhost, a Tailscale interface allows Tailscale clients, and a LAN interface allows that LAN.";
 
     NSTextField *manualLabel = [NSTextField labelWithString:@"Extra allowed clients (advanced):"];
-    manualLabel.frame = NSMakeRect(0, 76, 210, 22);
+    manualLabel.frame = NSMakeRect(kColLabelX, kRowManual, 210, kRowHeight);
     manualLabel.toolTip = @"Optional extra client IPs/subnets, one per line. Leave empty for the automatic safe policy.";
-    NSScrollView *scroll = [[[NSScrollView alloc] initWithFrame:NSMakeRect(210, 42, 310, 56)] autorelease];
+    NSScrollView *scroll = [[[NSScrollView alloc] initWithFrame:NSMakeRect(210, kRowScroll, 310, 56)] autorelease];
     NSTextView *allowedText = [[[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 310, 56)] autorelease];
     allowedText.string = manualAllowed;
     allowedText.toolTip = @"Format: one IPv4 or CIDR per line. Examples: 100.101.102.103/32 or 192.168.100.0/24.";
     NSTextField *manualHint = [NSTextField labelWithString:@"Format: one IPv4/CIDR per line, e.g. 100.x.y.z/32 or 192.168.100.0/24"];
-    manualHint.frame = NSMakeRect(210, 18, 310, 18);
+    manualHint.frame = NSMakeRect(210, kRowHint, 310, 18);
     manualHint.textColor = NSColor.secondaryLabelColor;
     manualHint.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
     scroll.documentView = allowedText;

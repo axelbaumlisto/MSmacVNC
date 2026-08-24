@@ -125,7 +125,6 @@ undim(void)
     uint64_t last = atomic_load_explicit(&lastUndimNs, memory_order_relaxed);
     if (last != 0 && now - last < kUndimMinIntervalNs)
         return 0;
-    atomic_store_explicit(&lastUndimNs, now, memory_order_relaxed);
 
     int result = -1;
 
@@ -133,6 +132,10 @@ undim(void)
 
     if (!initialized)
         goto DONE;
+
+    /* Only consume the throttle window once we know we will actually nudge
+       (module initialised); an uninitialised call must not block the next one. */
+    atomic_store_explicit(&lastUndimNs, now, memory_order_relaxed);
 
     if (!preventDimming) {
         if (saveDimSettings() < 0)

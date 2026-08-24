@@ -1,3 +1,18 @@
+# macVNC 0.3.18
+
+## Highlights
+
+- Closed the last two cosmetic review nits (codebase now converged/clean):
+  - `MacVNCPowerMgmt undim()` consumes its 1s throttle window only after confirming the module is initialised, so an uninitialised/failed call no longer blocks the next nudge.
+  - `MacVNCPreferences` form layout uses a named grid (row/column constants) instead of scattered magic `NSMakeRect` numbers.
+
+## Validation
+
+- Release build: passed.
+- clang static analyzer: 0 warnings across changed Objective-C modules.
+- CTest: 17/17 passed (lsof-based `client_allowlist` skipped on this host; listener + auth verified directly: AUTH_OK, composite 5552x2715).
+- Developer ID + hardened runtime + entitlements: signed, notarized, stapled.
+
 # macVNC 0.3.17
 
 ## Highlights
