@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.13 LANGUAGES C)
+project(macVNC VERSION 0.3.14 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -70,6 +70,11 @@ set(SOURCE_FILES
     src/MacVNCDefaultsKeys.m
     src/MacVNCListenMode.h
     src/MacVNCListenMode.m
+    src/MacVNCListenModeNames.h
+    src/MacVNCLoginItem.h
+    src/MacVNCLoginItem.m
+    src/MacVNCStartupConfig.h
+    src/MacVNCStartupConfig.m
     src/MacVNCNetworkRows.h
     src/MacVNCNetworkRows.m
     src/MacVNCPreferences.h
@@ -208,6 +213,25 @@ if(BUILD_TESTING)
     target_link_libraries(test_listen_mode ${FOUNDATION})
     add_test(NAME listen_mode COMMAND test_listen_mode)
 
+    add_executable(test_startup_config
+        tests/test_startup_config.m
+        src/MacVNCStartupConfig.m
+        src/MacVNCListenMode.m
+        src/MacVNCDefaultsKeys.m
+        src/MacVNCPassword.m
+        src/CaptureRate.c
+        src/NetworkPolicyResolver.c
+        src/NetworkAccess.c
+        src/NetworkCIDR.c
+    )
+    target_include_directories(test_startup_config PRIVATE src)
+    target_link_libraries(test_startup_config
+        LibVNCServer::vncserver
+        ${FOUNDATION}
+        ${SECURITY_LIBRARY}
+    )
+    add_test(NAME startup_config COMMAND test_startup_config)
+
     add_executable(test_input_context
         tests/test_input_context.m
         src/MacVNCInput.m
@@ -269,7 +293,7 @@ if(BUILD_TESTING)
                 --app $<TARGET_FILE:${PROJECT_NAME}>
     )
 
-    foreach(test_target test_keysym test_display_layout test_compositor test_pointer_state test_keyboard_modifiers test_capture_rate test_frame_mailbox test_readiness_policy test_network_access test_network_cidr test_network_inventory test_network_policy_resolver test_permissions test_listen_mode test_input_context test_server_init_failure)
+    foreach(test_target test_keysym test_display_layout test_compositor test_pointer_state test_keyboard_modifiers test_capture_rate test_frame_mailbox test_readiness_policy test_network_access test_network_cidr test_network_inventory test_network_policy_resolver test_permissions test_listen_mode test_startup_config test_input_context test_server_init_failure)
         target_compile_options(${test_target} PRIVATE -UNDEBUG)
     endforeach()
 endif()
