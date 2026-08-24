@@ -90,6 +90,13 @@
     _captureFramesPerSecond = captureFramesPerSecond;
 
     _password = [(password.length > 0 ? password : nil) copy];
+
+    /* Authentication is mandatory: surface an explicit configuration error for
+       an empty/unset password so AppDelegate shows a dialog instead of failing
+       silently deep in ScreenInit. */
+    if (!error && _password.length == 0)
+        error = @"Set a VNC password in Preferences before starting the server.";
+
     _usedEnvironmentOverride = _policyOK && _resolvedPolicy.envOverrideActive;
     _error = [error copy];
     return self;

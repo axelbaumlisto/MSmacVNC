@@ -510,9 +510,9 @@ displayHook(rfbClientPtr cl)
 
 static void clientGone(rfbClientPtr cl)
 {
-    int remaining = atomic_load(&vncConnectedClients);
     pthread_mutex_lock(&clientLifecycleMutex);
     MacVNCClientState *state = cl->clientData;
+    int remaining;
     if (state && state->captureCounted) {
         remaining = atomic_fetch_sub(&vncConnectedClients, 1) - 1;
         if (remaining <= 0) {
@@ -523,6 +523,9 @@ static void clientGone(rfbClientPtr cl)
             rfbLog("Last authenticated client disconnected; %lu display captures stopped and modifiers reset\n",
                    (unsigned long)screenCapturers.count);
         }
+    } else {
+        /* Un-counted client (never authenticated): report the current count. */
+        remaining = atomic_load(&vncConnectedClients);
     }
     cl->clientData = NULL;
     free(state);

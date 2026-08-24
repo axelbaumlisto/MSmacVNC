@@ -74,10 +74,24 @@ int main(void)
     MacVNCStartupConfig *c4 = [MacVNCStartupConfig configWithDefaults:d4 environment:@{}];
     assert(c4.error != nil);
 
+    /* 5. Empty/unset password => explicit error (mandatory auth). */
+    NSUserDefaults *d5 = makeDefaults(@"macvnc.test.startup5", @{
+        MacVNCKeyPort:          @5910,
+        MacVNCKeyPassword:      @"",
+        MacVNCKeyListenMode:    @"localhost",
+        MacVNCKeyAllowedClients:@"127.0.0.1",
+    });
+    MacVNCStartupConfig *c5 = [MacVNCStartupConfig configWithDefaults:d5 environment:@{}];
+    assert(c5.error != nil);
+    MacVNCServerConfig sc5;
+    assert(![c5 fillServerConfig:&sc5]);
+
     [d1 removePersistentDomainForName:@"macvnc.test.startup1"];
     [d4 removePersistentDomainForName:@"macvnc.test.startup4"];
+    [d5 removePersistentDomainForName:@"macvnc.test.startup5"];
     [d1 release];
     [d4 release];
+    [d5 release];
 
     puts("startup config tests passed");
     [pool drain];
