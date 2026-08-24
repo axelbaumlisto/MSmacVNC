@@ -96,7 +96,7 @@ static void macVNCScreenCaptureFailed(void)
         MacVNCKeyPassword:       @"",
         MacVNCKeyListenMode:        MacVNCListenModeLocalhost,
         MacVNCKeyListenAddress:     @"",
-        MacVNCKeyAllowedClients:    @"127.0.0.1",
+        MacVNCKeyAllowedClients:    MacVNCLoopbackIPv4,
         MacVNCKeyAllowAllConfirmed: @NO,
     }];
 }
