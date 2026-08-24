@@ -1,3 +1,20 @@
+# macVNC 0.3.10
+
+## Highlights
+
+- Post-review cleanup (3-critic blind areview, all non-blocking findings addressed):
+  - Fixed stale header docs in `MacVNCDisplayWake.h` / `MacVNCPowerMgmt.h` (they described a persistent NoDisplaySleep assertion that was removed; wake is now a one-shot user-activity nudge only).
+  - Removed dead imports in `AppDelegate.m` (NetworkAccess/NetworkCIDR/NetworkInventory).
+  - Removed orphaned IOPM includes in `mac.m`.
+  - DRY: extracted `macVNCTrimmedNonEmptyLines()` helper in `MacVNCPreferences.m` (was duplicated twice).
+- Confirmed by review: display wake takes only the caffeinate *principle* (wake-on-demand), not persistent screen holding. Intended: an idle passive/view-only client may let the display sleep.
+
+## Validation
+
+- Release build: passed.
+- CTest: 16/16 passed.
+- 3 independent code critics: 8/10, 7/10, 8/10, CONDITIONAL GO; no code defects, only the doc/cleanup items now fixed.
+
 # macVNC 0.3.9
 
 ## Highlights

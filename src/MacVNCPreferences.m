@@ -9,6 +9,18 @@ static const NSInteger kCustomAddressLabelTag = 9101;
 static const NSInteger kCustomAddressFieldTag = 9102;
 static const NSInteger kAllowedSummaryTag = 9103;
 
+/* Split newline-separated text into trimmed, non-empty lines. */
+static NSArray<NSString *> *macVNCTrimmedNonEmptyLines(NSString *text)
+{
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    for (NSString *line in [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (trimmed.length > 0)
+            [lines addObject:trimmed];
+    }
+    return lines;
+}
+
 @implementation MacVNCPreferencesController
 
 - (void)listenPopupChanged:(NSPopUpButton *)popup
@@ -69,10 +81,9 @@ static const NSInteger kAllowedSummaryTag = 9103;
             [presetCIDRs addObject:row[@"allowCIDR"]];
     }
     NSMutableArray<NSString *> *manualLines = [NSMutableArray array];
-    for (NSString *line in [currentAllowed componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
-        NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    for (NSString *trimmed in macVNCTrimmedNonEmptyLines(currentAllowed)) {
         BOOL isSafeLocalhostDefault = [trimmed isEqualToString:@"127.0.0.1"] || [trimmed isEqualToString:@"127.0.0.1/32"];
-        if (trimmed.length > 0 && ![presetCIDRs containsObject:trimmed] && !isSafeLocalhostDefault)
+        if (![presetCIDRs containsObject:trimmed] && !isSafeLocalhostDefault)
             [manualLines addObject:trimmed];
     }
     NSString *manualAllowed = [manualLines componentsJoinedByString:@"\n"];
@@ -202,11 +213,8 @@ static const NSInteger kAllowedSummaryTag = 9103;
         if (rowIndex < networkRows.count)
             [allowedSet addObject:networkRows[rowIndex][@"allowCIDR"]];
     }
-    for (NSString *line in [allowedText.string componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
-        NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-        if (trimmed.length > 0)
-            [allowedSet addObject:trimmed];
-    }
+    for (NSString *trimmed in macVNCTrimmedNonEmptyLines(allowedText.string))
+        [allowedSet addObject:trimmed];
     NSMutableString *combinedAllowed = [NSMutableString string];
     for (NSString *entry in allowedSet)
         [combinedAllowed appendFormat:@"%@\n", entry];

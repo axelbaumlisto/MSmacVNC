@@ -5,9 +5,10 @@
 /*
  * Legacy IOPM aggressiveness-based screen dimming/sleep control.
  *
- * Note: display wake for remote viewing is handled separately by
- * MacVNCDisplayWake (NoDisplaySleep assertion). This module preserves the
- * original dim/sleep-prevention behavior tied to the server lifecycle.
+ * Note: one-shot display wake for remote viewing is handled separately by
+ * MacVNCDisplayWake (user-activity nudge, no persistent assertion). This
+ * module preserves the original dim/sleep-prevention behavior tied to the
+ * server lifecycle.
  */
 
 /* When TRUE, prevent the display from dimming while the server runs. */
