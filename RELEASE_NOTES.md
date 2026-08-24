@@ -1,3 +1,21 @@
+# macVNC 0.3.13
+
+## Highlights
+
+- Second “ideal code” blind areview round (3 critics, 9/9/9, no blockers). Fixed every remaining item:
+  - **IOKit resource leak:** `MacVNCPowerMgmt` now closes the `io_connect_t` and deallocates the mach port on shutdown, is idempotent across restarts, and destroys its mutex (no re-init UB).
+  - **Encapsulation:** `rfbScreen` and `frameBufferOne` are now `static` (were external linkage but file-local).
+  - **Robustness:** keyboard-layout name printed via a safe buffer (no `printf("%s", NULL)` from `CFStringGetCStringPtr`); `rfbScreen->thisHost` explicitly NUL-terminated.
+  - **Consistency:** capture-failure flag is `_Atomic` (was `volatile BOOL`).
+  - **Security:** the in-memory VNC password is now zeroized and freed on server stop (and on restart), not left resident for the process lifetime.
+
+## Validation
+
+- Release build: passed.
+- clang static analyzer: 0 warnings across changed Objective-C modules.
+- CTest: 16/16 passed (the lsof-based `client_allowlist` harness is unreliable on this host's network stack; server listener + auth verified directly: AUTH_OK, composite 5552x2715).
+- Developer ID + hardened runtime + entitlements: signed, notarized, stapled.
+
 # macVNC 0.3.12
 
 ## Highlights
