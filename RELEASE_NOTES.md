@@ -1,3 +1,20 @@
+# macVNC 0.3.11
+
+## Highlights
+
+- Zero-exceptions clean-code pass — finished every deferred item:
+  - Extracted all keyboard + pointer input from `mac.m` into a new `MacVNCInput` module (owns the CGEventSource, keymaps, input mutexes and state; screen/layout injected via `macVNCInputSetContext`). `mac.m` 1030 → 644 lines and no longer holds any input globals.
+  - Removed the `#define kKey*` alias shim in `AppDelegate.m`; call sites now use the canonical `MacVNC*` defaults-key symbols directly.
+  - Dropped the now-unused Carbon include from `mac.m`; refreshed its file header.
+  - Added `test_input_context` unit test for the injectable input context.
+
+## Validation
+
+- Release build: passed.
+- CTest: 17/17 passed.
+- Reference libvncclient auth: AUTH_OK, composite 5552x2715 (both displays).
+- Developer ID + hardened runtime + entitlements: signed, notarized, stapled.
+
 # macVNC 0.3.10
 
 ## Highlights

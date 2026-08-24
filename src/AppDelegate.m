@@ -13,18 +13,6 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Local aliases for the shared defaults keys / identifiers. */
-#define kDefaultPort         MacVNCDefaultPort
-#define kKeyPort             MacVNCKeyPort
-#define kKeyPassword         MacVNCKeyPassword
-#define kKeyViewOnly         MacVNCKeyViewOnly
-#define kKeyDisplay          MacVNCKeyDisplay
-#define kKeyListenMode       MacVNCKeyListenMode
-#define kKeyListenAddress    MacVNCKeyListenAddress
-#define kKeyAllowedClients   MacVNCKeyAllowedClients
-#define kKeyAllowAllConfirmed MacVNCKeyAllowAllConfirmed
-#define kBundleID            MacVNCBundleID
-
 static BOOL macVNCAllowsTestPermissionGateBypass(void)
 {
     const char *flag = getenv("MACVNC_TEST_SKIP_PERMISSION_GATE");
@@ -92,14 +80,14 @@ static void macVNCScreenCaptureFailed(void)
 - (void)registerDefaults
 {
     [[NSUserDefaults standardUserDefaults] registerDefaults:@{
-        kKeyPort:     @(kDefaultPort),
-        kKeyViewOnly: @NO,
-        kKeyDisplay:        @(-1),
-        kKeyPassword:       @"",
-        kKeyListenMode:        MacVNCListenModeLocalhost,
-        kKeyListenAddress:     @"",
-        kKeyAllowedClients:    @"127.0.0.1",
-        kKeyAllowAllConfirmed: @NO,
+        MacVNCKeyPort:     @(MacVNCDefaultPort),
+        MacVNCKeyViewOnly: @NO,
+        MacVNCKeyDisplay:        @(-1),
+        MacVNCKeyPassword:       @"",
+        MacVNCKeyListenMode:        MacVNCListenModeLocalhost,
+        MacVNCKeyListenAddress:     @"",
+        MacVNCKeyAllowedClients:    @"127.0.0.1",
+        MacVNCKeyAllowAllConfirmed: @NO,
     }];
 }
 
@@ -284,7 +272,7 @@ static void macVNCScreenCaptureFailed(void)
 
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
 
-        int       port     = (int)[defaults integerForKey:kKeyPort];
+        int       port     = (int)[defaults integerForKey:MacVNCKeyPort];
         NSString *password = macVNCLoadPassword(defaults);
         NSString *configurationError = nil;
         NSDictionary<NSString *, NSString *> *environment = NSProcessInfo.processInfo.environment;
@@ -311,17 +299,17 @@ static void macVNCScreenCaptureFailed(void)
         }
 
         /* Copy these globals before calling vncServerStart(). */
-        viewOnly = (rfbBool)[defaults boolForKey:kKeyViewOnly];
-        displayNumber = (int)[defaults integerForKey:kKeyDisplay];
+        viewOnly = (rfbBool)[defaults boolForKey:MacVNCKeyViewOnly];
+        displayNumber = (int)[defaults integerForKey:MacVNCKeyDisplay];
         NSString *displayOverride = environment[@"MACVNC_DISPLAY"];
         if (displayOverride.length > 0)
             displayNumber = (int)displayOverride.integerValue;
 
         MacVNCPolicyInput policyInput = {
-            .listenMode = ([defaults stringForKey:kKeyListenMode] ?: MacVNCListenModeLocalhost).UTF8String,
-            .listenAddress = ([defaults stringForKey:kKeyListenAddress] ?: @"").UTF8String,
-            .allowedClients = ([defaults stringForKey:kKeyAllowedClients] ?: @"").UTF8String,
-            .allowAllConfirmed = [defaults boolForKey:kKeyAllowAllConfirmed],
+            .listenMode = ([defaults stringForKey:MacVNCKeyListenMode] ?: MacVNCListenModeLocalhost).UTF8String,
+            .listenAddress = ([defaults stringForKey:MacVNCKeyListenAddress] ?: @"").UTF8String,
+            .allowedClients = ([defaults stringForKey:MacVNCKeyAllowedClients] ?: @"").UTF8String,
+            .allowAllConfirmed = [defaults boolForKey:MacVNCKeyAllowAllConfirmed],
         };
         MacVNCPolicyEnv policyEnv = {
             .listenAddress = environment[@"MACVNC_LISTEN"].length > 0
@@ -343,7 +331,7 @@ static void macVNCScreenCaptureFailed(void)
         }
 
         if (port <= 0 || port > 65535)
-            port = kDefaultPort;
+            port = MacVNCDefaultPort;
 
         BOOL ok = configurationError == nil &&
             vncServerStart(port, password.length > 0 ? password.UTF8String : NULL,
@@ -378,9 +366,9 @@ static void macVNCScreenCaptureFailed(void)
 
     if (port > 0) {
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-        NSString *mode = [defaults stringForKey:kKeyListenMode] ?: MacVNCListenModeLocalhost;
-        NSString *bind = macVNCBindHostForMode(mode, [defaults stringForKey:kKeyListenAddress]) ?: @"all interfaces";
-        NSString *access = [defaults boolForKey:kKeyAllowAllConfirmed] ? @"allow all" : @"allowlist";
+        NSString *mode = [defaults stringForKey:MacVNCKeyListenMode] ?: MacVNCListenModeLocalhost;
+        NSString *bind = macVNCBindHostForMode(mode, [defaults stringForKey:MacVNCKeyListenAddress]) ?: @"all interfaces";
+        NSString *access = [defaults boolForKey:MacVNCKeyAllowAllConfirmed] ? @"allow all" : @"allowlist";
         self.statusMenuItem.title = [NSString stringWithFormat:@"Running  •  %@:%d  •  %@", bind, port, access];
     } else if (!macVNCPermissionsAllGranted()) {
         self.statusMenuItem.title = @"Not running  •  permissions required";
@@ -403,8 +391,8 @@ static void macVNCScreenCaptureFailed(void)
     if (port <= 0) return;
 
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    NSString *mode = [defaults stringForKey:kKeyListenMode] ?: MacVNCListenModeLocalhost;
-    NSString *hostname = macVNCBindHostForMode(mode, [defaults stringForKey:kKeyListenAddress]);
+    NSString *mode = [defaults stringForKey:MacVNCKeyListenMode] ?: MacVNCListenModeLocalhost;
+    NSString *hostname = macVNCBindHostForMode(mode, [defaults stringForKey:MacVNCKeyListenAddress]);
     if (hostname.length == 0)
         hostname = [NSHost currentHost].localizedName;
     NSString *address  = [NSString stringWithFormat:@"vnc://%@:%d", hostname, port];
@@ -453,7 +441,7 @@ static void macVNCScreenCaptureFailed(void)
         NSString *exe = [[[NSBundle mainBundle] bundlePath]
                          stringByAppendingPathComponent:@"Contents/MacOS/macVNC"];
         NSDictionary *plist = @{
-            @"Label":            kBundleID,
+            @"Label":            MacVNCBundleID,
             @"ProgramArguments": @[exe],
             @"RunAtLoad":        @YES,
             @"KeepAlive":        @NO,
@@ -475,7 +463,7 @@ static void macVNCScreenCaptureFailed(void)
 {
     return [NSHomeDirectory()
             stringByAppendingPathComponent:
-                [NSString stringWithFormat:@"Library/LaunchAgents/%@.plist", kBundleID]];
+                [NSString stringWithFormat:@"Library/LaunchAgents/%@.plist", MacVNCBundleID]];
 }
 
 - (void)toggleLoginItem:(id)sender
