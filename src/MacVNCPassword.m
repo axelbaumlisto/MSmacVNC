@@ -1,0 +1,149 @@
+#import "MacVNCPassword.h"
+
+#import <Security/Security.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+static NSString * const kKeyPassword = @"rfbPassword";
+static NSString * const kKeychainService = @"net.christianbeier.macVNC";
+static NSString * const kKeychainPasswordAccount = @"rfbPassword";
+
+static NSString *macVNCTrim(NSString *value)
+{
+    return [value stringByTrimmingCharactersInSet:
+        NSCharacterSet.whitespaceAndNewlineCharacterSet] ?: @"";
+}
+
+static NSMutableDictionary *macVNCKeychainQuery(void)
+{
+    return [@{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: kKeychainService,
+        (__bridge id)kSecAttrAccount: kKeychainPasswordAccount,
+    } mutableCopy];
+}
+
+static NSString *macVNCReadKeychainPassword(void)
+{
+    NSMutableDictionary *query = macVNCKeychainQuery();
+    query[(__bridge id)kSecReturnData] = @YES;
+    query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
+
+    CFTypeRef result = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+    [query release];
+    if (status != errSecSuccess || !result)
+        return nil;
+
+    NSData *data = [(NSData *)result autorelease];
+    NSString *password = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
+    return password.length > 0 ? password : nil;
+}
+
+static BOOL macVNCDeleteKeychainPassword(void)
+{
+    NSMutableDictionary *query = macVNCKeychainQuery();
+    OSStatus status = SecItemDelete((__bridge CFDictionaryRef)query);
+    [query release];
+    return status == errSecSuccess || status == errSecItemNotFound;
+}
+
+NSString *macVNCLoadPassword(NSUserDefaults *defaults)
+{
+    NSString *plain = macVNCTrim([defaults stringForKey:kKeyPassword]);
+    if (plain.length > 0)
+        return plain;
+
+    NSString *legacy = macVNCTrim(macVNCReadKeychainPassword());
+    if (legacy.length > 0) {
+        [defaults setObject:legacy forKey:kKeyPassword];
+        [defaults synchronize];
+        macVNCDeleteKeychainPassword();
+        return legacy;
+    }
+    return @"";
+}
+
+void macVNCStorePassword(NSUserDefaults *defaults, NSString *rawPassword)
+{
+    macVNCDeleteKeychainPassword();
+    [defaults setObject:macVNCTrim(rawPassword) forKey:kKeyPassword];
+}
+
+NSString *macVNCReadSecurePasswordFile(NSString *path, NSString **errorMessage)
+{
+    const char *fileSystemPath = path.fileSystemRepresentation;
+    int fd = open(fileSystemPath, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) {
+        if (errorMessage)
+            *errorMessage = [NSString stringWithFormat:@"Cannot open MACVNC_PASSWORD_FILE %@: %s",
+                             path, strerror(errno)];
+        return nil;
+    }
+
+    struct stat info;
+    if (fstat(fd, &info) != 0) {
+        if (errorMessage)
+            *errorMessage = [NSString stringWithFormat:@"Cannot inspect MACVNC_PASSWORD_FILE %@: %s",
+                             path, strerror(errno)];
+        close(fd);
+        return nil;
+    }
+    if (!S_ISREG(info.st_mode)) {
+        if (errorMessage)
+            *errorMessage = [NSString stringWithFormat:@"MACVNC_PASSWORD_FILE %@ must be a regular file", path];
+        close(fd);
+        return nil;
+    }
+    if (info.st_uid != getuid()) {
+        if (errorMessage)
+            *errorMessage = [NSString stringWithFormat:@"MACVNC_PASSWORD_FILE %@ is not owned by uid %u",
+                             path, getuid()];
+        close(fd);
+        return nil;
+    }
+    if ((info.st_mode & 0077) != 0) {
+        if (errorMessage)
+            *errorMessage = [NSString stringWithFormat:
+                @"MACVNC_PASSWORD_FILE %@ must not be accessible by group/others", path];
+        close(fd);
+        return nil;
+    }
+    if (info.st_size <= 0 || info.st_size > 4096) {
+        if (errorMessage)
+            *errorMessage = [NSString stringWithFormat:@"MACVNC_PASSWORD_FILE %@ is empty or too large", path];
+        close(fd);
+        return nil;
+    }
+
+    size_t size = (size_t)info.st_size;
+    char *bytes = malloc(size);
+    size_t received = 0;
+    while (received < size) {
+        ssize_t count = read(fd, bytes + received, size - received);
+        if (count <= 0) break;
+        received += (size_t)count;
+    }
+    close(fd);
+    if (received != size) {
+        free(bytes);
+        if (errorMessage)
+            *errorMessage = [NSString stringWithFormat:@"Could not completely read MACVNC_PASSWORD_FILE %@", path];
+        return nil;
+    }
+
+    NSString *raw = [[[NSString alloc] initWithBytesNoCopy:bytes
+                                                     length:size
+                                                   encoding:NSUTF8StringEncoding
+                                               freeWhenDone:YES] autorelease];
+    NSString *password = macVNCTrim(raw);
+    if (!raw || password.length == 0) {
+        if (errorMessage)
+            *errorMessage = [NSString stringWithFormat:@"MACVNC_PASSWORD_FILE %@ is not valid non-empty UTF-8", path];
+        return nil;
+    }
+    return password;
+}

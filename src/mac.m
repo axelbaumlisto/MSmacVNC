@@ -50,6 +50,7 @@
 #import "CaptureRate.h"
 #import "NetworkAccess.h"
 #import "NetworkPolicyResolver.h"
+#import "MacVNCDisplayWake.h"
 #import "mac.h"
 #import <AppKit/AppKit.h>
 
@@ -205,38 +206,6 @@ monotonicNanoseconds(void)
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     return (uint64_t)now.tv_sec * NSEC_PER_SEC + (uint64_t)now.tv_nsec;
-}
-
-/* Persistent assertion that keeps the display awake while the server runs, so a
- * remote client always has a live display to capture (no more blank/checker when
- * the Mac dims the screen). */
-static IOPMAssertionID macVNCDisplayAssertion = kIOPMNullAssertionID;
-
-/* Wake the display now and declare user activity so a sleeping/dimmed screen
- * lights up when a client connects. Safe to call repeatedly. */
-static void
-macVNCWakeDisplays(void)
-{
-    IOPMAssertionID activityID = kIOPMNullAssertionID;
-    IOPMAssertionDeclareUserActivity(CFSTR("macVNC remote session"),
-                                     kIOPMUserActiveLocal, &activityID);
-
-    /* Hold a display-awake assertion for the lifetime of the server. */
-    if (macVNCDisplayAssertion == kIOPMNullAssertionID) {
-        IOPMAssertionCreateWithName(kIOPMAssertionTypeNoDisplaySleep,
-                                    kIOPMAssertionLevelOn,
-                                    CFSTR("macVNC keeps display awake for remote viewing"),
-                                    &macVNCDisplayAssertion);
-    }
-}
-
-static void
-macVNCReleaseDisplayAssertion(void)
-{
-    if (macVNCDisplayAssertion != kIOPMNullAssertionID) {
-        IOPMAssertionRelease(macVNCDisplayAssertion);
-        macVNCDisplayAssertion = kIOPMNullAssertionID;
-    }
 }
 
 /* Number of currently connected clients (read by AppDelegate for status display) */
