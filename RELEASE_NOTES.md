@@ -1,3 +1,17 @@
+# macVNC 0.3.19
+
+## Highlights
+
+- Fixed a real startup crash found by an adversarial review: `keyboardInit` dereferenced `kTISPropertyUnicodeKeyLayoutData` without a NULL check. That property is NULL for input sources without uchr data (e.g. CJK/handwriting IMEs), so a user whose active input source was such an IME crashed on launch before the listener opened. Now guarded — startup fails cleanly with a clear message instead of crashing.
+- Fixed latent UB in the same loop: `UCKeyTranslate` may set `realLength = 0` and leave `chars[0]` unwritten; the code now skips those keycodes instead of reading an uninitialized `UniChar` (which could inject a bogus char→keycode mapping).
+
+## Validation
+
+- Release build: passed.
+- clang static analyzer: 0 warnings across changed Objective-C modules.
+- CTest: 17/17 passed (lsof-based `client_allowlist` skipped on this host; listener + auth verified directly: AUTH_OK, composite 5552x2715).
+- Developer ID + hardened runtime + entitlements: signed, notarized, stapled.
+
 # macVNC 0.3.18
 
 ## Highlights

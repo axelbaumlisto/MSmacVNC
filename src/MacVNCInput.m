@@ -316,7 +316,16 @@ static rfbBool keyboardInit(void)
 	return FALSE;
     }
 
-    keyboardLayout = (const UCKeyboardLayout *)CFDataGetBytePtr(TISGetInputSourceProperty(currentKeyboard, kTISPropertyUnicodeKeyLayoutData));
+    /* kTISPropertyUnicodeKeyLayoutData is NULL for input sources with no uchr
+       data (e.g. CJK/handwriting IMEs). Guard it: CFDataGetBytePtr(NULL) is a
+       contract violation and UCKeyTranslate(NULL,...) would crash on launch. */
+    CFDataRef layoutData = (CFDataRef)TISGetInputSourceProperty(currentKeyboard, kTISPropertyUnicodeKeyLayoutData);
+    keyboardLayout = layoutData ? (const UCKeyboardLayout *)CFDataGetBytePtr(layoutData) : NULL;
+    if (!keyboardLayout) {
+        fprintf(stderr, "Active keyboard input source has no Unicode layout data\n");
+        CFRelease(currentKeyboard);
+        return FALSE;
+    }
 
     /* CFStringGetCStringPtr may return NULL when no direct buffer exists; copy
        into a local buffer for a safe printf. */
@@ -358,6 +367,11 @@ static rfbBool keyboardInit(void)
 			   &realLength,
 			   chars);
 
+	    /* UCKeyTranslate sets realLength=0 (and leaves chars[0] unwritten) for
+	       keycodes that produce no character; skip to avoid a bogus mapping
+	       from an uninitialized UniChar. */
+	    if (realLength < 1)
+	        continue;
 	    CFStringRef string = CFStringCreateWithCharacters(kCFAllocatorDefault, chars, 1);
 	    if(string) {
 		switch(modifiers[m]) {
