@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.6 LANGUAGES C)
+project(macVNC VERSION 0.3.7 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -62,6 +62,8 @@ set(SOURCE_FILES
     src/NetworkPolicyResolver.c
     src/MacVNCDisplayWake.h
     src/MacVNCDisplayWake.m
+    src/MacVNCPowerMgmt.h
+    src/MacVNCPowerMgmt.m
     src/MacVNCDefaultsKeys.h
     src/MacVNCDefaultsKeys.m
     src/MacVNCNetworkRows.h
@@ -213,6 +215,7 @@ if(BUILD_TESTING)
         src/NetworkInventory.c
         src/NetworkPolicyResolver.c
         src/MacVNCDisplayWake.m
+        src/MacVNCPowerMgmt.m
         src/ScreenCapturer.m
     )
     target_include_directories(test_server_init_failure PRIVATE src)
