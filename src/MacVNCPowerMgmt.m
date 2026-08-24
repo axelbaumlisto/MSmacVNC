@@ -5,6 +5,7 @@
 #import <IOKit/pwr_mgt/IOPM.h>
 #include <pthread.h>
 #include <mach/mach_init.h>
+#include <mach/mach_port.h>
 
 rfbBool preventDimming = FALSE;
 rfbBool preventSleep   = TRUE;
@@ -63,6 +64,11 @@ restoreSleepSettings(void)
 int
 dimmingInit(void)
 {
+    /* Idempotent: a prior run must be torn down before re-initialising, so we
+       never re-init the mutex or leak the IOKit connection across restarts. */
+    if (initialized)
+        return 0;
+
     pthread_mutex_init(&dimming_mutex, NULL);
 
 #if __MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_VERSION_12_0
@@ -70,10 +76,15 @@ dimmingInit(void)
 #else
     if (IOMasterPort(bootstrap_port, &master_dev_port) != kIOReturnSuccess)
 #endif
+    {
+        pthread_mutex_destroy(&dimming_mutex);
         return -1;
+    }
 
-    if (!(power_mgt = IOPMFindPowerManagement(master_dev_port)))
+    if (!(power_mgt = IOPMFindPowerManagement(master_dev_port))) {
+        pthread_mutex_destroy(&dimming_mutex);
         return -1;
+    }
 
     if (preventDimming) {
         if (saveDimSettings() < 0)
@@ -145,9 +156,20 @@ dimmingShutdown(void)
             goto DONE;
 
     result = 0;
-    initialized = FALSE;
 
  DONE:
+    /* Release the IOKit connection + mach port acquired in dimmingInit so a
+       later restart does not leak them; then drop the mutex we created. */
+    if (power_mgt) {
+        IOServiceClose(power_mgt);
+        power_mgt = 0;
+    }
+    if (master_dev_port) {
+        mach_port_deallocate(mach_task_self(), master_dev_port);
+        master_dev_port = 0;
+    }
+    initialized = FALSE;
     pthread_mutex_unlock(&dimming_mutex);
+    pthread_mutex_destroy(&dimming_mutex);
     return result;
 }
