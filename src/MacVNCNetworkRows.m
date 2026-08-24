@@ -5,6 +5,17 @@
 #include <ifaddrs.h>
 #include <net/if.h>
 
+NSString * const MacVNCRowKeyName               = @"name";
+NSString * const MacVNCRowKeyDisplayName        = @"displayName";
+NSString * const MacVNCRowKeyAddress            = @"address";
+NSString * const MacVNCRowKeyCIDR               = @"cidr";
+NSString * const MacVNCRowKeyAllowCIDR          = @"allowCIDR";
+NSString * const MacVNCRowKeyListenTitle        = @"listenTitle";
+NSString * const MacVNCRowKeyAllowTitle         = @"allowTitle";
+NSString * const MacVNCRowKeyAllowSummary       = @"allowSummary";
+NSString * const MacVNCRowKeyAllowPresetVisible = @"allowPresetVisible";
+NSString * const MacVNCRowKeyCGNATLike          = @"cgnatLike";
+
 NSArray<NSDictionary<NSString *, id> *> *macVNCActiveNetworkRows(void)
 {
     NSMutableArray<NSDictionary<NSString *, id> *> *rows = [NSMutableArray array];
@@ -51,16 +62,16 @@ NSArray<NSDictionary<NSString *, id> *> *macVNCActiveNetworkRows(void)
             ? [NSString stringWithFormat:@"Auto: Tailscale clients — %@", allowCIDR]
             : [NSString stringWithFormat:@"Auto: same network — %@", allowCIDR];
         [rows addObject:@{
-            @"name": name,
-            @"displayName": displayName,
-            @"address": ip,
-            @"cidr": cidr,
-            @"allowCIDR": allowCIDR,
-            @"listenTitle": listenTitle,
-            @"allowTitle": allowTitle,
-            @"allowSummary": allowSummary,
-            @"allowPresetVisible": @(row.allowPresetVisible),
-            @"cgnatLike": @(row.cgnatLike),
+            MacVNCRowKeyName: name,
+            MacVNCRowKeyDisplayName: displayName,
+            MacVNCRowKeyAddress: ip,
+            MacVNCRowKeyCIDR: cidr,
+            MacVNCRowKeyAllowCIDR: allowCIDR,
+            MacVNCRowKeyListenTitle: listenTitle,
+            MacVNCRowKeyAllowTitle: allowTitle,
+            MacVNCRowKeyAllowSummary: allowSummary,
+            MacVNCRowKeyAllowPresetVisible: @(row.allowPresetVisible),
+            MacVNCRowKeyCGNATLike: @(row.cgnatLike),
         }];
     }
     freeifaddrs(interfaces);

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.14 LANGUAGES C)
+project(macVNC VERSION 0.3.15 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -240,6 +240,7 @@ if(BUILD_TESTING)
         src/PointerState.c
         src/KeyboardModifierState.c
         src/MacVNCPowerMgmt.m
+        src/ReadinessPolicy.c
     )
     target_include_directories(test_input_context PRIVATE src)
     target_link_libraries(test_input_context
