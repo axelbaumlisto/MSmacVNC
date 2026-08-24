@@ -4,8 +4,10 @@
 #import <IOKit/pwr_mgt/IOPMLib.h>
 #import <IOKit/pwr_mgt/IOPM.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <mach/mach_init.h>
 #include <mach/mach_port.h>
+#include "ReadinessPolicy.h" /* macVNCReadinessNow() — shared monotonic clock */
 
 rfbBool preventDimming = FALSE;
 rfbBool preventSleep   = TRUE;
@@ -61,6 +63,19 @@ restoreSleepSettings(void)
     return 0;
 }
 
+/* Release everything dimmingInit acquired. Safe to call partially-initialised. */
+static void releasePowerResources(void)
+{
+    if (power_mgt) {
+        IOServiceClose(power_mgt);
+        power_mgt = 0;
+    }
+    if (master_dev_port) {
+        mach_port_deallocate(mach_task_self(), master_dev_port);
+        master_dev_port = 0;
+    }
+}
+
 int
 dimmingInit(void)
 {
@@ -76,37 +91,50 @@ dimmingInit(void)
 #else
     if (IOMasterPort(bootstrap_port, &master_dev_port) != kIOReturnSuccess)
 #endif
-    {
-        pthread_mutex_destroy(&dimming_mutex);
-        return -1;
-    }
+        goto FAILURE;
 
-    if (!(power_mgt = IOPMFindPowerManagement(master_dev_port))) {
-        pthread_mutex_destroy(&dimming_mutex);
-        return -1;
-    }
+    if (!(power_mgt = IOPMFindPowerManagement(master_dev_port)))
+        goto FAILURE;
 
     if (preventDimming) {
         if (saveDimSettings() < 0)
-            return -1;
+            goto FAILURE;
         if (IOPMSetAggressiveness(power_mgt, kPMMinutesToDim, 0) != kIOReturnSuccess)
-            return -1;
+            goto FAILURE;
     }
 
     if (preventSleep) {
         if (saveSleepSettings() < 0)
-            return -1;
+            goto FAILURE;
         if (IOPMSetAggressiveness(power_mgt, kPMMinutesToSleep, 0) != kIOReturnSuccess)
-            return -1;
+            goto FAILURE;
     }
 
     initialized = TRUE;
     return 0;
+
+FAILURE:
+    /* Roll back everything acquired so a later retry starts clean and no
+       IOKit connection / mach port / mutex leaks. */
+    releasePowerResources();
+    pthread_mutex_destroy(&dimming_mutex);
+    return -1;
 }
 
 int
 undim(void)
 {
+    /* Throttle: undim() runs on every keystroke/mouse-move. Doing 3 IOKit
+       round-trips per input event under the lock is wasteful, so skip if we
+       nudged within the last second. */
+    static const uint64_t kUndimMinIntervalNs = 1000000000ULL; /* 1s */
+    static _Atomic uint64_t lastUndimNs = 0;
+    uint64_t now = macVNCReadinessNow();
+    uint64_t last = atomic_load_explicit(&lastUndimNs, memory_order_relaxed);
+    if (last != 0 && now - last < kUndimMinIntervalNs)
+        return 0;
+    atomic_store_explicit(&lastUndimNs, now, memory_order_relaxed);
+
     int result = -1;
 
     pthread_mutex_lock(&dimming_mutex);
@@ -160,14 +188,7 @@ dimmingShutdown(void)
  DONE:
     /* Release the IOKit connection + mach port acquired in dimmingInit so a
        later restart does not leak them; then drop the mutex we created. */
-    if (power_mgt) {
-        IOServiceClose(power_mgt);
-        power_mgt = 0;
-    }
-    if (master_dev_port) {
-        mach_port_deallocate(mach_task_self(), master_dev_port);
-        master_dev_port = 0;
-    }
+    releasePowerResources();
     initialized = FALSE;
     pthread_mutex_unlock(&dimming_mutex);
     pthread_mutex_destroy(&dimming_mutex);
