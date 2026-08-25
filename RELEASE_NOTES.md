@@ -32,6 +32,34 @@
 - CTest: 17/17 passed. Reference libvncclient: AUTH_OK, composite 5552x2715.
 - Developer ID + hardened runtime + entitlements: signed, notarized, stapled.
 
+# macVNC 0.3.24
+
+## Fixes the “grant permission → restart → hang” loop
+
+0.3.23 was withdrawn: after replacing the bundle, macOS re-asks for Screen Recording, and
+the app could then get stuck in an inescapable permission loop. Root causes, all fixed:
+
+- **The capture-failure latch outlived its run.** One `-3801` denial set a process-global
+  “Screen Recording missing” flag that nothing cleared, so even after the user granted the
+  permission the check still answered “not granted”, the gate kept demanding a restart, and
+  the restart re-latched on its own first failure. The latch now describes only the previous
+  attempt and is cleared at the start of every start attempt.
+- **Stopping the server could wedge the main thread forever.** `stopCaptureAndWait` waited on
+  in-flight ScreenCaptureKit work with no timeout, and that work can stay pending behind the
+  system permission prompt — freezing the menu bar, including the buttons needed to recover.
+  The wait is now bounded (5 s) and shutdown continues regardless.
+- **The capture-failure handler no longer stops the server on the main thread**; it hops to a
+  background queue and returns to the main queue only for the UI.
+- Frame retry on client contention is now a bounded in-place retry (~120 ms) instead of the
+  mailbox re-submit used in 0.3.23, which broke the drain’s scheduling accounting.
+
+## Validation
+
+- Release build passed; clang static analyzer: 0 warnings; CTest 17/17.
+- After a capture denial the process stays responsive and terminates in ~1 s (previously it
+  could hang indefinitely).
+- Developer ID + hardened runtime + entitlements: signed, notarized, stapled.
+
 # macVNC 0.3.22
 
 ## Truthful status & real start failures

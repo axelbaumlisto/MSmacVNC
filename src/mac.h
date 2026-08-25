@@ -43,6 +43,15 @@ extern void (*macVNCScreenCaptureFailureHandler)(bool likelyPermissionDenial,
                                                  uint64_t serverGeneration);
 
 /*
+ * Invoked once per server run, from the capture queue, when the first frame is
+ * actually delivered. Informational only — permission STATUS is read from
+ * CGPreflightScreenCaptureAccess(), which is accurate for a GUI-launched app and
+ * never prompts. (Earlier readings suggesting otherwise were taken from
+ * shell-launched runs, where TCC attributes the request to the terminal.)
+ */
+extern void (*macVNCScreenCaptureWorkingHandler)(void);
+
+/*
  * Monotonic id of the current server run, incremented by every vncServerStart().
  * A capture-failure notification carries the generation it was raised for, so a
  * notification queued by an already-stopped run (e.g. delivered after a modal
@@ -70,6 +79,15 @@ rfbBool vncServerStart(const MacVNCServerConfig *config);
  * Safe to call from any thread.
  */
 void vncServerStop(void);
+
+/*
+ * Close the listening sockets (IPv4 and IPv6) and nothing else.
+ *
+ * For the relaunch path: the new process inherits our descriptors, and a still
+ * open listener makes its bind() fail. Cheap and non-blocking, unlike
+ * vncServerStop(), which joins client threads and waits on capture work.
+ */
+void vncServerCloseListeners(void);
 
 /*
  * Return the TCP port the server is listening on, or -1 if not started.
