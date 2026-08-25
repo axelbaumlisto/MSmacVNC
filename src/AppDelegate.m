@@ -45,7 +45,6 @@ static AppDelegate *gSharedAppDelegate = nil;
 /* First delivered frame: Screen Recording is proven to work in this process. */
 static void macVNCScreenCaptureWorking_(void)
 {
-    macVNCNoteScreenCaptureWorking();
     dispatch_async(dispatch_get_main_queue(), ^{
         [gSharedAppDelegate captureBecameWorking];
     });
@@ -451,12 +450,16 @@ static NSMenuItem *addRow(NSMenu *menu, NSString *title, SEL action,
         NSString *configurationError = startup.error;
 
         MacVNCServerConfig serverConfig;
-        BOOL ok = [startup fillServerConfig:&serverConfig] &&
-                  vncServerStart(&serverConfig);
+        MacVNCServerStartResult startResult = MacVNCServerStartFailed;
+        if ([startup fillServerConfig:&serverConfig])
+            startResult = vncServerStartWithResult(&serverConfig);
+        BOOL ok = startResult == MacVNCServerStartOK;
 
         dispatch_async(dispatch_get_main_queue(), ^{
             MacVNCStartOutcome outcome;
             outcome.started               = ok;
+            outcome.alreadyRunning        =
+                startResult == MacVNCServerStartAlreadyRunning;
             outcome.hasConfigurationError = configurationError != nil;
             outcome.permissionsGranted    =
                 macVNCResolvePermissionUI(macVNCSamplePermissionUIInput(NO))

@@ -64,21 +64,38 @@ int main(void)
            MACVNC_DISPLAY_SELECTION_NO_SUCH_DISPLAY);
     assert(count == 0);
 
-    /* No displays (asleep screen) and more than the layout holds. */
+    /* No displays (asleep screen). Count is re-poisoned before each call so the
+       "*selectedCount is 0" promise is actually tested, not inherited from a
+       previous assertion that already left it at 0. */
+    count = 999;
     assert(macVNCSelectDisplays(available, 0, -1, MACVNC_DISPLAY_ALL,
                                 selected, &count) ==
            MACVNC_DISPLAY_SELECTION_UNSUPPORTED_COUNT);
     assert(count == 0);
-    assert(macVNCSelectDisplays(available, MACVNC_MAX_DISPLAYS + 1, 0,
+
+    /* More displays than the layout holds. The array really has that many
+       entries: passing a bogus count with a short array would be reading out of
+       bounds if a future edit validated after the first read. */
+    MacVNCDisplayInput overflow[MACVNC_MAX_DISPLAYS + 1];
+    for (size_t i = 0; i < MACVNC_MAX_DISPLAYS + 1; ++i)
+        overflow[i] = makeDisplay((uint32_t)(100 + i), (double)i * 100, 800);
+    count = 999;
+    assert(macVNCSelectDisplays(overflow, MACVNC_MAX_DISPLAYS + 1, 0,
                                 MACVNC_DISPLAY_ALL, selected, &count) ==
            MACVNC_DISPLAY_SELECTION_UNSUPPORTED_COUNT);
     assert(count == 0);
 
-    /* NULL arguments must not crash: this runs during server start-up. */
+    /* NULL arguments must not crash, and must still honour the count promise:
+       this runs during server start-up. */
+    count = 999;
     assert(macVNCSelectDisplays(NULL, 3, 0, MACVNC_DISPLAY_ALL, selected, &count) ==
            MACVNC_DISPLAY_SELECTION_UNSUPPORTED_COUNT);
+    assert(count == 0);
+    count = 999;
     assert(macVNCSelectDisplays(available, 3, 0, MACVNC_DISPLAY_ALL, NULL, &count) ==
            MACVNC_DISPLAY_SELECTION_UNSUPPORTED_COUNT);
+    assert(count == 0);
+    /* A NULL count pointer must not be dereferenced. */
     assert(macVNCSelectDisplays(available, 3, 0, MACVNC_DISPLAY_ALL, selected, NULL) ==
            MACVNC_DISPLAY_SELECTION_UNSUPPORTED_COUNT);
 

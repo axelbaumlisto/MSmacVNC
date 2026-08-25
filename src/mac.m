@@ -60,6 +60,10 @@ static _Atomic bool gReportedCaptureWorking = false;
 /* Injected permission gate; see mac.h. NULL means unrestricted. */
 bool (*macVNCCaptureAllowed)(void) = NULL;
 
+#if defined(MACVNC_ENABLE_TEST_HOOKS)
+static _Atomic unsigned gCaptureStartCount = 0;
+#endif
+
 static bool captureIsAllowed(void)
 {
     return !macVNCCaptureAllowed || macVNCCaptureAllowed();
@@ -436,6 +440,9 @@ static void reconcileCaptureState(void)
     if (wanted && !gCapturesRunning) {
         if (captureIsAllowed()) {
             macVNCCaptureSessionStart();
+#if defined(MACVNC_ENABLE_TEST_HOOKS)
+            atomic_fetch_add(&gCaptureStartCount, 1);
+#endif
             gCapturesRunning = true;
             rfbLog("Client connected; starting %lu display captures\n",
                    (unsigned long)macVNCCaptureSessionCount());
@@ -619,18 +626,21 @@ vncServerStopLocked(void)
     free(frameBufferOne); frameBufferOne = NULL;
 }
 
-rfbBool
-vncServerStart(const MacVNCServerConfig *config)
+MacVNCServerStartResult
+vncServerStartWithResult(const MacVNCServerConfig *config)
 {
     if (!config) {
         rfbErr("vncServerStart: NULL configuration\n");
-        return FALSE;
+        return MacVNCServerStartFailed;
     }
     pthread_mutex_lock(&serverLifecycleMutex);
     if (serverHasLifecycleResourcesLocked()) {
-        rfbErr("VNC server lifecycle is already initialized\n");
+        /* Not a failure: a run is already live. Told apart from a real failure
+           so the UI does not advise changing the port while the server is
+           serving on the current one. */
+        rfbLog("VNC server is already running; start request ignored\n");
         pthread_mutex_unlock(&serverLifecycleMutex);
-        return FALSE;
+        return MacVNCServerStartAlreadyRunning;
     }
     atomic_store_explicit(&publishedServerPort, -1, memory_order_release);
     atomic_fetch_add(&serverGeneration, 1);
@@ -659,12 +669,18 @@ vncServerStart(const MacVNCServerConfig *config)
     rfbRunEventLoop(rfbScreen, -1, TRUE);
     atomic_store_explicit(&publishedServerPort, rfbScreen->port, memory_order_release);
     pthread_mutex_unlock(&serverLifecycleMutex);
-    return TRUE;
+    return MacVNCServerStartOK;
 
 FAILURE:
     vncServerStopLocked();
     pthread_mutex_unlock(&serverLifecycleMutex);
-    return FALSE;
+    return MacVNCServerStartFailed;
+}
+
+rfbBool
+vncServerStart(const MacVNCServerConfig *config)
+{
+    return vncServerStartWithResult(config) == MacVNCServerStartOK ? TRUE : FALSE;
 }
 
 void
@@ -690,13 +706,26 @@ vncServerCloseListeners(void)
        would freeze the menu bar at the very moment the user pressed Restart.
        This only drops the listeners; the process is about to exit anyway. */
     /* Needs the lifecycle lock (vncServerStopLocked() frees rfbScreen from
-       another thread), but must never BLOCK: this runs on the main thread while
-       relaunching, and the lock can be held by a stop that is waiting on capture
-       work stuck behind a system prompt — that would freeze the menu bar.
-       If the lock is busy a stop is already in progress, which closes the
-       listeners anyway, so skipping is correct. */
-    if (pthread_mutex_trylock(&serverLifecycleMutex) != 0)
+       another thread) but must never block the main thread, where this runs
+       during a relaunch: the lock can be held for seconds by a stop waiting on
+       capture work, or by a START doing display-wake retries and rfbInitServer.
+
+       So: retry on a bounded budget rather than give up at once. Giving up
+       immediately was wrong — a concurrent START would open the listener AFTER
+       our "close", and the successor process would then fail to bind and report
+       the port as in use. If the budget runs out we say so instead of leaving
+       the caller believing the port was freed. */
+    bool locked = false;
+    for (int attempt = 0; attempt < 50 && !locked; ++attempt) {
+        locked = pthread_mutex_trylock(&serverLifecycleMutex) == 0;
+        if (!locked)
+            usleep(10000); /* 10ms; 500ms total */
+    }
+    if (!locked) {
+        rfbErr("Could not close listeners: server lifecycle busy; "
+               "the successor may fail to bind\n");
         return;
+    }
     if (!rfbScreen) {
         pthread_mutex_unlock(&serverLifecycleMutex);
         return;
@@ -783,6 +812,28 @@ bool
 macVNCCaptureIsAllowedForTesting(void)
 {
     return captureIsAllowed();
+}
+
+void
+macVNCReconcileCaptureForTesting(void)
+{
+    reconcileCaptureState();
+}
+
+unsigned
+macVNCCaptureStartCountForTesting(void)
+{
+    return atomic_load(&gCaptureStartCount);
+}
+
+/* Drives the real reconciler, so a test exercises the decision the server
+   actually makes rather than a re-implementation of it. */
+void
+macVNCResetCaptureStateForTesting(void)
+{
+    atomic_store(&vncConnectedClients, 0);
+    reconcileCaptureState();
+    atomic_store(&gCaptureStartCount, 0);
 }
 
 bool
