@@ -3,6 +3,7 @@
 #import "MacVNCPermissions.h"
 #import "MacVNCPermissionUI.h"
 #import "MacVNCRelauncher.h"
+#import "MacVNCStatusText.h"
 #import "MacVNCPermissionsPanel.h"
 #import "MacVNCPreferences.h"
 #import "MacVNCDefaultsKeys.h"
@@ -523,29 +524,25 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
 {
     int port = vncServerGetPort();
 
-    /* ONE snapshot for the whole render (I1): the status line used to sample TCC
+    /* ONE snapshot for the whole render: the status line used to sample TCC
        separately from the permission rows — four reads, two snapshots, one
-       frame — which is exactly the shape of the old "chip and hint disagree"
-       bug, just moved into the menu. */
+       frame — which is how a line could contradict the rows beneath it. */
     MacVNCPermissionUIInput input = macVNCSamplePermissionUIInput(port > 0);
     MacVNCPermissionUIState *ui = macVNCResolvePermissionUI(input);
 
-    if (port > 0) {
-        /* Report what the RUNNING server actually applied — never the saved
-           defaults, which may already describe an unsaved/unrestarted change or
-           be overridden by MACVNC_* env vars. Claiming a restriction that is not
-           in effect would be a security-relevant lie. */
-        char activeBind[MACVNC_LISTEN_ADDRESS_MAX] = {0};
-        NSString *bind = @"all interfaces";
-        if (vncServerCopyActiveBindAddress(activeBind, sizeof(activeBind)) && activeBind[0])
-            bind = [NSString stringWithUTF8String:activeBind];
-        NSString *access = vncServerActivePolicyAllowsEveryone() ? @"allow all" : @"allowlist";
-        self.statusMenuItem.title = [NSString stringWithFormat:@"Running  •  %@:%d  •  %@", bind, port, access];
-    } else if (ui.shouldShowPermissionRows) {
-        self.statusMenuItem.title = @"Not running  •  permissions required";
-    } else {
-        self.statusMenuItem.title = @"Not running";
-    }
+    char activeBind[MACVNC_LISTEN_ADDRESS_MAX] = {0};
+    NSString *bind = nil;
+    if (port > 0 && vncServerCopyActiveBindAddress(activeBind, sizeof(activeBind)) && activeBind[0])
+        bind = [NSString stringWithUTF8String:activeBind];
+
+    MacVNCStatusInput status;
+    status.port               = port;
+    status.clientCount        = vncConnectedClients;
+    status.permissionsMissing = ui.shouldShowPermissionRows;
+    status.allowsEveryone     = port > 0 && vncServerActivePolicyAllowsEveryone();
+
+    self.statusMenuItem.title  = macVNCStatusLine(status, bind);
+    self.clientsMenuItem.title = macVNCClientsLine(status);
 
     /* Permission rows from the same snapshot; hidden when both are active,
        exactly like clipshot's banner returning null. */
@@ -553,18 +550,6 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
     self.accessibilityPermissionMenuItem.hidden = !ui.shouldShowPermissionRows;
     self.screenPermissionMenuItem.title = ui.screenChipTitle;
     self.accessibilityPermissionMenuItem.title = ui.accessibilityChipTitle;
-
-    /* A stopped server has no clients, whatever the counter last held: after
-       vncServerCloseListeners() the port reads 0 while vncConnectedClients is
-       untouched, which produced "Not running" directly above "1 client
-       connected". */
-    int n = (port > 0) ? vncConnectedClients : 0;
-    if (n == 0)
-        self.clientsMenuItem.title = @"No clients connected";
-    else if (n == 1)
-        self.clientsMenuItem.title = @"1 client connected";
-    else
-        self.clientsMenuItem.title = [NSString stringWithFormat:@"%d clients connected", n];
 }
 
 - (void)copyVNCAddress:(id)sender
