@@ -34,10 +34,10 @@ static BOOL macVNCAllowsTestPermissionGateBypass(void)
 
 static AppDelegate *gSharedAppDelegate = nil;
 
-static void macVNCScreenCaptureFailed(void)
+static void macVNCScreenCaptureFailed(bool likelyPermissionDenial)
 {
-    [gSharedAppDelegate performSelectorOnMainThread:@selector(handleScreenCaptureFailure)
-                                         withObject:nil
+    [gSharedAppDelegate performSelectorOnMainThread:@selector(handleScreenCaptureFailure:)
+                                         withObject:@(likelyPermissionDenial)
                                       waitUntilDone:NO];
 }
 
@@ -165,6 +165,14 @@ static void macVNCScreenCaptureFailed(void)
     [menu addItem:copyItem];
 
     /* Preferences */
+    /* Permanent recovery affordance: the server can always be (re)started from
+       the menu, so no dialog path can leave the app permanently stopped. */
+    NSMenuItem *startItem = [[[NSMenuItem alloc] initWithTitle:@"Start Server"
+                                                        action:@selector(startServerFromMenu:)
+                                                 keyEquivalent:@""] autorelease];
+    startItem.target = self;
+    [menu addItem:startItem];
+
     NSMenuItem *prefsItem = [[[NSMenuItem alloc] initWithTitle:@"Preferences…"
                                                         action:@selector(openPreferences:)
                                                  keyEquivalent:@","] autorelease];
@@ -235,6 +243,16 @@ static void macVNCScreenCaptureFailed(void)
     [self showPermissionsPanel];
 }
 
+- (void)startServerFromMenu:(id)sender
+{
+    if (vncServerGetPort() > 0)
+        return; /* already running */
+    /* Re-check permissions from scratch: a stale capture-failure latch must not
+       block a manual restart after the user fixed things in System Settings. */
+    macVNCResetScreenCaptureFailure();
+    [self startServerIfPermitted];
+}
+
 - (void)showPermissionsPanel
 {
     if (self.permissionsPanelVisible)
@@ -255,21 +273,40 @@ static void macVNCScreenCaptureFailed(void)
     } else if (action == MacVNCPermissionPanelActionRestart) {
         [self relaunchApplication];
     } else if (action == MacVNCPermissionPanelActionPreferences) {
+        /* Loop back to the gate afterwards: otherwise this branch would leave the
+           app with no affordance to ever start the server again. */
         [self openPreferences:nil];
+        [self showPermissionsPanel];
     } else if (action == MacVNCPermissionPanelActionQuit) {
         [NSApp terminate:nil];
     }
 }
 
-- (void)handleScreenCaptureFailure
+- (void)handleScreenCaptureFailure:(NSNumber *)likelyPermissionDenial
 {
-    /* ScreenCaptureKit failed at runtime: Screen Recording is not effectively
-       granted even if CGPreflight returned a stale YES. Stop the server and show
-       the single unified permission popup. */
-    macVNCNoteScreenCaptureFailure();
     vncServerStop();
+
+    if (likelyPermissionDenial.boolValue) {
+        /* A real TCC denial: latch it so the permission model reports the truth
+           even if CGPreflight returns a stale YES, and show the gate panel. */
+        macVNCNoteScreenCaptureFailure();
+        [self updateMenuStatus];
+        [self showPermissionsPanel];
+        return;
+    }
+
+    /* Non-permission capture failure (e.g. a display was unplugged or the
+       stream stopped). Do NOT latch a permanent "permission missing" state:
+       clear any stale latch, report it, and allow a normal restart. */
+    macVNCResetScreenCaptureFailure();
     [self updateMenuStatus];
-    [self showPermissionsPanel];
+    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+    alert.messageText     = @"Screen capture stopped";
+    alert.informativeText = @"macVNC stopped capturing (for example a display was "
+                             "disconnected or the capture stream ended). The server "
+                             "has been stopped; start it again from the menu.";
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
 }
 
 /* -----------------------------------------------------------------------

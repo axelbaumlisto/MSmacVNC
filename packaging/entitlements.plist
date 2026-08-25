@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      macVNC bundles Homebrew dylibs (libvncserver, OpenSSL libssl/libcrypto,
+      libjpeg, libpng). Under Developer ID hardened runtime, library validation
+      rejects these third-party-signed dylibs, which breaks libvncserver's
+      OpenSSL-backed VNC DES password check (observed as "password check failed").
+      Disabling library validation lets the notarized app load the bundled libs.
+    -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
