@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.54 LANGUAGES C)
+project(macVNC VERSION 0.3.55 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -46,6 +46,8 @@ set(SOURCE_FILES
     src/CompositeFramebuffer.c
     src/MacVNCCompositor.h
     src/MacVNCCompositor.m
+    src/MacVNCCaptureSession.h
+    src/MacVNCCaptureSession.m
     src/PointerState.h
     src/PointerState.c
     src/KeyboardModifierState.h
@@ -90,6 +92,8 @@ set(SOURCE_FILES
     src/MacVNCRelauncher.m
     src/MacVNCStatusText.h
     src/MacVNCStatusText.m
+    src/MacVNCStartFailure.h
+    src/MacVNCStartFailure.m
     src/MacVNCPassword.h
     src/MacVNCPassword.m
     src/MacVNCPermissionsPanel.h
@@ -234,6 +238,20 @@ if(BUILD_TESTING)
         ${APPLICATION_SERVICES} ${SCREEN_CAPTURE_KIT} ${CORE_GRAPHICS})
     add_test(NAME permission_ui COMMAND test_permission_ui)
 
+    add_executable(test_capture_session tests/test_capture_session.m
+        src/MacVNCCaptureSession.m src/ScreenCapturer.m src/FrameMailbox.c
+        src/ReadinessPolicy.c src/CaptureRate.c)
+    target_include_directories(test_capture_session PRIVATE src)
+    target_link_libraries(test_capture_session
+        ${SCREEN_CAPTURE_KIT} ${CORE_MEDIA} ${CORE_VIDEO}
+        ${FOUNDATION} ${APPKIT_LIBRARY} ${CMAKE_THREAD_LIBS_INIT})
+    add_test(NAME capture_session COMMAND test_capture_session)
+
+    add_executable(test_start_failure tests/test_start_failure.m src/MacVNCStartFailure.m)
+    target_include_directories(test_start_failure PRIVATE src)
+    target_link_libraries(test_start_failure ${FOUNDATION} ${APPKIT_LIBRARY})
+    add_test(NAME start_failure COMMAND test_start_failure)
+
     add_executable(test_defaults tests/test_defaults.m
         src/MacVNCDefaultsKeys.m src/MacVNCListenMode.m)
     target_include_directories(test_defaults PRIVATE src)
@@ -298,6 +316,7 @@ if(BUILD_TESTING)
         src/DisplaySelection.c
         src/CompositeFramebuffer.c
         src/MacVNCCompositor.m
+        src/MacVNCCaptureSession.m
         src/PointerState.c
         src/KeyboardModifierState.c
         src/CaptureRate.c
@@ -335,6 +354,7 @@ if(BUILD_TESTING)
         src/DisplaySelection.c
         src/CompositeFramebuffer.c
         src/MacVNCCompositor.m
+        src/MacVNCCaptureSession.m
         src/PointerState.c
         src/KeyboardModifierState.c
         src/CaptureRate.c

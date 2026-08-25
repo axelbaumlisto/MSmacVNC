@@ -4,6 +4,7 @@
 #import "MacVNCPermissionUI.h"
 #import "MacVNCRelauncher.h"
 #import "MacVNCStatusText.h"
+#import "MacVNCStartFailure.h"
 #import "MacVNCPermissionsPanel.h"
 #import "MacVNCPreferences.h"
 #import "MacVNCDefaultsKeys.h"
@@ -464,6 +465,16 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
  * Server lifecycle
  * ----------------------------------------------------------------------- */
 
+- (void)showStartAlert:(NSString *)title body:(NSString *)body style:(NSAlertStyle)style
+{
+    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+    alert.messageText     = title;
+    alert.informativeText = body ?: @"";
+    alert.alertStyle      = style;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
 - (void)startServer
 {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -479,33 +490,29 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
                   vncServerStart(&serverConfig);
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (ok) {
+            MacVNCStartOutcome outcome;
+            outcome.started               = ok;
+            outcome.hasConfigurationError = configurationError != nil;
+            outcome.permissionsGranted    =
+                macVNCResolvePermissionUI(macVNCSamplePermissionUIInput(NO))
+                    .shouldShowPermissionRows ? NO : YES;
+
+            switch (macVNCResolveStartAdvice(outcome)) {
+            case MacVNCStartAdviceNone:
                 [self updateMenuStatus];
-            } else if (configurationError) {
+                break;
+            case MacVNCStartAdviceConfiguration:
                 self.statusMenuItem.title = @"Failed to start";
-                NSAlert *alert = [[[NSAlert alloc] init] autorelease];
-                alert.messageText     = @"macVNC could not start";
-                alert.informativeText = configurationError;
-                alert.alertStyle      = NSAlertStyleCritical;
-                [alert runModal];
-            } else {
-                /* Non-configuration failure. If permissions are fine, the server
-                   itself refused to start (most commonly the port is already in
-                   use) — say so instead of silently showing "Not running". A
-                   permission problem is handled by the capture-failure popup. */
+                [self showStartAlert:@"macVNC could not start"
+                                body:configurationError
+                               style:NSAlertStyleCritical];
+                break;
+            case MacVNCStartAdvicePortInUse:
                 [self updateMenuStatus];
-                if (macVNCCheckPermission(MacVNCPermissionKindAccessibility) == MacVNCPermissionStatusGranted) {
-                    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
-                    alert.messageText     = @"macVNC could not start the server";
-                    alert.informativeText = @"The VNC server failed to start. The most likely "
-                                             "cause is that the port is already in use — for "
-                                             "example macOS Screen Sharing on port 5900, or "
-                                             "another macVNC instance. Choose a different port "
-                                             "in Preferences and start the server again.";
-                    alert.alertStyle      = NSAlertStyleWarning;
-                    [alert addButtonWithTitle:@"OK"];
-                    [alert runModal];
-                }
+                [self showStartAlert:macVNCStartAdviceTitle(MacVNCStartAdvicePortInUse)
+                                body:macVNCStartAdviceBody(MacVNCStartAdvicePortInUse)
+                               style:NSAlertStyleWarning];
+                break;
             }
         });
     });

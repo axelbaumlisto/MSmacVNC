@@ -30,6 +30,8 @@ check_declared shouldStartServer           # one resolver owns the start decisio
 check_declared macVNCRegisterDefaults      # defaults live with their keys
 check_declared macVNCCompositorSubmitFrame # compositing is its own module
 check_declared macVNCSelectDisplays        # display choice is testable
+check_declared macVNCResolveStartAdvice    # start-failure messaging is pure
+check_declared macVNCCaptureSessionStart   # capture streams are one unit
 
 [ $fail -eq 0 ] && echo "ARCHITECTURE.md matches the source"
 exit $fail

@@ -27,6 +27,7 @@ modules**, and keep the Objective-C layer as thin glue to macOS frameworks
    Server core   │ mac.m: ScreenInit, client lifecycle,          │
    (C / Obj-C)   │        start/stop, listener teardown          │
                  │   MacVNCCompositor (frame → canvas, locking)  │
+                 │   MacVNCCaptureSession (per-run streams)      │
                  │   MacVNCInput (kbd/ptr)  MacVNCPowerMgmt      │
                  │   MacVNCDisplayWake      ScreenCapturer (SCK) │
                  └───────────────┬──────────────────────────────┘
@@ -34,7 +35,7 @@ modules**, and keep the Objective-C layer as thin glue to macOS frameworks
                  ┌───────────────▼──────────────────────────────┐
    Pure logic    │ DisplayLayout · DisplaySelection              │
    (C, tested)   │ CompositeFramebuffer · MacVNCStatusText       │
-                 │ MacVNCPermissionUI                            │
+                 │ MacVNCPermissionUI · MacVNCStartFailure       │
                  │ NetworkAccess · NetworkCIDR · NetworkInventory │
                  │ NetworkPolicyResolver · ReadinessPolicy        │
                  │ FrameMailbox · PointerState                    │
@@ -70,6 +71,9 @@ Pure C (each with a `tests/test_*.c`):
   server reports no clients whatever the counter holds).
 - **MacVNCPermissionUI** — chips, hint, button title, and the
   `shouldStartServer` / `shouldShowPanel` decisions, from one snapshot.
+- **MacVNCStartFailure** — what to say when the server does not come up.
+  Silence on a real failure and a port-collision alert stacked over the
+  permission panel are both wrong; the decision is pure and tested.
 
 Objective-C glue:
 - **AppDelegate** — status-bar UI, timers, server start/stop, permission flow;
@@ -79,6 +83,9 @@ Objective-C glue:
   for the whole encode-and-write, so waiting would let one stalled viewer
   freeze the screen for all clients. A refused frame must be re-submitted, not
   dropped.
+- **MacVNCCaptureSession** — the per-run set of `ScreenCapturer` streams;
+  start/stop/count and a *shared* first-frame budget, so a two-monitor Mac does
+  not make the client wait twice as long.
 - **MacVNCRelauncher** — `posix_spawn` of our own executable, used when a newly
   granted permission needs a fresh process. Both permissions bind at launch.
 - **MacVNCDefaultsKeys** — defaults keys *and* their registered fallbacks, so a
