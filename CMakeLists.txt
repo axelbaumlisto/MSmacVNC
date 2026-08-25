@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.48 LANGUAGES C)
+project(macVNC VERSION 0.3.51 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -40,6 +40,8 @@ set(SOURCE_FILES
     src/RFBKeySym.c
     src/DisplayLayout.h
     src/DisplayLayout.c
+    src/DisplaySelection.h
+    src/DisplaySelection.c
     src/CompositeFramebuffer.h
     src/CompositeFramebuffer.c
     src/PointerState.h
@@ -84,6 +86,8 @@ set(SOURCE_FILES
     src/MacVNCPermissionUI.m
     src/MacVNCRelauncher.h
     src/MacVNCRelauncher.m
+    src/MacVNCStatusText.h
+    src/MacVNCStatusText.m
     src/MacVNCPassword.h
     src/MacVNCPassword.m
     src/MacVNCPermissionsPanel.h
@@ -161,6 +165,10 @@ if(BUILD_TESTING)
     target_include_directories(test_keysym PRIVATE src)
     add_test(NAME keysym_mapping COMMAND test_keysym)
 
+    add_executable(test_display_selection tests/test_display_selection.c src/DisplaySelection.c)
+    target_include_directories(test_display_selection PRIVATE src)
+    add_test(NAME display_selection COMMAND test_display_selection)
+
     add_executable(test_display_layout tests/test_display_layout.c src/DisplayLayout.c)
     target_include_directories(test_display_layout PRIVATE src)
     add_test(NAME display_layout COMMAND test_display_layout)
@@ -216,11 +224,18 @@ if(BUILD_TESTING)
         src/MacVNCPermissionUI.m
     src/MacVNCRelauncher.h
     src/MacVNCRelauncher.m
+    src/MacVNCStatusText.h
+    src/MacVNCStatusText.m
         src/MacVNCPermissions.m)
     target_include_directories(test_permission_ui PRIVATE src)
     target_link_libraries(test_permission_ui ${FOUNDATION} ${APPKIT_LIBRARY}
         ${APPLICATION_SERVICES} ${SCREEN_CAPTURE_KIT} ${CORE_GRAPHICS})
     add_test(NAME permission_ui COMMAND test_permission_ui)
+
+    add_executable(test_status_text tests/test_status_text.m src/MacVNCStatusText.m)
+    target_include_directories(test_status_text PRIVATE src)
+    target_link_libraries(test_status_text ${FOUNDATION})
+    add_test(NAME status_text COMMAND test_status_text)
 
     add_executable(test_listen_mode tests/test_listen_mode.m src/MacVNCListenMode.m)
     target_include_directories(test_listen_mode PRIVATE src)
@@ -272,6 +287,7 @@ if(BUILD_TESTING)
         src/mac.m
         src/RFBKeySym.c
         src/DisplayLayout.c
+        src/DisplaySelection.c
         src/CompositeFramebuffer.c
         src/PointerState.c
         src/KeyboardModifierState.c
