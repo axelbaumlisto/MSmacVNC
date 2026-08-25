@@ -42,7 +42,8 @@
 static rfbScreenInfoPtr rfbScreen;
 
 /* Set by AppDelegate; invoked on the main queue when capture fails at runtime. */
-void (*macVNCScreenCaptureFailureHandler)(bool likelyPermissionDenial) = NULL;
+void (*macVNCScreenCaptureFailureHandler)(bool likelyPermissionDenial,
+                                          uint64_t serverGeneration) = NULL;
 
 /* One composite framebuffer; uncovered regions remain black. */
 static void *frameBufferOne;
@@ -72,6 +73,9 @@ static MacVNCDisplayLayout displayLayout;
 static NSMutableArray<ScreenCapturer *> *screenCapturers;
 static rfbBool rfbServerInitialized = FALSE;
 static _Atomic int publishedServerPort = -1;
+/* Bumped by every start; stamped into capture-failure notifications so stale
+ * ones (raised by a previous run, delivered after a modal) can be ignored. */
+static _Atomic uint64_t serverGeneration = 0;
 static pthread_mutex_t serverLifecycleMutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t compositorMutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t clientLifecycleMutex = PTHREAD_MUTEX_INITIALIZER;
@@ -165,13 +169,15 @@ unlockCurrentClients(LockedClientSet *set)
     memset(set, 0, sizeof(*set));
 }
 
-static void
+/* Returns TRUE when the frame was composited. FALSE means "not now" (a client
+   was mid-send): the caller must retry this frame rather than drop it. */
+static rfbBool
 updateCompositeFrame(CMSampleBufferRef sampleBuffer,
                      const MacVNCDisplayGeometry *geometry)
 {
     CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
     if (!pixelBuffer)
-        return;
+        return TRUE; /* nothing to composite; not a retryable condition */
     if ((int)CVPixelBufferGetWidth(pixelBuffer) != geometry->input.pixelWidth ||
         (int)CVPixelBufferGetHeight(pixelBuffer) != geometry->input.pixelHeight) {
         rfbErr("Unexpected display %u frame size %zux%zu (expected %dx%d)\n",
@@ -180,7 +186,7 @@ updateCompositeFrame(CMSampleBufferRef sampleBuffer,
                CVPixelBufferGetHeight(pixelBuffer),
                geometry->input.pixelWidth,
                geometry->input.pixelHeight);
-        return;
+        return TRUE; /* wrong geometry: retrying cannot help */
     }
 
     CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
@@ -192,9 +198,10 @@ updateCompositeFrame(CMSampleBufferRef sampleBuffer,
     if (!lockCurrentClients(&lockedClients)) {
         pthread_mutex_unlock(&compositorMutex);
         CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
-        /* Either OOM or (far more commonly) a client is mid-send. Skipping this
-           frame is the correct, non-blocking behaviour: the next frame retries. */
-        return;
+        /* Either OOM or (far more commonly) a client is mid-send. Report
+           "not composited" so the caller re-submits this frame instead of
+           losing its pixels (the screen may go static right after). */
+        return FALSE;
     }
 
     macVNCCompositeDisplayFrame((uint8_t *)rfbScreen->frameBuffer,
@@ -210,6 +217,7 @@ updateCompositeFrame(CMSampleBufferRef sampleBuffer,
     unlockCurrentClients(&lockedClients);
     pthread_mutex_unlock(&compositorMutex);
     CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+    return TRUE;
 }
 
 static rfbBool
@@ -405,11 +413,15 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
           [error.domain isEqualToString:SCStreamErrorDomain] &&
           (error.code == SCStreamErrorUserDeclined ||
            error.code == SCStreamErrorMissingEntitlements);
+      /* Stamp the run this failure belongs to, so a notification that is
+         delivered late (e.g. queued behind a modal, after the server was
+         already stopped and restarted) can be discarded by the handler. */
+      uint64_t generation = atomic_load(&serverGeneration);
       /* Do not show UI here. Report upward; AppDelegate owns the single
          permission popup and decides how to recover. */
       dispatch_async(dispatch_get_main_queue(), ^{
           if (macVNCScreenCaptureFailureHandler)
-              macVNCScreenCaptureFailureHandler(likelyPermissionDenial);
+              macVNCScreenCaptureFailureHandler(likelyPermissionDenial, generation);
       });
   };
 
@@ -419,8 +431,8 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
       ScreenCapturer *capturer = [[ScreenCapturer alloc]
           initWithDisplay:geometry->input.displayID
           captureFramesPerSecond:captureFramesPerSecond
-          frameHandler:^(CMSampleBufferRef sampleBuffer) {
-              updateCompositeFrame(sampleBuffer, geometry);
+          frameHandler:^BOOL(CMSampleBufferRef sampleBuffer) {
+              return updateCompositeFrame(sampleBuffer, geometry) ? YES : NO;
           }
           errorHandler:captureErrorHandler];
       if (!capturer) {
@@ -649,6 +661,7 @@ vncServerStart(const MacVNCServerConfig *config)
         return FALSE;
     }
     atomic_store_explicit(&publishedServerPort, -1, memory_order_release);
+    atomic_fetch_add(&serverGeneration, 1);
     /* Permission gating (Screen Recording + Accessibility) is owned by
        AppDelegate via MacVNCPermissions before the server is ever started. */
 
@@ -716,6 +729,26 @@ vncServerActiveAccessMode(void)
     MacVNCClientAccessMode mode = macVNCClientAccessMode;
     pthread_mutex_unlock(&serverLifecycleMutex);
     return mode;
+}
+
+uint64_t
+vncServerCurrentGeneration(void)
+{
+    return atomic_load(&serverGeneration);
+}
+
+rfbBool
+vncServerActivePolicyAllowsEveryone(void)
+{
+    pthread_mutex_lock(&serverLifecycleMutex);
+    /* An ALLOW_LIST that contains a /0 entry admits everyone just as surely as
+       an explicitly confirmed allow-all — report the effect, not the label. */
+    rfbBool everyone =
+        macVNCClientAccessMode == MACVNC_CLIENT_ACCESS_ALLOW_ALL_CONFIRMED ||
+        (macVNCClientAccessMode == MACVNC_CLIENT_ACCESS_ALLOW_LIST &&
+         macVNCNetworkAccessContainsAllowAll(&clientAccessList));
+    pthread_mutex_unlock(&serverLifecycleMutex);
+    return everyone;
 }
 
 #if defined(MACVNC_ENABLE_TEST_HOOKS)

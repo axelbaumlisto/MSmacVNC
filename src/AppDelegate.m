@@ -34,10 +34,11 @@ static BOOL macVNCAllowsTestPermissionGateBypass(void)
 
 static AppDelegate *gSharedAppDelegate = nil;
 
-static void macVNCScreenCaptureFailed(bool likelyPermissionDenial)
+static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t generation)
 {
     [gSharedAppDelegate performSelectorOnMainThread:@selector(handleScreenCaptureFailure:)
-                                         withObject:@(likelyPermissionDenial)
+                                         withObject:@{@"denied": @(likelyPermissionDenial),
+                                                      @"generation": @(generation)}
                                       waitUntilDone:NO];
 }
 
@@ -282,11 +283,20 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial)
     }
 }
 
-- (void)handleScreenCaptureFailure:(NSNumber *)likelyPermissionDenial
+- (void)handleScreenCaptureFailure:(NSDictionary *)info
 {
+    /* Ignore a notification raised by a server run that is no longer current.
+       With one capturer per display, several failures can be queued; the first
+       one stops the server and opens a modal, and by the time the rest are
+       delivered the user may already have started a new run — which must not be
+       killed by a stale report. */
+    uint64_t reportedGeneration = [info[@"generation"] unsignedLongLongValue];
+    if (reportedGeneration != vncServerCurrentGeneration())
+        return;
+
     vncServerStop();
 
-    if (likelyPermissionDenial.boolValue) {
+    if ([info[@"denied"] boolValue]) {
         /* A real TCC denial: latch it so the permission model reports the truth
            even if CGPreflight returns a stale YES, and show the gate panel. */
         macVNCNoteScreenCaptureFailure();
@@ -296,9 +306,9 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial)
     }
 
     /* Non-permission capture failure (e.g. a display was unplugged or the
-       stream stopped). Do NOT latch a permanent "permission missing" state:
-       clear any stale latch, report it, and allow a normal restart. */
-    macVNCResetScreenCaptureFailure();
+       stream stopped). Do NOT latch a permanent "permission missing" state —
+       but equally do NOT clear a latch someone else legitimately set (a sibling
+       display may have reported a real denial milliseconds ago). */
     [self updateMenuStatus];
     NSAlert *alert = [[[NSAlert alloc] init] autorelease];
     alert.messageText     = @"Screen capture stopped";
@@ -377,8 +387,7 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial)
         NSString *bind = @"all interfaces";
         if (vncServerCopyActiveBindAddress(activeBind, sizeof(activeBind)) && activeBind[0])
             bind = [NSString stringWithUTF8String:activeBind];
-        NSString *access = (vncServerActiveAccessMode() == MACVNC_CLIENT_ACCESS_ALLOW_ALL_CONFIRMED)
-            ? @"allow all" : @"allowlist";
+        NSString *access = vncServerActivePolicyAllowsEveryone() ? @"allow all" : @"allowlist";
         self.statusMenuItem.title = [NSString stringWithFormat:@"Running  •  %@:%d  •  %@", bind, port, access];
     } else if (!macVNCPermissionsAllGranted()) {
         self.statusMenuItem.title = @"Not running  •  permissions required";

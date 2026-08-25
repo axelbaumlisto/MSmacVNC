@@ -9,7 +9,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (instancetype)initWithDisplay:(CGDirectDisplayID)displayID
         captureFramesPerSecond:(NSInteger)captureFramesPerSecond
-                   frameHandler:(nonnull void (^)(CMSampleBufferRef sampleBuffer))frameHandler
+                   frameHandler:(nonnull BOOL (^)(CMSampleBufferRef sampleBuffer))frameHandler
                    errorHandler:(nonnull void (^)(NSError *error))errorHandler;
 
 - (void)startCapture;
