@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.59 LANGUAGES C)
+project(macVNC VERSION 0.3.60 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -228,15 +228,18 @@ if(BUILD_TESTING)
     add_executable(test_permission_ui
         tests/test_permission_ui.m
         src/MacVNCPermissionUI.m
-    src/MacVNCRelauncher.h
-    src/MacVNCRelauncher.m
-    src/MacVNCStatusText.h
-    src/MacVNCStatusText.m
         src/MacVNCPermissions.m)
     target_include_directories(test_permission_ui PRIVATE src)
     target_link_libraries(test_permission_ui ${FOUNDATION} ${APPKIT_LIBRARY}
         ${APPLICATION_SERVICES} ${SCREEN_CAPTURE_KIT} ${CORE_GRAPHICS})
     add_test(NAME permission_ui COMMAND test_permission_ui)
+
+    add_executable(test_compositor_submit tests/test_compositor_submit.m
+        src/MacVNCCompositor.m src/CompositeFramebuffer.c src/DisplayLayout.c)
+    target_include_directories(test_compositor_submit PRIVATE src)
+    target_link_libraries(test_compositor_submit
+        LibVNCServer::vncserver ${CMAKE_THREAD_LIBS_INIT} ${FOUNDATION})
+    add_test(NAME compositor_submit COMMAND test_compositor_submit)
 
     add_executable(test_capture_session tests/test_capture_session.m
         src/MacVNCCaptureSession.m src/ScreenCapturer.m src/FrameMailbox.c

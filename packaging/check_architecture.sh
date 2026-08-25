@@ -31,7 +31,17 @@ check_declared macVNCRegisterDefaults      # defaults live with their keys
 check_declared macVNCCompositorSubmitFrame # compositing is its own module
 check_declared macVNCSelectDisplays        # display choice is testable
 check_declared macVNCResolveStartAdvice    # start-failure messaging is pure
-check_declared macVNCCaptureSessionStart   # capture streams are one unit
+check_declared macVNCCaptureSessionBuild   # the session owns ScreenCaptureKit
+
+# The server core must not depend on the capture framework: holding that
+# dependency is what MacVNCCaptureSession is for. Checked against the code only,
+# with comments stripped, so prose may still explain the rule.
+core_code=$(python3 packaging/strip_comments.py src/mac.m)
+if printf '%s' "$core_code" | grep -qE '(#(include|import)[[:space:]]*<ScreenCaptureKit|SCStream[A-Za-z]*|CMSampleBufferRef|CVPixelBufferRef)'; then
+  echo "src/mac.m depends on ScreenCaptureKit again; it belongs in MacVNCCaptureSession"
+  printf '%s' "$core_code" | grep -nE '(#(include|import)[[:space:]]*<ScreenCaptureKit|SCStream[A-Za-z]*|CMSampleBufferRef|CVPixelBufferRef)'
+  fail=1
+fi
 
 [ $fail -eq 0 ] && echo "ARCHITECTURE.md matches the source"
 exit $fail
