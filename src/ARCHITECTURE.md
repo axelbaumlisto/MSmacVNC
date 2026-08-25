@@ -110,3 +110,19 @@ ctest --test-dir build          # keep the display awake (caffeinate) for captur
 Release/notarization lives in `packaging/make_release.sh` (+ `packaging/entitlements.plist`):
 Developer ID + hardened runtime + `com.apple.security.cs.disable-library-validation`
 (required so the bundled Homebrew dylibs load for VNC DES auth).
+
+Two invariants that are easy to “optimise” and thereby break — both learned the hard way:
+
+1. **Bundle the real dylib targets** (`os.path.realpath`), never the version symlinks,
+   or a stale OpenSSL gets shipped.
+2. **Keep `disable-library-validation`.** Verified by A/B re-signing one bundle twice:
+   without it the reference client gets `INIT_FAILED` and the server logs
+   `rfbAuthProcessClientMessage: password check failed`; with it, `AUTH_OK`. This is
+   true even though the script signs every bundled dylib with our own Developer ID,
+   so “the dylibs are same-team signed, drop the entitlement” does **not** work.
+   Validate any change here with the reference libvncclient — `vncdotool` reports a
+   false `AUTH OK` and will hide the regression.
+
+These files are intentionally under `packaging/`, not `build/`: `build/` is CMake
+scratch and is git-ignored, so keeping the signing recipe there meant a routine
+`rm -rf build` destroyed it irrecoverably.
