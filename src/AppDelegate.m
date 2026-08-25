@@ -157,6 +157,23 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
     [self buildMenu];
 }
 
+/* One construction site for menu rows: eleven near-identical NSMenuItem
+   allocations differed only in title, action and key, and each repetition was
+   a chance to forget the target (a nil target silently disables the row). */
+static NSMenuItem *addRow(NSMenu *menu, NSString *title, SEL action,
+                          NSString *key, id target)
+{
+    NSMenuItem *item = [[[NSMenuItem alloc] initWithTitle:title
+                                                  action:action
+                                           keyEquivalent:key ?: @""] autorelease];
+    if (action)
+        item.target = target;
+    else
+        item.enabled = NO; /* informational row */
+    [menu addItem:item];
+    return item;
+}
+
 - (void)buildMenu
 {
     NSMenu *menu = [[[NSMenu alloc] init] autorelease];
@@ -164,30 +181,14 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
        enablement from the responder chain and could grey out our rows. */
     menu.autoenablesItems = NO;
 
-    /* Title row */
-    NSMenuItem *titleItem = [[[NSMenuItem alloc] initWithTitle:@"macVNC"
-                                                        action:nil
-                                                 keyEquivalent:@""] autorelease];
-    titleItem.enabled = NO;
+    NSMenuItem *titleItem = addRow(menu, @"macVNC", nil, nil, self);
     titleItem.attributedTitle = [[[NSAttributedString alloc]
         initWithString:@"macVNC"
             attributes:@{NSFontAttributeName:
-                             [NSFont boldSystemFontOfSize:[NSFont systemFontSize]]}] autorelease];
-    [menu addItem:titleItem];
+                             [NSFont boldSystemFontOfSize:NSFont.systemFontSize]}] autorelease];
 
-    /* Status row (port) */
-    self.statusMenuItem = [[[NSMenuItem alloc] initWithTitle:@"Starting…"
-                                                      action:nil
-                                               keyEquivalent:@""] autorelease];
-    self.statusMenuItem.enabled = NO;
-    [menu addItem:self.statusMenuItem];
-
-    /* Status row (client count) */
-    self.clientsMenuItem = [[[NSMenuItem alloc] initWithTitle:@"No clients connected"
-                                                       action:nil
-                                                keyEquivalent:@""] autorelease];
-    self.clientsMenuItem.enabled = NO;
-    [menu addItem:self.clientsMenuItem];
+    self.statusMenuItem  = addRow(menu, @"Starting…", nil, nil, self);
+    self.clientsMenuItem = addRow(menu, @"No clients connected", nil, nil, self);
 
     /* Permission rows — the menu-bar equivalent of clipshot's banner.
 
@@ -196,68 +197,32 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
        renders the panel, so the two surfaces cannot disagree. They stay hidden
        while everything is granted (clipshot returns null in that case). */
     self.screenPermissionMenuItem =
-        [[[NSMenuItem alloc] initWithTitle:@""
-                                    action:@selector(openScreenRecordingSettings:)
-                             keyEquivalent:@""] autorelease];
-    self.screenPermissionMenuItem.target = self;
-    [menu addItem:self.screenPermissionMenuItem];
-
+        addRow(menu, @"", @selector(openScreenRecordingSettings:), nil, self);
     self.accessibilityPermissionMenuItem =
-        [[[NSMenuItem alloc] initWithTitle:@""
-                                    action:@selector(openAccessibilitySettings:)
-                             keyEquivalent:@""] autorelease];
-    self.accessibilityPermissionMenuItem.target = self;
-    [menu addItem:self.accessibilityPermissionMenuItem];
+        addRow(menu, @"", @selector(openAccessibilitySettings:), nil, self);
 
     [menu addItem:[NSMenuItem separatorItem]];
 
-    /* Copy address */
-    NSMenuItem *copyItem = [[[NSMenuItem alloc] initWithTitle:@"Copy VNC Address"
-                                                       action:@selector(copyVNCAddress:)
-                                                keyEquivalent:@"c"] autorelease];
-    copyItem.target = self;
-    [menu addItem:copyItem];
-
-    /* Preferences */
+    addRow(menu, @"Copy VNC Address", @selector(copyVNCAddress:), @"c", self);
     /* Permanent recovery affordance: the server can always be (re)started from
        the menu, so no dialog path can leave the app permanently stopped. */
-    NSMenuItem *startItem = [[[NSMenuItem alloc] initWithTitle:@"Start Server"
-                                                        action:@selector(startServerFromMenu:)
-                                                 keyEquivalent:@""] autorelease];
-    startItem.target = self;
-    [menu addItem:startItem];
-
-    NSMenuItem *permsItem = [[[NSMenuItem alloc] initWithTitle:@"Permissions…"
-                                                        action:@selector(showPermissionsPanel)
-                                                 keyEquivalent:@""] autorelease];
-    permsItem.target = self;
-    [menu addItem:permsItem];
-
-    NSMenuItem *prefsItem = [[[NSMenuItem alloc] initWithTitle:@"Preferences…"
-                                                        action:@selector(openPreferences:)
-                                                 keyEquivalent:@","] autorelease];
-    prefsItem.target = self;
-    [menu addItem:prefsItem];
+    addRow(menu, @"Start Server", @selector(startServerFromMenu:), nil, self);
+    addRow(menu, @"Permissions…", @selector(showPermissionsPanel), nil, self);
+    addRow(menu, @"Preferences…", @selector(openPreferences:), @",", self);
 
     [menu addItem:[NSMenuItem separatorItem]];
 
-    /* Start at Login */
-    self.loginItemMenuItem = [[[NSMenuItem alloc] initWithTitle:@"Start at Login"
-                                                         action:@selector(toggleLoginItem:)
-                                                  keyEquivalent:@""] autorelease];
-    self.loginItemMenuItem.target = self;
-    self.loginItemMenuItem.state  = [MacVNCLoginItem isEnabled]
-                                        ? NSControlStateValueOn
-                                        : NSControlStateValueOff;
-    [menu addItem:self.loginItemMenuItem];
+    self.loginItemMenuItem =
+        addRow(menu, @"Start at Login", @selector(toggleLoginItem:), nil, self);
+    self.loginItemMenuItem.state = MacVNCLoginItem.isEnabled
+                                       ? NSControlStateValueOn
+                                       : NSControlStateValueOff;
 
     [menu addItem:[NSMenuItem separatorItem]];
 
-    /* Quit */
-    NSMenuItem *quitItem = [[[NSMenuItem alloc] initWithTitle:@"Quit macVNC"
-                                                       action:@selector(terminate:)
-                                                keyEquivalent:@"q"] autorelease];
-    [menu addItem:quitItem];
+    /* Quit targets the application, not us: nil target means "first responder",
+       which for terminate: is NSApp. */
+    addRow(menu, @"Quit macVNC", @selector(terminate:), @"q", nil);
 
     self.statusItem.menu = menu;
 }
