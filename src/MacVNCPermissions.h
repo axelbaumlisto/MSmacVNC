@@ -26,9 +26,6 @@ NSString *macVNCPermissionSettingsURL(MacVNCPermissionKind kind);
 NSString *macVNCPermissionStatusText(MacVNCPermissionStatus status);
 
 MacVNCPermissionStatus macVNCCheckPermission(MacVNCPermissionKind kind);
-void macVNCNoteScreenCaptureFailure(void);
-void macVNCResetScreenCaptureFailure(void);
-BOOL macVNCScreenCaptureFailureNoted(void);
 NSDictionary<NSString *, id> *macVNCPermissionSnapshot(MacVNCPermissionKind kind,
                                                        MacVNCPermissionStatus status);
 NSArray<NSDictionary<NSString *, id> *> *macVNCPermissionSnapshots(void);
@@ -37,8 +34,21 @@ NSArray<NSDictionary<NSString *, id> *> *macVNCMissingPermissions(void);
 BOOL macVNCPermissionsAllGrantedFromSnapshots(NSArray<NSDictionary<NSString *, id> *> *snapshots);
 BOOL macVNCPermissionsAllGranted(void);
 
-void macVNCRequestPermissionPrompt(MacVNCPermissionKind kind);
 void macVNCOpenPermissionSettings(MacVNCPermissionKind kind);
-void macVNCRequestPermissionAndOpenSettings(MacVNCPermissionKind kind);
+
+/*
+ * Screen Recording has exactly ONE status reader:
+ * CGPreflightScreenCaptureAccess(). It never prompts and is accurate for a
+ * GUI-launched app, which is the only supported launch mode. These hooks are
+ * informational; a second source of truth previously let the gate and the UI
+ * disagree, so do not reintroduce one.
+ */
+/* Whether the running bundle sits in an Applications folder — the "+" flow
+ * depends on it, see MacVNCPermissionUI.h. */
+BOOL macVNCRunningFromApplicationsFolder(void);
+
+void macVNCNoteScreenCaptureWorking(void);
+BOOL macVNCScreenCaptureWorking(void);
+
 
 NS_ASSUME_NONNULL_END

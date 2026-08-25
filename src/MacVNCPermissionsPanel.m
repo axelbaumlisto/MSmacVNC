@@ -1,4 +1,6 @@
 #import "MacVNCPermissionsPanel.h"
+#import "MacVNCPermissionUI.h"
+#import "mac.h"
 #import "MacVNCPermissions.h"
 
 @interface MacVNCPermissionsPanelController ()
@@ -12,6 +14,7 @@
 @property (nonatomic, retain) NSMutableSet<NSNumber *> *openedPermissionKinds;
 @property (nonatomic, assign) BOOL restartRequired;
 @property (nonatomic, assign) MacVNCPermissionPanelAction action;
+@property (nonatomic, copy)   void (^completion)(MacVNCPermissionPanelAction);
 
 @end
 
@@ -23,48 +26,66 @@
     if (!self)
         return nil;
 
+    /* Named layout metrics instead of scattered NSMakeRect literals: the hint
+       label's height was hard-coded, so when the "+" instructions grew the text
+       was silently truncated — and nothing failed. Sizes are derived here, in
+       one place, from the content that has to fit. */
+    const CGFloat kMargin      = 24;
+    const CGFloat kWidth       = 480;
+    const CGFloat kInnerWidth  = kWidth - 2 * kMargin;
+    const CGFloat kChipHeight  = 34;
+    const CGFloat kHintHeight  = 112;   /* fits the longest instruction text */
+    const CGFloat kButtonRow   = 28;
+    const CGFloat kHeight      = 336;
+
     self.action = MacVNCPermissionPanelActionNone;
     self.openedPermissionKinds = [NSMutableSet set];
     self.window = [[[NSWindow alloc]
-        initWithContentRect:NSMakeRect(0, 0, 480, 246)
-                  styleMask:NSWindowStyleMaskTitled
+        initWithContentRect:NSMakeRect(0, 0, kWidth, kHeight)
+                  styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                     backing:NSBackingStoreBuffered
                       defer:NO] autorelease];
     self.window.title = @"macVNC Permissions";
     self.window.releasedWhenClosed = NO;
+    self.window.delegate = (id<NSWindowDelegate>)self;
 
     NSView *content = self.window.contentView;
 
     NSTextField *title = [NSTextField labelWithString:@"macVNC needs permissions before starting"];
-    title.frame = NSMakeRect(24, 202, 432, 22);
+    title.frame = NSMakeRect(kMargin, kHeight - 44, kInnerWidth, 22);
     title.font = [NSFont boldSystemFontOfSize:14];
     [content addSubview:title];
 
-    NSTextField *subtitle = [NSTextField labelWithString:@"Click a missing permission to open System Settings. Return here after granting it."];
-    subtitle.frame = NSMakeRect(24, 178, 432, 20);
+    NSTextField *subtitle = [NSTextField labelWithString:@"Click a permission to open System Settings, then press Run macVNC to apply it."];
+    subtitle.frame = NSMakeRect(kMargin, kHeight - 68, kInnerWidth, 20);
     subtitle.textColor = NSColor.secondaryLabelColor;
     subtitle.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
     [content addSubview:subtitle];
 
-    self.screenButton = [self permissionButtonWithFrame:NSMakeRect(24, 132, 432, 34)
+    self.screenButton = [self permissionButtonWithFrame:NSMakeRect(kMargin, kHeight - 114, kInnerWidth, kChipHeight)
                                                    kind:MacVNCPermissionKindScreenRecording];
-    self.accessibilityButton = [self permissionButtonWithFrame:NSMakeRect(24, 90, 432, 34)
+    self.accessibilityButton = [self permissionButtonWithFrame:NSMakeRect(kMargin, kHeight - 156, kInnerWidth, kChipHeight)
                                                           kind:MacVNCPermissionKindAccessibility];
     [content addSubview:self.screenButton];
     [content addSubview:self.accessibilityButton];
 
-    self.hintLabel = [NSTextField labelWithString:@""];
-    self.hintLabel.frame = NSMakeRect(24, 58, 432, 20);
+    /* Wrapping, multi-line: this label carries the step-by-step "+" instructions,
+       which are the ONLY way to grant Screen Recording in this app. In a 20pt
+       single-line label they were silently truncated — i.e. unreadable exactly
+       where they matter most. */
+    self.hintLabel = [NSTextField wrappingLabelWithString:@""];
+    self.hintLabel.frame = NSMakeRect(kMargin, kMargin + kButtonRow + 12, kInnerWidth, kHintHeight);
+    self.hintLabel.selectable = YES;
     self.hintLabel.textColor = NSColor.secondaryLabelColor;
     self.hintLabel.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
     [content addSubview:self.hintLabel];
 
     NSButton *quitButton = [NSButton buttonWithTitle:@"Quit" target:self action:@selector(quitClicked:)];
-    quitButton.frame = NSMakeRect(24, 18, 90, 28);
+    quitButton.frame = NSMakeRect(kMargin, 18, 90, kButtonRow);
     [content addSubview:quitButton];
 
     NSButton *preferencesButton = [NSButton buttonWithTitle:@"Preferences" target:self action:@selector(preferencesClicked:)];
-    preferencesButton.frame = NSMakeRect(232, 18, 110, 28);
+    preferencesButton.frame = NSMakeRect(232, 18, 110, kButtonRow);
     [content addSubview:preferencesButton];
 
     self.startButton = [NSButton buttonWithTitle:@"Start macVNC" target:self action:@selector(startClicked:)];
@@ -86,6 +107,7 @@
     self.hintLabel = nil;
     self.startButton = nil;
     self.openedPermissionKinds = nil;
+    self.completion = nil;
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [super dealloc];
 }
@@ -112,59 +134,54 @@
 
 - (void)refreshPermissions
 {
-    NSArray<NSDictionary<NSString *, id> *> *snapshots = macVNCPermissionSnapshots();
-    BOOL allGranted = macVNCPermissionsAllGrantedFromSnapshots(snapshots);
-    BOOL restartRequired = NO;
-    for (NSDictionary<NSString *, id> *snapshot in snapshots) {
-        MacVNCPermissionKind kind = (MacVNCPermissionKind)[snapshot[MacVNCPermissionSnapshotKindKey] integerValue];
-        MacVNCPermissionStatus status = (MacVNCPermissionStatus)[snapshot[MacVNCPermissionSnapshotStatusKey] integerValue];
-        NSButton *button = [self buttonForPermissionKind:kind];
-        if (!button)
-            continue;
-        BOOL granted = status == MacVNCPermissionStatusGranted;
-        NSNumber *kindNumber = @(kind);
-        if (granted)
-            [self.openedPermissionKinds removeObject:kindNumber];
-        BOOL pendingRestart = !granted && [self.openedPermissionKinds containsObject:kindNumber];
-        if (pendingRestart)
-            restartRequired = YES;
-        button.title = [NSString stringWithFormat:@"%@  %@ — %@",
-                        granted ? @"✓" : (pendingRestart ? @"↻" : @"⚠"),
-                        snapshot[MacVNCPermissionSnapshotNameKey],
-                        granted ? @"Granted" : (pendingRestart ? @"Restart required" : macVNCPermissionStatusText(status))];
-        button.toolTip = pendingRestart
-            ? @"macOS may apply this permission only after restarting macVNC. Click to reopen System Settings."
-            : @"Click to open the matching macOS Privacy & Security pane.";
-        button.enabled = !granted;
-    }
-    self.restartRequired = restartRequired;
-    if (allGranted) {
-        self.startButton.title = @"Start macVNC";
-        self.startButton.enabled = YES;
-        self.hintLabel.stringValue = @"All permissions granted. You can start macVNC now.";
-    } else if (restartRequired) {
-        self.startButton.title = @"Restart macVNC";
-        self.startButton.enabled = YES;
-        self.hintLabel.stringValue = @"macOS may apply Screen Recording only after restart.";
-    } else {
-        self.startButton.title = @"Start macVNC";
-        self.startButton.enabled = NO;
-        self.hintLabel.stringValue = @"Server is stopped until both permissions are granted.";
-    }
+    /* ONE snapshot per render, rendered by the pure resolver in
+       MacVNCPermissionUI. Sampling TCC separately for the chips and for the hint
+       is exactly what let them contradict each other, and logic living here
+       could not be tested at all. */
+    /* Read the server state, never assert it: the panel can be open while the
+       server is (re)started from the menu. */
+    MacVNCPermissionUIInput input = macVNCSamplePermissionUIInput(vncServerGetPort() > 0);
+
+    MacVNCPermissionUIState *ui = macVNCResolvePermissionUI(input);
+
+    self.screenButton.title = ui.screenChipTitle;
+    self.screenButton.enabled = !input.screenActive;
+    self.accessibilityButton.title = ui.accessibilityChipTitle;
+    self.accessibilityButton.enabled = !input.accessibilityActive;
+
+    NSString *chipTip =
+        @"Click to open the matching macOS pane. Already enabled there? "
+         "Press Run macVNC — macOS applies it only to a freshly started macVNC.";
+    self.screenButton.toolTip = chipTip;
+    self.accessibilityButton.toolTip = chipTip;
+
+    self.restartRequired     = ui.buttonRelaunches;
+    self.startButton.title   = ui.buttonTitle;
+    self.startButton.enabled = ui.buttonEnabled;
+    self.hintLabel.stringValue = ui.hint;
 }
 
 - (void)refreshTimerFired:(NSTimer *)timer
 {
     (void)timer;
+    /* Poll only APIs that never prompt. Probing screen capture here would raise
+       macOS's own permission dialog whenever Screen Recording is in the
+       not-determined state — seen appearing behind this very panel. */
     [self refreshPermissions];
 }
 
 - (void)permissionClicked:(NSButton *)sender
 {
-    /* Only open System Settings. Do not call the CGRequest/AX prompt APIs:
-       those trigger macOS's own permission dialog, which we don't want here. */
-    [self.openedPermissionKinds addObject:@(sender.tag)];
-    macVNCOpenPermissionSettings((MacVNCPermissionKind)sender.tag);
+    /* Our panel is the UI — never raise macOS's own permission dialog here.
+       Clicking a chip takes the user straight to the matching Settings pane and
+       our chip then reflects the result.
+
+       The "if it is not listed, click +" guidance belongs to the STATE, not to
+       this handler: anything assigned to hintLabel here is overwritten by
+       -refreshPermissions on the next line and by the 1 s refresh timer. */
+    MacVNCPermissionKind kind = (MacVNCPermissionKind)sender.tag;
+    [self.openedPermissionKinds addObject:@(kind)];
+    macVNCOpenPermissionSettings(kind);
     [self refreshPermissions];
 }
 
@@ -172,58 +189,89 @@
 {
     (void)sender;
     [self refreshPermissions];
-    if (!self.startButton.enabled)
-        return;
-    self.action = self.restartRequired ? MacVNCPermissionPanelActionRestart
-                                       : MacVNCPermissionPanelActionStart;
-    [NSApp stopModal];
+
+    /* "Run macVNC" means: make it work now.
+
+       If capture is already proven to work in THIS process, just start. If it is
+       not, relaunching is the only way to find out honestly — macOS applies a
+       freshly granted Screen Recording permission to a new process, and no API
+       can tell us in advance whether it did. The relaunch runs via /usr/bin/open
+       so TCC attributes capture to macVNC itself. */
+    [self finishWithAction:self.restartRequired ? MacVNCPermissionPanelActionRestart
+                                                : MacVNCPermissionPanelActionStart];
 }
 
 - (void)preferencesClicked:(id)sender
 {
     (void)sender;
-    self.action = MacVNCPermissionPanelActionPreferences;
-    [NSApp stopModal];
+    [self finishWithAction:MacVNCPermissionPanelActionPreferences];
 }
 
 - (void)quitClicked:(id)sender
 {
     (void)sender;
-    self.action = MacVNCPermissionPanelActionQuit;
-    [NSApp stopModal];
+    [self finishWithAction:MacVNCPermissionPanelActionQuit];
 }
 
-- (void)applicationDidBecomeActive:(NSNotification *)notification
+- (void)presentWithCompletion:(void (^)(MacVNCPermissionPanelAction))completion
 {
-    (void)notification;
-    [self refreshPermissions];
-}
+    self.completion = completion;
+    [self retain];            /* released in -finishWithAction: */
 
-- (MacVNCPermissionPanelAction)runModal
-{
     [self refreshPermissions];
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(applicationDidBecomeActive:)
-                                                 name:NSApplicationDidBecomeActiveNotification
-                                               object:nil];
+
+    /* NSRunLoopCommonModes only: the old code also added the timer to
+       NSModalPanelRunLoopMode, which is already part of the common set. */
     self.refreshTimer = [NSTimer timerWithTimeInterval:1.0
                                                 target:self
                                               selector:@selector(refreshTimerFired:)
                                               userInfo:nil
                                                repeats:YES];
-    [[NSRunLoop currentRunLoop] addTimer:self.refreshTimer forMode:NSModalPanelRunLoopMode];
     [[NSRunLoop currentRunLoop] addTimer:self.refreshTimer forMode:NSRunLoopCommonModes];
+
     [self.window center];
     [self.window makeKeyAndOrderFront:nil];
-    [NSApp runModalForWindow:self.window];
+    /* An accessory app (LSUIElement) is not in the activation cycle, so its
+       window would otherwise open behind whatever the user is looking at. */
+    [NSApp activateIgnoringOtherApps:YES];
+}
+
+/* User closed the window: finish with no action, otherwise the completion would
+   never run, the controller would stay retained forever, the refresh timer would
+   keep polling TCC, and permissionsPanelVisible would stay YES — which makes
+   every recovery affordance a no-op. */
+- (BOOL)windowShouldClose:(NSWindow *)sender
+{
+    (void)sender;
+    [self finishWithAction:MacVNCPermissionPanelActionNone];
+    return NO;   /* -finishWithAction: orders it out */
+}
+
+- (void)bringToFront
+{
+    [self.window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+}
+
+- (void)finishWithAction:(MacVNCPermissionPanelAction)action
+{
+    if (!self.completion)
+        return;                       /* already finished */
+
+    self.action = action;
     [self.refreshTimer invalidate];
     self.refreshTimer = nil;
-    [[NSNotificationCenter defaultCenter]
-        removeObserver:self
-                  name:NSApplicationDidBecomeActiveNotification
-                object:nil];
     [self.window orderOut:nil];
-    return self.action;
+
+    void (^done)(MacVNCPermissionPanelAction) = [[self.completion copy] autorelease];
+    self.completion = nil;
+    done(action);
+
+    /* Release on the next runloop turn, never synchronously: this runs inside a
+       button's own action, and AppKit still touches the control (and therefore
+       its target) after the action returns — a synchronous release here is the
+       classic use-after-free. */
+    [self performSelector:@selector(release) withObject:nil afterDelay:0.0];
 }
 
 @end
