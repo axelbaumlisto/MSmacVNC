@@ -52,6 +52,21 @@ extern void (*macVNCScreenCaptureFailureHandler)(bool likelyPermissionDenial,
 extern void (*macVNCScreenCaptureWorkingHandler)(void);
 
 /*
+ * Answers "may we touch screen capture right now?".
+ *
+ * Injected by the owner of permission policy (AppDelegate) so the server core
+ * holds no opinion about TCC: the core must never be the thing that asks macOS
+ * for a permission, because touching capture without it is exactly what makes
+ * the system raise its own "macVNC wants to record this screen" dialog - the
+ * one dialog this app must never cause.
+ *
+ * Must not prompt and must be safe to call from a client thread. NULL means
+ * "unrestricted", which is what unit tests and any embedder without a
+ * permission model want.
+ */
+extern bool (*macVNCCaptureAllowed)(void);
+
+/*
  * Monotonic id of the current server run, incremented by every vncServerStart().
  * A capture-failure notification carries the generation it was raised for, so a
  * notification queued by an already-stopped run (e.g. delivered after a modal
@@ -118,5 +133,9 @@ rfbBool vncServerActivePolicyAllowsEveryone(void);
 
 #if defined(MACVNC_ENABLE_TEST_HOOKS)
 #include <stdbool.h>
+/* Exposes the core's own capture decision so the "no permission, no capture"
+   rule can be asserted without a real TCC grant. */
+bool macVNCCaptureIsAllowedForTesting(void);
+
 bool macVNCServerHasLifecycleResourcesForTesting(void);
 #endif
