@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.56 LANGUAGES C)
+project(macVNC VERSION 0.3.57 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -345,6 +345,9 @@ if(BUILD_TESTING)
         ${APPKIT_LIBRARY}
     )
     add_test(NAME server_init_failure COMMAND test_server_init_failure)
+    # The test exits 77 when no display is attached (headless CI, closed lid);
+    # without this that self-declared SKIP counts as a hard failure.
+    set_tests_properties(server_init_failure PROPERTIES SKIP_RETURN_CODE 77)
 
     add_executable(test_capture_gate
         tests/test_capture_gate.m

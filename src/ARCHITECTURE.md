@@ -50,7 +50,7 @@ server, and would make the "no permission, no capture" rule untestable.
 
 ## Module responsibilities
 
-Pure C (each with a `tests/test_*.c`):
+Pure C (each with a `tests/test_*.c` wired into `ctest`):
 - **DisplayLayout** — build a non-overlapping composite layout; map a
   framebuffer point back to a global display coordinate.
 - **DisplaySelection** — which attached displays a run captures (all / primary /
@@ -113,18 +113,53 @@ Objective-C glue:
   server-core globals for geometry.
 - `macVNCScreenCaptureFailureHandler` — function pointer so the core reports
   capture failures without depending on AppKit/UI.
+- `macVNCCaptureAllowed` — the core asks whether it may touch capture and never
+  reads TCC itself.
 - `FrameMailbox` / `CompositeFramebuffer` callbacks — producers are agnostic to
   how frames are freed and how dirty regions are consumed.
 
+## Tests
+
+`ctest` runs 25 targets (`ctest -E client_allowlist`; that one is unreliable on
+some hosts because `lsof` can hang). Every assertion added here is checked by
+mutating the source and confirming the test goes red — a green test proves
+nothing until it has been seen to fail. Test targets get `-UNDEBUG`
+automatically, and the build **fails** if one would run with asserts disabled:
+a hand-maintained list once shipped a test that printed "all assertions passed"
+while checking nothing.
+
+`tests/*.py` are end-to-end scripts driven by hand (they need a live server, a
+real client and a granted permission). They are **not** part of `ctest` and
+must not be counted as automated coverage.
+
 ## Concurrency model
 
-- `serverLifecycleMutex` serialises start/stop; `compositorMutex` guards the
-  shared canvas; `clientLifecycleMutex` guards per-client state and the
-  connected-client count; `vncConnectedClients` / `publishedServerPort` are
-  `_Atomic`.
+- `serverLifecycleMutex` serialises start/stop; `compositorMutex` (owned by
+  **MacVNCCompositor**) guards the shared canvas; `clientLifecycleMutex` guards
+  per-client state and the connected-client count; `vncConnectedClients` /
+  `publishedServerPort` are `_Atomic`.
+- **MacVNCCaptureSession** holds no lock of its own. Its set is mutated only
+  under `serverLifecycleMutex` at points where no client thread is running, and
+  merely read from client threads; see the header for the invariant that makes
+  this sound.
+- `captureControlMutex` serialises capture start/stop and is **never** held
+  together with `clientLifecycleMutex`, so no order can arise between them.
+  Captures run iff `vncConnectedClients > 0`; both the connect and disconnect
+  paths call `reconcileCaptureState()` after updating the count and after
+  dropping the client lock, because stopping waits (bounded) for in-flight
+  ScreenCaptureKit work and holding the client lock across that would stall a
+  reconnect.
 - **Lock order:** `compositorMutex` → per-client `sendMutex`
   (`lockCurrentClients` retains each client so it can't be freed mid-composite).
   `clientLifecycleMutex` is never taken while holding the compositor lock.
+- **Screen publication:** `rfbScreen` is set to NULL *before* `rfbScreenCleanup`,
+  because the capture stop is deliberately bounded and a late frame must see
+  NULL rather than a freed pointer.
+- **Main-thread rule:** every server query the menu timer makes
+  (`vncServerCopyActiveBindAddress`, `vncServerActivePolicyAllowsEveryone`,
+  `vncServerActiveAccessMode`, `vncServerCloseListeners`) takes the lifecycle
+  lock with `trylock` and returns the safe answer when it is busy. Blocking
+  would freeze the menu bar behind a stop that is waiting on capture.
 - **Teardown ordering** (`vncServerStopLocked`): `rfbShutdownServer(TRUE)` joins
   every client thread **before** capturers stop and before `macVNCInputShutdown`
   clears the injected context — so input/compositing callbacks can never touch

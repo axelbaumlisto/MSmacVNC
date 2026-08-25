@@ -97,6 +97,10 @@ static _Atomic int publishedServerPort = -1;
 static _Atomic uint64_t serverGeneration = 0;
 static pthread_mutex_t serverLifecycleMutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t clientLifecycleMutex = PTHREAD_MUTEX_INITIALIZER;
+/* Serialises capture start/stop ONLY. Never held together with
+   clientLifecycleMutex, so no lock-order relation can arise between them. */
+static pthread_mutex_t captureControlMutex = PTHREAD_MUTEX_INITIALIZER;
+static bool gCapturesRunning = false;
 
 typedef struct {
     rfbBool captureCounted;
@@ -124,7 +128,10 @@ readAttachedDisplays(MacVNCDisplayInput *displays, size_t *count, int *primaryIn
 
   macVNCWakeDisplays();
   for (int attempt = 0; attempt < 20; ++attempt) {
-      CGGetActiveDisplayList(MACVNC_MAX_DISPLAYS, ids, &reported);
+      /* Ask for the TOTAL first (NULL list), not just what fits: filling a
+         16-slot array caps the answer at 16, which would silently drop the
+         17th display instead of reporting an unsupported configuration. */
+      CGGetActiveDisplayList(0, NULL, &reported);
       if (reported > 0)
           break;
       macVNCWakeDisplays();
@@ -132,6 +139,11 @@ readAttachedDisplays(MacVNCDisplayInput *displays, size_t *count, int *primaryIn
   }
   if (reported == 0 || reported > MACVNC_MAX_DISPLAYS) {
       rfbErr("Unsupported active display count: %u\n", reported);
+      return FALSE;
+  }
+  if (CGGetActiveDisplayList(MACVNC_MAX_DISPLAYS, ids, &reported) != kCGErrorSuccess ||
+      reported == 0 || reported > MACVNC_MAX_DISPLAYS) {
+      rfbErr("Could not enumerate %u active displays\n", reported);
       return FALSE;
   }
 
@@ -404,6 +416,47 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
 }
 
 
+/*
+ * Drives captures to match the one invariant that matters: they run if and only
+ * if at least one authenticated client is connected.
+ *
+ * Both the connect and disconnect paths call this AFTER updating the count and
+ * AFTER releasing clientLifecycleMutex - stopping can wait seconds for
+ * in-flight ScreenCaptureKit work, and holding the client lock across that
+ * would stall every other client thread, including a reconnect.
+ *
+ * Serialised on its own lock and re-reading the atomic count, so a disconnect
+ * racing a reconnect cannot leave captures stopped while a client is watching:
+ * whichever call takes the lock last applies the settled count.
+ */
+static void reconcileCaptureState(void)
+{
+    pthread_mutex_lock(&captureControlMutex);
+    bool wanted = atomic_load(&vncConnectedClients) > 0;
+    if (wanted && !gCapturesRunning) {
+        if (captureIsAllowed()) {
+            macVNCCaptureSessionStart();
+            gCapturesRunning = true;
+            rfbLog("Client connected; starting %lu display captures\n",
+                   (unsigned long)macVNCCaptureSessionCount());
+        } else {
+            /* Never touch capture without the permission: doing so is what
+               makes macOS raise its own dialog. The decision belongs to the
+               permission owner, injected via macVNCCaptureAllowed. */
+            rfbLog("Screen Recording is not granted; refusing to start capture\n");
+            if (macVNCScreenCaptureFailureHandler)
+                macVNCScreenCaptureFailureHandler(true, vncServerCurrentGeneration());
+        }
+    } else if (!wanted && gCapturesRunning) {
+        gCapturesRunning = false;
+        macVNCCaptureSessionStopAndWait();
+        macVNCInputResetModifiers();
+        rfbLog("Last authenticated client disconnected; %lu display captures stopped and modifiers reset\n",
+               (unsigned long)macVNCCaptureSessionCount());
+    }
+    pthread_mutex_unlock(&captureControlMutex);
+}
+
 static BOOL
 prepareAuthenticatedClient(rfbClientPtr cl)
 {
@@ -414,27 +467,17 @@ prepareAuthenticatedClient(rfbClientPtr cl)
         pthread_mutex_unlock(&clientLifecycleMutex);
         return NO;
     }
+    bool counted = false;
     if (!state->captureCounted) {
         state->captureCounted = TRUE;
-        int previous = atomic_fetch_add(&vncConnectedClients, 1);
-        if (previous == 0) {
-            /* Never touch capture without the permission: doing so is what
-               makes macOS raise its own dialog. The decision belongs to the
-               permission owner, injected via macVNCCaptureAllowed, so this
-               core file neither reads TCC nor depends on AppKit for it. */
-            if (!captureIsAllowed()) {
-                rfbLog("Screen Recording is not granted; refusing to start capture\n");
-                if (macVNCScreenCaptureFailureHandler)
-                    macVNCScreenCaptureFailureHandler(true, vncServerCurrentGeneration());
-            } else {
-                macVNCCaptureSessionStart();
-                rfbLog("First client password accepted; starting %lu display captures\n",
-                       (unsigned long)macVNCCaptureSessionCount());
-            }
-        }
+        atomic_fetch_add(&vncConnectedClients, 1);
+        counted = true;
     }
     BOOL alreadyReady = macVNCReadinessIsReady(&state->readiness);
     pthread_mutex_unlock(&clientLifecycleMutex);
+
+    if (counted)
+        reconcileCaptureState();
 
     BOOL allReady = alreadyReady;
     if (!alreadyReady) {
@@ -486,18 +529,15 @@ displayHook(rfbClientPtr cl)
 
 static void clientGone(rfbClientPtr cl)
 {
+    int remaining;
+
     pthread_mutex_lock(&clientLifecycleMutex);
     MacVNCClientState *state = cl->clientData;
-    int remaining;
     if (state && state->captureCounted) {
         remaining = atomic_fetch_sub(&vncConnectedClients, 1) - 1;
         if (remaining <= 0) {
             remaining = 0;
             atomic_store(&vncConnectedClients, 0);
-            macVNCCaptureSessionStopAndWait();
-            macVNCInputResetModifiers();
-            rfbLog("Last authenticated client disconnected; %lu display captures stopped and modifiers reset\n",
-                   (unsigned long)macVNCCaptureSessionCount());
         }
     } else {
         /* Un-counted client (never authenticated): report the current count. */
@@ -506,6 +546,8 @@ static void clientGone(rfbClientPtr cl)
     cl->clientData = NULL;
     free(state);
     pthread_mutex_unlock(&clientLifecycleMutex);
+
+    reconcileCaptureState();
     rfbLog("Client %s disconnected (%d authenticated remaining)\n", cl->host, remaining);
 }
 
@@ -554,12 +596,21 @@ vncServerStopLocked(void)
         rfbShutdownServer(rfbScreen, TRUE);
     rfbServerInitialized = FALSE;
 
+    pthread_mutex_lock(&captureControlMutex);
+    gCapturesRunning = false;
+    pthread_mutex_unlock(&captureControlMutex);
     macVNCCaptureSessionStopAndWait();
     macVNCCaptureSessionReset();
     atomic_store(&vncConnectedClients, 0);
     if (rfbScreen) {
-        rfbScreenCleanup(rfbScreen);
+        /* Publish NULL BEFORE freeing, not after: the capture stop above is
+           bounded (5s, so a prompt cannot hang shutdown), so a late frame can
+           still arrive. macVNCCompositorSubmitFrame() rejects a NULL screen, but
+           between rfbScreenCleanup() and the assignment the global would point
+           at freed memory and pass that guard. */
+        rfbScreenInfoPtr dying = rfbScreen;
         rfbScreen = NULL;
+        rfbScreenCleanup(dying);
     }
     dimmingShutdown();
     macVNCReleaseDisplayAssertion();
@@ -679,7 +730,13 @@ vncServerCopyActiveBindAddress(char *bindAddress, size_t size)
         return FALSE;
     if (atomic_load_explicit(&publishedServerPort, memory_order_acquire) <= 0)
         return FALSE;
-    pthread_mutex_lock(&serverLifecycleMutex);
+    /* Never BLOCK: this is called by the menu-refresh timer on the main thread,
+       and the lifecycle lock can be held by a stop that is waiting on capture
+       work. Blocking here would freeze the menu bar - the exact failure the
+       relaunch path already guards against. A busy lock means the server is
+       being reconfigured, so there is no stable address to report yet. */
+    if (pthread_mutex_trylock(&serverLifecycleMutex) != 0)
+        return FALSE;
     snprintf(bindAddress, size, "%s", macVNCListenAddress);
     pthread_mutex_unlock(&serverLifecycleMutex);
     return TRUE;
@@ -688,7 +745,9 @@ vncServerCopyActiveBindAddress(char *bindAddress, size_t size)
 MacVNCClientAccessMode
 vncServerActiveAccessMode(void)
 {
-    pthread_mutex_lock(&serverLifecycleMutex);
+    /* Same main-thread rule as above; fail-closed is the safe fallback. */
+    if (pthread_mutex_trylock(&serverLifecycleMutex) != 0)
+        return MACVNC_CLIENT_ACCESS_FAIL_CLOSED;
     MacVNCClientAccessMode mode = macVNCClientAccessMode;
     pthread_mutex_unlock(&serverLifecycleMutex);
     return mode;
@@ -703,7 +762,12 @@ vncServerCurrentGeneration(void)
 rfbBool
 vncServerActivePolicyAllowsEveryone(void)
 {
-    pthread_mutex_lock(&serverLifecycleMutex);
+    /* Main-thread caller (menu refresh): must not block on a stop in progress.
+       Report the SAFE answer when the lock is busy - claiming "allow all" that
+       is not in effect would be a security-relevant lie, and the next refresh
+       a second later will read the settled value. */
+    if (pthread_mutex_trylock(&serverLifecycleMutex) != 0)
+        return FALSE;
     /* An ALLOW_LIST that contains a /0 entry admits everyone just as surely as
        an explicitly confirmed allow-all — report the effect, not the label. */
     rfbBool everyone =

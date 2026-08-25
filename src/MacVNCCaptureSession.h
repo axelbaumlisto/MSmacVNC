@@ -15,8 +15,19 @@
  * time. Collecting it here means the empty case (a run with no capturers) and
  * the shared readiness budget are written once instead of per call site.
  *
- * Not thread-safe by itself: the caller serialises access, as mac.m does under
- * its client-lifecycle lock.
+ * Threading, as actually used by mac.m - the array is NOT mutex-protected, and
+ * that is only sound because of when each operation runs:
+ *
+ *  - Reset/Add mutate the set. Both run under serverLifecycleMutex, in
+ *    ScreenInit or vncServerStopLocked, at a point where no client thread
+ *    exists yet or all have been joined by rfbShutdownServer(screen, TRUE).
+ *  - Start, StopAndWait, WaitForFirstFrames, AllReady and Count only READ the
+ *    array (they message the capturers, which are individually thread-safe).
+ *    These do run on client threads.
+ *
+ * So a reader never overlaps a writer. Adding a call to Reset or Add from a
+ * client thread, or stopping the server without joining clients first, breaks
+ * that invariant and needs a lock here.
  */
 
 /* Replaces the current set; releases any previous capturers. */
