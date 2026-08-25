@@ -14,6 +14,15 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)startCapture;
 - (void)stopCaptureAndWait;
+
+/*
+ * NO when a stop timed out with capture work still in flight. Such a capturer
+ * must NOT be released: freeing its queues and frame mailbox would be a
+ * use-after-free from the callback that is still running. The owner keeps it
+ * alive instead - a deliberate leak on an already-degraded shutdown, which is
+ * cheaper than a crash and than the unbounded wait it replaced.
+ */
+- (BOOL)isSafeToDeallocate;
 - (BOOL)waitForFirstFrameWithTimeout:(NSTimeInterval)timeout;
 - (BOOL)isCurrentGenerationReady;
 

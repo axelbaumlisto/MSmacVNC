@@ -63,18 +63,6 @@ NSString *macVNCPermissionStatusText(MacVNCPermissionStatus status)
     return @"Unknown";
 }
 
-static _Atomic BOOL gScreenCaptureWorking = NO;
-
-void macVNCNoteScreenCaptureWorking(void)
-{
-    atomic_store(&gScreenCaptureWorking, YES);
-}
-
-BOOL macVNCScreenCaptureWorking(void)
-{
-    return atomic_load(&gScreenCaptureWorking);
-}
-
 MacVNCPermissionStatus macVNCCheckPermission(MacVNCPermissionKind kind)
 {
     switch (kind) {

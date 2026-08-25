@@ -9,8 +9,16 @@ static MacVNCStartOutcome outcome(BOOL started, BOOL configError, BOOL granted)
 {
     MacVNCStartOutcome o;
     o.started = started;
+    o.alreadyRunning = NO;
     o.hasConfigurationError = configError;
     o.permissionsGranted = granted;
+    return o;
+}
+
+static MacVNCStartOutcome alreadyRunning(BOOL granted)
+{
+    MacVNCStartOutcome o = outcome(NO, NO, granted);
+    o.alreadyRunning = YES;
     return o;
 }
 
@@ -35,6 +43,12 @@ int main(void)
            port alert here would be wrong AND would stack over the panel the
            user has to act on. */
         assert(macVNCResolveStartAdvice(outcome(NO, NO, NO)) == MacVNCStartAdviceNone);
+
+        /* Already running is NOT a failure: telling the user to change the port
+           while the server is serving on the current one is worse than silence.
+           Reached by pressing "Start Server" twice. */
+        assert(macVNCResolveStartAdvice(alreadyRunning(YES)) == MacVNCStartAdviceNone);
+        assert(macVNCResolveStartAdvice(alreadyRunning(NO))  == MacVNCStartAdviceNone);
 
         /* Only the fixed-text advice carries its own copy. */
         assert(macVNCStartAdviceTitle(MacVNCStartAdvicePortInUse).length > 0);
