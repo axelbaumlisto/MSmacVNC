@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.52 LANGUAGES C)
+project(macVNC VERSION 0.3.53 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -320,7 +320,43 @@ if(BUILD_TESTING)
         ${APPKIT_LIBRARY}
     )
     add_test(NAME server_init_failure COMMAND test_server_init_failure)
-    set_tests_properties(server_init_failure PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_executable(test_capture_gate
+        tests/test_capture_gate.m
+        src/mac.m
+        src/RFBKeySym.c
+        src/DisplayLayout.c
+        src/DisplaySelection.c
+        src/CompositeFramebuffer.c
+        src/MacVNCCompositor.m
+        src/PointerState.c
+        src/KeyboardModifierState.c
+        src/CaptureRate.c
+        src/FrameMailbox.c
+        src/ReadinessPolicy.c
+        src/NetworkAccess.c
+        src/NetworkCIDR.c
+        src/NetworkInventory.c
+        src/NetworkPolicyResolver.c
+        src/MacVNCDisplayWake.m
+        src/MacVNCPowerMgmt.m
+        src/MacVNCInput.m
+        src/ScreenCapturer.m
+    )
+    target_include_directories(test_capture_gate PRIVATE src)
+    target_compile_definitions(test_capture_gate PRIVATE MACVNC_ENABLE_TEST_HOOKS=1)
+    target_link_libraries(test_capture_gate
+        LibVNCServer::vncserver
+        ${CMAKE_THREAD_LIBS_INIT}
+        ${CARBON_LIBRARY}
+        ${IOKIT_LIBRARY}
+        ${SCREEN_CAPTURE_KIT}
+        ${CORE_MEDIA}
+        ${CORE_VIDEO}
+        ${FOUNDATION}
+        ${APPKIT_LIBRARY}
+    )
+    add_test(NAME capture_gate COMMAND test_capture_gate)
 
     add_test(NAME client_allowlist
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_client_allowlist.py
