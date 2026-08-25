@@ -4,10 +4,24 @@
 <dict>
     <!--
       macVNC bundles Homebrew dylibs (libvncserver, OpenSSL libssl/libcrypto,
-      libjpeg, libpng). Under Developer ID hardened runtime, library validation
-      rejects these third-party-signed dylibs, which breaks libvncserver's
-      OpenSSL-backed VNC DES password check (observed as "password check failed").
-      Disabling library validation lets the notarized app load the bundled libs.
+      libjpeg, libpng) under Contents/Frameworks. Under Developer ID hardened
+      runtime, library validation breaks libvncserver's OpenSSL-backed VNC DES
+      password check (observed as "password check failed" / INIT_FAILED).
+
+      VERIFIED EMPIRICALLY (A/B on one and the same bundle, re-signed twice):
+        without this entitlement -> INIT_FAILED, server log:
+            "rfbAuthProcessClientMessage: password check failed"
+        with this entitlement    -> AUTH_OK
+      This holds EVEN THOUGH make_release.sh re-signs every bundled dylib with
+      our own Developer ID (TeamIdentifier=GZL949D756 on all five), so the
+      common assumption "sign the dylibs with the same team and the entitlement
+      becomes unnecessary" is FALSE here. Do not remove it without re-running
+      that A/B test with the reference libvncclient (vncdotool reports a false
+      AUTH OK and must not be used to validate this).
+
+      Residual risk accepted: an attacker who can already write into the
+      installed bundle could substitute a dylib. Mitigation is bundle integrity
+      (install location permissions), not this flag.
     -->
     <key>com.apple.security.cs.disable-library-validation</key>
     <true/>
