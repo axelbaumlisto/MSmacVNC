@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.23 LANGUAGES C)
+project(macVNC VERSION 0.3.48 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -81,6 +81,9 @@ set(SOURCE_FILES
     src/MacVNCPreferences.m
     src/MacVNCPermissions.h
     src/MacVNCPermissions.m
+    src/MacVNCPermissionUI.m
+    src/MacVNCRelauncher.h
+    src/MacVNCRelauncher.m
     src/MacVNCPassword.h
     src/MacVNCPassword.m
     src/MacVNCPermissionsPanel.h
@@ -205,8 +208,19 @@ if(BUILD_TESTING)
 
     add_executable(test_permissions tests/test_permissions.m src/MacVNCPermissions.m)
     target_include_directories(test_permissions PRIVATE src)
-    target_link_libraries(test_permissions ${FOUNDATION} ${APPKIT_LIBRARY} ${APPLICATION_SERVICES})
+    target_link_libraries(test_permissions ${FOUNDATION} ${APPKIT_LIBRARY} ${APPLICATION_SERVICES} ${SCREEN_CAPTURE_KIT} ${CORE_GRAPHICS})
     add_test(NAME permissions COMMAND test_permissions)
+
+    add_executable(test_permission_ui
+        tests/test_permission_ui.m
+        src/MacVNCPermissionUI.m
+    src/MacVNCRelauncher.h
+    src/MacVNCRelauncher.m
+        src/MacVNCPermissions.m)
+    target_include_directories(test_permission_ui PRIVATE src)
+    target_link_libraries(test_permission_ui ${FOUNDATION} ${APPKIT_LIBRARY}
+        ${APPLICATION_SERVICES} ${SCREEN_CAPTURE_KIT} ${CORE_GRAPHICS})
+    add_test(NAME permission_ui COMMAND test_permission_ui)
 
     add_executable(test_listen_mode tests/test_listen_mode.m src/MacVNCListenMode.m)
     target_include_directories(test_listen_mode PRIVATE src)
@@ -294,7 +308,23 @@ if(BUILD_TESTING)
                 --app $<TARGET_FILE:${PROJECT_NAME}>
     )
 
-    foreach(test_target test_keysym test_display_layout test_compositor test_pointer_state test_keyboard_modifiers test_capture_rate test_frame_mailbox test_readiness_policy test_network_access test_network_cidr test_network_inventory test_network_policy_resolver test_permissions test_listen_mode test_startup_config test_input_context test_server_init_failure)
-        target_compile_options(${test_target} PRIVATE -UNDEBUG)
+    # Every C/ObjC test target must keep its asserts. Enumerated automatically:
+    # a hand-maintained list silently shipped a test whose asserts were compiled
+    # out by NDEBUG, so it printed "all assertions passed" while checking nothing.
+    get_property(_all_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(test_target ${_all_targets})
+        if(test_target MATCHES "^test_")
+            target_compile_options(${test_target} PRIVATE -UNDEBUG)
+        endif()
+    endforeach()
+
+    # Fail the build if a test target somehow still has NDEBUG defined.
+    foreach(test_target ${_all_targets})
+        if(test_target MATCHES "^test_")
+            get_target_property(_opts ${test_target} COMPILE_OPTIONS)
+            if(NOT _opts MATCHES "-UNDEBUG")
+                message(FATAL_ERROR "${test_target} would run with asserts disabled")
+            endif()
+        endif()
     endforeach()
 endif()

@@ -2,6 +2,7 @@
 #import "ReadinessPolicy.h"
 #import "FrameMailbox.h"
 #include <pthread.h>
+#include <unistd.h>
 #include <errno.h>
 #include <math.h>
 #include <stdatomic.h>
@@ -233,8 +234,19 @@ static void endMailboxActivity(void *context)
         }];
     }
     /* Covers discovery/start/mailbox work, definitive stream stop, and every
-       sample callback admitted to the owned serial queue before stop completed. */
-    dispatch_group_wait(self.operationGroup, DISPATCH_TIME_FOREVER);
+       sample callback admitted to the owned serial queue before stop completed.
+
+       BOUNDED on purpose: SCShareableContent discovery can stay pending behind a
+       system "wants to record this screen" prompt. An unbounded wait here would
+       hang whichever thread called stop — including the main thread on the
+       permission-failure and quit paths — leaving the menu bar (and the recovery
+       affordances in it) permanently unresponsive. */
+    if (dispatch_group_wait(self.operationGroup,
+                            dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0) {
+        NSLog(@"macVNC: capture stop timed out waiting for in-flight "
+              @"ScreenCaptureKit work (display %u); continuing shutdown",
+              self.displayID);
+    }
     [stream release];
 }
 
@@ -272,28 +284,30 @@ static void endMailboxActivity(void *context)
                     self.stream == (SCStream *)item.stream;
         });
         if (valid) {
-            /* The handler may decline the frame (compositor could not take every
-               client's send lock right now). Dropping it would lose those pixels
-               until the screen changes again — on a screen that then goes static
-               the loss is permanent. So re-submit and retry shortly instead. */
+            /* The handler may decline the frame when the compositor cannot take
+               every client's send lock right now. Simply dropping it would lose
+               those pixels until the screen changes again — and if the screen
+               then goes static, permanently. Retry briefly, bounded, right here.
+
+               Bounded is essential: an unbounded wait would recreate the very
+               deadlock the non-blocking lock was introduced to fix (a client
+               thread can hold its send lock while waiting on the client
+               lifecycle mutex that a stopping capture holds). The mailbox
+               coalesces any newer frame meanwhile, so nothing queues up. */
+            static const int kMaxComposeAttempts = 12;   /* ~120 ms total */
+            static const useconds_t kComposeRetryUs = 10000;
             BOOL composited = self.frameHandler((CMSampleBufferRef)item.frame);
+            for (int attempt = 1; !composited && attempt < kMaxComposeAttempts; ++attempt) {
+                usleep(kComposeRetryUs);
+                composited = self.frameHandler((CMSampleBufferRef)item.frame);
+            }
             if (!composited) {
-                if (macVNCFrameMailboxSubmit(&_frameMailbox, item.frame,
-                                             item.stream, item.generation)) {
-                    /* We now own a scheduling reference again; run the next drain
-                       after a short delay so the busy client can finish sending. */
-                    __block ScreenCapturer *strongSelf = [self retain];
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_MSEC),
-                                   self.frameQueue, ^{
-                        [strongSelf drainFrameMailbox];
-                        [strongSelf release];
-                    });
-                }
-                /* Submit consumed our reference on success; on failure the mailbox
-                   released it. Either way we must not release it again here. */
+                /* Give up on this frame: a client has been mid-send for >100 ms.
+                   Do NOT mark readiness — nothing was drawn for this generation. */
+                CFRelease(item.frame);
                 if (!macVNCFrameMailboxEndDrainIteration(&_frameMailbox))
                     return;
-                return;
+                continue;
             }
             /* Ready means the generation's frame has finished composition. */
             dispatch_sync(self.stateQueue, ^{

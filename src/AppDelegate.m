@@ -1,6 +1,8 @@
 #import "AppDelegate.h"
 #import "mac.h"
 #import "MacVNCPermissions.h"
+#import "MacVNCPermissionUI.h"
+#import "MacVNCRelauncher.h"
 #import "MacVNCPermissionsPanel.h"
 #import "MacVNCPreferences.h"
 #import "MacVNCDefaultsKeys.h"
@@ -26,13 +28,26 @@ static BOOL macVNCAllowsTestPermissionGateBypass(void)
 @property (nonatomic, strong) NSMenuItem    *statusMenuItem;
 @property (nonatomic, strong) NSMenuItem    *clientsMenuItem;
 @property (nonatomic, strong) NSMenuItem    *loginItemMenuItem;
+@property (nonatomic, strong) NSMenuItem    *screenPermissionMenuItem;
+@property (nonatomic, strong) NSMenuItem    *accessibilityPermissionMenuItem;
 @property (nonatomic, strong) NSTimer       *updateTimer;
 @property (nonatomic, assign) BOOL           permissionsPanelVisible;
+@property (nonatomic, retain) MacVNCPermissionsPanelController *permissionsPanel;
+@property (nonatomic, assign) BOOL           relaunchScheduled;
 
 @end
 
 
 static AppDelegate *gSharedAppDelegate = nil;
+
+/* First delivered frame: Screen Recording is proven to work in this process. */
+static void macVNCScreenCaptureWorking_(void)
+{
+    macVNCNoteScreenCaptureWorking();
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [gSharedAppDelegate captureBecameWorking];
+    });
+}
 
 static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t generation)
 {
@@ -52,22 +67,37 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
 {
     gSharedAppDelegate = self;
     macVNCScreenCaptureFailureHandler = macVNCScreenCaptureFailed;
+    macVNCScreenCaptureWorkingHandler = macVNCScreenCaptureWorking_;
     [self registerDefaults];
     [self setupStatusBarItem];
+
+
+    /* Register macVNC in Privacy > Accessibility WITHOUT a system dialog.
+       prompt=NO adds the row but shows nothing (the clipshot technique). */
+    NSDictionary *axOptions = @{(__bridge id)kAXTrustedCheckOptionPrompt: @NO};
+    AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)axOptions);
+
+
     [self startServerIfPermitted];
 
     /* Poll every 2 s to refresh client-count in the menu. */
-    self.updateTimer = [NSTimer scheduledTimerWithTimeInterval:2.0
+    /* Common modes, not the default mode only: +scheduledTimer… registers in the
+       default mode, which stops running while a menu is being tracked — so the
+       rows froze exactly while the user was reading them. */
+    self.updateTimer = [NSTimer timerWithTimeInterval:2.0
                                                         target:self
                                                       selector:@selector(updateMenuStatus)
                                                       userInfo:nil
                                                        repeats:YES];
+    [[NSRunLoop currentRunLoop] addTimer:self.updateTimer forMode:NSRunLoopCommonModes];
 }
 
 - (void)applicationWillTerminate:(NSNotification *)aNotification
 {
     [self.updateTimer invalidate];
     self.updateTimer = nil;
+
+
     vncServerStop();
 }
 
@@ -78,6 +108,9 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
     [_statusMenuItem release];
     [_clientsMenuItem release];
     [_loginItemMenuItem release];
+    [_permissionsPanel release];
+    [_screenPermissionMenuItem release];
+    [_accessibilityPermissionMenuItem release];
     [_updateTimer release];
     if (gSharedAppDelegate == self)
         gSharedAppDelegate = nil;
@@ -130,6 +163,9 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
 - (void)buildMenu
 {
     NSMenu *menu = [[[NSMenu alloc] init] autorelease];
+    /* We set item.enabled ourselves; with the default YES AppKit would recompute
+       enablement from the responder chain and could grey out our rows. */
+    menu.autoenablesItems = NO;
 
     /* Title row */
     NSMenuItem *titleItem = [[[NSMenuItem alloc] initWithTitle:@"macVNC"
@@ -156,6 +192,26 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
     self.clientsMenuItem.enabled = NO;
     [menu addItem:self.clientsMenuItem];
 
+    /* Permission rows — the menu-bar equivalent of clipshot's banner.
+
+       An accessory app has no window to host a banner, so the menu is the only
+       always-reachable surface. Both rows are driven by the SAME resolver that
+       renders the panel, so the two surfaces cannot disagree. They stay hidden
+       while everything is granted (clipshot returns null in that case). */
+    self.screenPermissionMenuItem =
+        [[[NSMenuItem alloc] initWithTitle:@""
+                                    action:@selector(openScreenRecordingSettings:)
+                             keyEquivalent:@""] autorelease];
+    self.screenPermissionMenuItem.target = self;
+    [menu addItem:self.screenPermissionMenuItem];
+
+    self.accessibilityPermissionMenuItem =
+        [[[NSMenuItem alloc] initWithTitle:@""
+                                    action:@selector(openAccessibilitySettings:)
+                             keyEquivalent:@""] autorelease];
+    self.accessibilityPermissionMenuItem.target = self;
+    [menu addItem:self.accessibilityPermissionMenuItem];
+
     [menu addItem:[NSMenuItem separatorItem]];
 
     /* Copy address */
@@ -173,6 +229,12 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
                                                  keyEquivalent:@""] autorelease];
     startItem.target = self;
     [menu addItem:startItem];
+
+    NSMenuItem *permsItem = [[[NSMenuItem alloc] initWithTitle:@"Permissions…"
+                                                        action:@selector(showPermissionsPanel)
+                                                 keyEquivalent:@""] autorelease];
+    permsItem.target = self;
+    [menu addItem:permsItem];
 
     NSMenuItem *prefsItem = [[[NSMenuItem alloc] initWithTitle:@"Preferences…"
                                                         action:@selector(openPreferences:)
@@ -209,78 +271,150 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
 
 - (void)relaunchApplication
 {
-    NSString *bundlePath = NSBundle.mainBundle.bundlePath;
-    if (bundlePath.length > 0) {
-        /* Wait for THIS process to exit, then open exactly one new instance.
-           Using a pid wait avoids ending up with two running macVNC processes. */
-        pid_t pid = getpid();
-        NSString *script = [NSString stringWithFormat:
-            @"while kill -0 %d 2>/dev/null; do sleep 0.2; done; /usr/bin/open %@",
-            pid, [self shellQuote:bundlePath]];
-        NSTask *task = [[[NSTask alloc] init] autorelease];
-        task.launchPath = @"/bin/sh";
-        task.arguments = @[@"-c", script];
-        @try {
-            [task launch];
-        } @catch (NSException *exception) {
-            NSLog(@"Could not relaunch macVNC: %@", exception.reason);
-        }
+    [self scheduleRelaunchHelper];
+
+    /* Only quit if a successor was actually started. If the spawn failed there
+       would be no new process and no old one either — and this is an accessory
+       app with no Dock icon, so the user would be left with nothing on screen
+       and no way back. Keep running and re-present the gate instead. */
+    if (!self.relaunchScheduled) {
+        [self showPermissionsPanel];
+        return;
     }
-    [NSApp terminate:nil];
+
+    /* Quit on the NEXT runloop turn, so AppKit finishes delivering the action
+       that got us here before the process goes away. */
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [NSApp terminate:nil];
+    });
 }
 
-- (NSString *)shellQuote:(NSString *)path
+- (void)scheduleRelaunchHelper
 {
-    return [NSString stringWithFormat:@"'%@'",
-            [path stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]];
+    if (self.relaunchScheduled)
+        return;
+
+    self.relaunchScheduled =
+        [MacVNCRelauncher relaunchClosingListeners:^{ vncServerCloseListeners(); }];
+
+    if (!self.relaunchScheduled) {
+        /* No successor, and the listeners are already gone: stop the server so
+           its state matches reality instead of advertising a dead port. */
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            vncServerStop();
+        });
+    }
 }
 
 - (void)startServerIfPermitted
 {
-    if (macVNCPermissionsAllGranted() || macVNCAllowsTestPermissionGateBypass()) {
+    if (macVNCAllowsTestPermissionGateBypass()) {
         [self startServer];
         return;
     }
-    [self showPermissionsPanel];
+
+    /* Both permissions must be readable WITHOUT prompting, and both must be in
+       place before the server opens its port.
+
+       Screen Recording is read with CGPreflightScreenCaptureAccess(), which
+       never prompts and — measured from a GUI launch — answers YES when granted
+       and NO otherwise. Never probe with SCShareableContent/SCStream here: in
+       the not-determined state (fresh install, or right after tccutil reset)
+       those raise macOS's own "macVNC wants to record this screen" dialog.
+
+       Gating on Accessibility alone was not enough: the server would start with
+       Screen Recording still undecided, and the first client to connect would
+       reach the capture path and trigger exactly that dialog — on the most
+       common fresh-install route, where the user grants Accessibility and has
+       not yet added macVNC with "+". */
+    /* One snapshot, one decision, and the SAME decision the UI renders: the
+       resolver already answers "must the gate be shown?", and having production
+       re-derive it by hand is how the gate and the panel drifted apart before.
+       shouldShowPanel was previously asserted only in tests — now it is the
+       actual control flow. */
+    MacVNCPermissionUIInput input = macVNCSamplePermissionUIInput(vncServerGetPort() > 0);
+    MacVNCPermissionUIState *ui = macVNCResolvePermissionUI(input);
+
+    if (ui.shouldStartServer)
+        [self startServer];
+    else if (ui.shouldShowPanel)
+        [self showPermissionsPanel];
+}
+
+- (void)openScreenRecordingSettings:(id)sender
+{
+    (void)sender;
+    macVNCOpenPermissionSettings(MacVNCPermissionKindScreenRecording);
+}
+
+- (void)openAccessibilitySettings:(id)sender
+{
+    (void)sender;
+    macVNCOpenPermissionSettings(MacVNCPermissionKindAccessibility);
 }
 
 - (void)startServerFromMenu:(id)sender
 {
     if (vncServerGetPort() > 0)
         return; /* already running */
-    /* Re-check permissions from scratch: a stale capture-failure latch must not
-       block a manual restart after the user fixed things in System Settings. */
-    macVNCResetScreenCaptureFailure();
     [self startServerIfPermitted];
+}
+
+- (void)captureBecameWorking
+{
+    /* Proof arrived: Screen Recording really is granted to this process. The
+       chip flips to Granted on the next refresh; update the menu right away so
+       it cannot keep claiming a permission problem while frames are flowing. */
+    [self updateMenuStatus];
 }
 
 - (void)showPermissionsPanel
 {
-    if (self.permissionsPanelVisible)
+    if (self.permissionsPanel) {
+        /* Already up — re-front it instead of refusing. An accessory app has no
+           Dock icon, so a buried panel would otherwise be unreachable. */
+        [self.permissionsPanel bringToFront];
         return;
-    self.permissionsPanelVisible = YES;
-    self.statusMenuItem.title = @"Not running  •  permissions required";
-
-    MacVNCPermissionsPanelController *controller = [[MacVNCPermissionsPanelController alloc] init];
-    MacVNCPermissionPanelAction action = [controller runModal];
-    [controller release];
-    self.permissionsPanelVisible = NO;
-
-    if (action == MacVNCPermissionPanelActionStart) {
-        if (macVNCPermissionsAllGranted())
-            [self startServer];
-        else
-            [self showPermissionsPanel];
-    } else if (action == MacVNCPermissionPanelActionRestart) {
-        [self relaunchApplication];
-    } else if (action == MacVNCPermissionPanelActionPreferences) {
-        /* Loop back to the gate afterwards: otherwise this branch would leave the
-           app with no affordance to ever start the server again. */
-        [self openPreferences:nil];
-        [self showPermissionsPanel];
-    } else if (action == MacVNCPermissionPanelActionQuit) {
-        [NSApp terminate:nil];
     }
+    self.permissionsPanelVisible = YES;
+    /* Let the single renderer own the text: writing a status string by hand here
+       claimed "permissions required" even when the server was running, and the
+       2 s timer silently corrected it moments later. */
+    [self updateMenuStatus];
+
+    MacVNCPermissionsPanelController *controller =
+        [[[MacVNCPermissionsPanelController alloc] init] autorelease];
+    self.permissionsPanel = controller;
+    [controller presentWithCompletion:^(MacVNCPermissionPanelAction action) {
+        self.permissionsPanelVisible = NO;
+        self.permissionsPanel = nil;
+
+        switch (action) {
+            case MacVNCPermissionPanelActionStart:
+                /* Both permissions are read without prompting, so this is a
+                   straight decision — and it must not call back into
+                   -showPermissionsPanel from inside this handler, which used to
+                   nest the gate inside itself. */
+                [self startServerIfPermitted];
+                break;
+            case MacVNCPermissionPanelActionRestart:
+                [self relaunchApplication];
+                break;
+            case MacVNCPermissionPanelActionPreferences:
+                [self openPreferences:nil];
+                /* Re-open on the next run loop turn, never from inside the
+                   completion of the panel we are dismissing. */
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self showPermissionsPanel];
+                });
+                break;
+            case MacVNCPermissionPanelActionQuit:
+                [NSApp terminate:nil];
+                break;
+            case MacVNCPermissionPanelActionNone:
+                break;
+        }
+    }];
 }
 
 - (void)handleScreenCaptureFailure:(NSDictionary *)info
@@ -294,21 +428,32 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
     if (reportedGeneration != vncServerCurrentGeneration())
         return;
 
-    vncServerStop();
+    /* Stop OFF the main thread: vncServerStop() joins client threads and waits
+       for in-flight ScreenCaptureKit work, which can be pending behind a system
+       permission prompt. Blocking the main thread here would freeze the menu bar
+       — including the very buttons the user needs to recover. */
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        vncServerStop();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self presentCaptureFailure:info];
+        });
+    });
+}
 
+- (void)presentCaptureFailure:(NSDictionary *)info
+{
     if ([info[@"denied"] boolValue]) {
-        /* A real TCC denial: latch it so the permission model reports the truth
-           even if CGPreflight returns a stale YES, and show the gate panel. */
-        macVNCNoteScreenCaptureFailure();
+        /* A real TCC denial at runtime: the permission was revoked while the
+           server ran. CGPreflight already reports the truth, so nothing to
+           latch — just resurface the gate. */
         [self updateMenuStatus];
         [self showPermissionsPanel];
         return;
     }
 
     /* Non-permission capture failure (e.g. a display was unplugged or the
-       stream stopped). Do NOT latch a permanent "permission missing" state —
-       but equally do NOT clear a latch someone else legitimately set (a sibling
-       display may have reported a real denial milliseconds ago). */
+       stream stopped). Nothing to record: permission status is read from
+       CGPreflight on demand, so a transient failure cannot poison it. */
     [self updateMenuStatus];
     NSAlert *alert = [[[NSAlert alloc] init] autorelease];
     alert.messageText     = @"Screen capture stopped";
@@ -353,7 +498,7 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
                    use) — say so instead of silently showing "Not running". A
                    permission problem is handled by the capture-failure popup. */
                 [self updateMenuStatus];
-                if (macVNCPermissionsAllGranted()) {
+                if (macVNCCheckPermission(MacVNCPermissionKindAccessibility) == MacVNCPermissionStatusGranted) {
                     NSAlert *alert = [[[NSAlert alloc] init] autorelease];
                     alert.messageText     = @"macVNC could not start the server";
                     alert.informativeText = @"The VNC server failed to start. The most likely "
@@ -378,6 +523,13 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
 {
     int port = vncServerGetPort();
 
+    /* ONE snapshot for the whole render (I1): the status line used to sample TCC
+       separately from the permission rows — four reads, two snapshots, one
+       frame — which is exactly the shape of the old "chip and hint disagree"
+       bug, just moved into the menu. */
+    MacVNCPermissionUIInput input = macVNCSamplePermissionUIInput(port > 0);
+    MacVNCPermissionUIState *ui = macVNCResolvePermissionUI(input);
+
     if (port > 0) {
         /* Report what the RUNNING server actually applied — never the saved
            defaults, which may already describe an unsaved/unrestarted change or
@@ -389,13 +541,24 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
             bind = [NSString stringWithUTF8String:activeBind];
         NSString *access = vncServerActivePolicyAllowsEveryone() ? @"allow all" : @"allowlist";
         self.statusMenuItem.title = [NSString stringWithFormat:@"Running  •  %@:%d  •  %@", bind, port, access];
-    } else if (!macVNCPermissionsAllGranted()) {
+    } else if (ui.shouldShowPermissionRows) {
         self.statusMenuItem.title = @"Not running  •  permissions required";
     } else {
         self.statusMenuItem.title = @"Not running";
     }
 
-    int n = vncConnectedClients;
+    /* Permission rows from the same snapshot; hidden when both are active,
+       exactly like clipshot's banner returning null. */
+    self.screenPermissionMenuItem.hidden = !ui.shouldShowPermissionRows;
+    self.accessibilityPermissionMenuItem.hidden = !ui.shouldShowPermissionRows;
+    self.screenPermissionMenuItem.title = ui.screenChipTitle;
+    self.accessibilityPermissionMenuItem.title = ui.accessibilityChipTitle;
+
+    /* A stopped server has no clients, whatever the counter last held: after
+       vncServerCloseListeners() the port reads 0 while vncConnectedClients is
+       untouched, which produced "Not running" directly above "1 client
+       connected". */
+    int n = (port > 0) ? vncConnectedClients : 0;
     if (n == 0)
         self.clientsMenuItem.title = @"No clients connected";
     else if (n == 1)

@@ -45,6 +45,11 @@ static rfbScreenInfoPtr rfbScreen;
 void (*macVNCScreenCaptureFailureHandler)(bool likelyPermissionDenial,
                                           uint64_t serverGeneration) = NULL;
 
+/* Set by AppDelegate; invoked once when capture first delivers a frame.
+   Informational: the authoritative status reader is
+   CGPreflightScreenCaptureAccess() (see mac.h). */
+void (*macVNCScreenCaptureWorkingHandler)(void) = NULL;
+
 /* One composite framebuffer; uncovered regions remain black. */
 static void *frameBufferOne;
 
@@ -432,6 +437,11 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
           initWithDisplay:geometry->input.displayID
           captureFramesPerSecond:captureFramesPerSecond
           frameHandler:^BOOL(CMSampleBufferRef sampleBuffer) {
+              static _Atomic bool reportedWorking = false;
+              bool expected = false;
+              if (atomic_compare_exchange_strong(&reportedWorking, &expected, true) &&
+                  macVNCScreenCaptureWorkingHandler)
+                  macVNCScreenCaptureWorkingHandler();
               return updateCompositeFrame(sampleBuffer, geometry) ? YES : NO;
           }
           errorHandler:captureErrorHandler];
@@ -488,9 +498,20 @@ prepareAuthenticatedClient(rfbClientPtr cl)
         state->captureCounted = TRUE;
         int previous = atomic_fetch_add(&vncConnectedClients, 1);
         if (previous == 0) {
-            startDisplayCaptures();
-            rfbLog("First client password accepted; starting %lu display captures\n",
-                   (unsigned long)screenCapturers.count);
+            /* Never touch capture without the permission: doing so is what makes
+               macOS raise its own "macVNC wants to record this screen" dialog.
+               CGPreflight answers this without prompting, so an unauthorised
+               connection is refused quietly and the user keeps dealing with our
+               own panel instead of a system alert. */
+            if (!CGPreflightScreenCaptureAccess()) {
+                rfbLog("Screen Recording is not granted; refusing to start capture\n");
+                if (macVNCScreenCaptureFailureHandler)
+                    macVNCScreenCaptureFailureHandler(true, vncServerCurrentGeneration());
+            } else {
+                startDisplayCaptures();
+                rfbLog("First client password accepted; starting %lu display captures\n",
+                       (unsigned long)screenCapturers.count);
+            }
         }
     }
     BOOL alreadyReady = macVNCReadinessIsReady(&state->readiness);
@@ -700,6 +721,48 @@ vncServerStop(void)
 {
     pthread_mutex_lock(&serverLifecycleMutex);
     vncServerStopLocked();
+    pthread_mutex_unlock(&serverLifecycleMutex);
+}
+
+void
+vncServerCloseListeners(void)
+{
+    /* Free the port immediately, without the cost of a full stop.
+
+       Used just before relaunching: the child inherits open descriptors, and a
+       still-open listening socket makes its bind() fail ("port already in use").
+       BOTH listeners must go — closing only the IPv4 one leaves the IPv6 socket
+       holding the port.
+
+       Deliberately NOT vncServerStop(): that joins client threads and waits for
+       in-flight ScreenCaptureKit work, which can sit behind a system prompt and
+       would freeze the menu bar at the very moment the user pressed Restart.
+       This only drops the listeners; the process is about to exit anyway. */
+    /* Needs the lifecycle lock (vncServerStopLocked() frees rfbScreen from
+       another thread), but must never BLOCK: this runs on the main thread while
+       relaunching, and the lock can be held by a stop that is waiting on capture
+       work stuck behind a system prompt — that would freeze the menu bar.
+       If the lock is busy a stop is already in progress, which closes the
+       listeners anyway, so skipping is correct. */
+    if (pthread_mutex_trylock(&serverLifecycleMutex) != 0)
+        return;
+    if (!rfbScreen) {
+        pthread_mutex_unlock(&serverLifecycleMutex);
+        return;
+    }
+    if (rfbScreen->listenSock >= 0) {
+        shutdown(rfbScreen->listenSock, SHUT_RDWR);
+        close(rfbScreen->listenSock);
+        rfbScreen->listenSock = -1;
+    }
+    if (rfbScreen->listen6Sock >= 0) {
+        shutdown(rfbScreen->listen6Sock, SHUT_RDWR);
+        close(rfbScreen->listen6Sock);
+        rfbScreen->listen6Sock = -1;
+    }
+    /* Stop publishing a port nobody is listening on: the menu reads this and
+       would otherwise keep claiming "Running • …:5903" over a dead socket. */
+    atomic_store_explicit(&publishedServerPort, 0, memory_order_release);
     pthread_mutex_unlock(&serverLifecycleMutex);
 }
 

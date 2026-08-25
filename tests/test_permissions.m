@@ -1,4 +1,5 @@
 #import "MacVNCPermissions.h"
+#import <CoreGraphics/CoreGraphics.h>
 
 #import <Foundation/Foundation.h>
 #include <assert.h>
@@ -43,14 +44,12 @@ int main(void)
     assert(missing.count == 1);
     assert([missing[0][MacVNCPermissionSnapshotNameKey] isEqualToString:@"Accessibility"]);
 
-    /* Runtime capture-failure flag forces Screen Recording to NotGranted. */
-    macVNCResetScreenCaptureFailure();
-    assert(!macVNCScreenCaptureFailureNoted());
-    macVNCNoteScreenCaptureFailure();
-    assert(macVNCScreenCaptureFailureNoted());
-    assert(macVNCCheckPermission(MacVNCPermissionKindScreenRecording) == MacVNCPermissionStatusNotGranted);
-    macVNCResetScreenCaptureFailure();
-    assert(!macVNCScreenCaptureFailureNoted());
+    /* Screen Recording has exactly ONE reader: CGPreflightScreenCaptureAccess().
+       A second source of truth (a runtime "capture failed" latch) used to let
+       the gate and the UI disagree, so it was removed rather than kept in sync. */
+    assert(macVNCCheckPermission(MacVNCPermissionKindScreenRecording) ==
+           (CGPreflightScreenCaptureAccess() ? MacVNCPermissionStatusGranted
+                                             : MacVNCPermissionStatusNotGranted));
 
     puts("permissions tests passed");
     [pool drain];
