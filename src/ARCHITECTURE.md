@@ -107,6 +107,6 @@ cmake --build build -j
 ctest --test-dir build          # keep the display awake (caffeinate) for capture tests
 ```
 
-Release/notarization lives in `build/make_release.sh` (+ `build/entitlements.plist`):
+Release/notarization lives in `packaging/make_release.sh` (+ `packaging/entitlements.plist`):
 Developer ID + hardened runtime + `com.apple.security.cs.disable-library-validation`
 (required so the bundled Homebrew dylibs load for VNC DES auth).

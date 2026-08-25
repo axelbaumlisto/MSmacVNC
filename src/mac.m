@@ -42,7 +42,7 @@
 static rfbScreenInfoPtr rfbScreen;
 
 /* Set by AppDelegate; invoked on the main queue when capture fails at runtime. */
-void (*macVNCScreenCaptureFailureHandler)(void) = NULL;
+void (*macVNCScreenCaptureFailureHandler)(bool likelyPermissionDenial) = NULL;
 
 /* One composite framebuffer; uncovered regions remain black. */
 static void *frameBufferOne;
@@ -132,8 +132,25 @@ lockCurrentClients(LockedClientSet *set)
         set->items[set->count++] = client;
     }
     rfbReleaseClientIterator(iterator);
-    for (size_t i = 0; i < set->count; ++i)
-        LOCK(set->items[i]->sendMutex);
+
+    /* Acquire every client's sendMutex with trylock, never a blocking lock.
+       LibVNCServer holds sendMutex for the whole encode+socket write, so a
+       single client that stops reading its socket (congested link, suspended
+       viewer, or a hostile peer stalling TCP) would otherwise block the
+       compositor — freezing the screen for ALL clients indefinitely. If any
+       client is mid-send we back out cleanly and simply skip this frame; the
+       next captured frame retries. */
+    for (size_t i = 0; i < set->count; ++i) {
+        if (pthread_mutex_trylock(&set->items[i]->sendMutex) != 0) {
+            for (size_t j = i; j > 0; --j)
+                UNLOCK(set->items[j - 1]->sendMutex);
+            for (size_t j = 0; j < set->count; ++j)
+                rfbDecrClientRef(set->items[j]);
+            free(set->items);
+            memset(set, 0, sizeof(*set));
+            return FALSE;
+        }
+    }
     return TRUE;
 }
 
@@ -175,7 +192,8 @@ updateCompositeFrame(CMSampleBufferRef sampleBuffer,
     if (!lockCurrentClients(&lockedClients)) {
         pthread_mutex_unlock(&compositorMutex);
         CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
-        rfbErr("Could not retain current VNC clients for framebuffer update\n");
+        /* Either OOM or (far more commonly) a client is mid-send. Skipping this
+           frame is the correct, non-blocking behaviour: the next frame retries. */
         return;
     }
 
@@ -367,17 +385,31 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
   /* Allow multiple VNC clients to connect simultaneously */
   rfbScreen->alwaysShared = TRUE;
 
+  /* Bound how long LibVNCServer waits on a stalled client socket. Without this
+     a viewer that stops reading (suspended laptop, dead link, hostile peer)
+     keeps its send in flight for a very long time; with the compositor's
+     non-blocking trylock this only costs that client, but a bounded wait lets
+     the server actually drop it instead of pinning resources. */
+  rfbScreen->maxClientWait = 10000; /* ms */
+
   rfbScreen->ptrAddEvent = PtrAddEvent;
   rfbScreen->kbdAddEvent = KbdAddEvent;
   macVNCInputSetContext(rfbScreen, &displayLayout);
 
   void (^captureErrorHandler)(NSError *) = ^(NSError *error) {
       rfbLog("Screen capture error: %s\n", [error.description UTF8String]);
+      /* Distinguish a real TCC denial from unrelated capture failures (display
+         unplugged, stream stopped). Only the former may latch a permanent
+         "Screen Recording missing" state upstream. */
+      bool likelyPermissionDenial =
+          [error.domain isEqualToString:SCStreamErrorDomain] &&
+          (error.code == SCStreamErrorUserDeclined ||
+           error.code == SCStreamErrorMissingEntitlements);
       /* Do not show UI here. Report upward; AppDelegate owns the single
          permission popup and decides how to recover. */
       dispatch_async(dispatch_get_main_queue(), ^{
           if (macVNCScreenCaptureFailureHandler)
-              macVNCScreenCaptureFailureHandler();
+              macVNCScreenCaptureFailureHandler(likelyPermissionDenial);
       });
   };
 
