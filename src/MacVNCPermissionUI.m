@@ -23,6 +23,16 @@ static NSString *macVNCChipTitle(NSString *name, BOOL active)
             active ? @"✓" : @"⚠", name, active ? @"Active" : @"Not active yet"];
 }
 
+BOOL (*macVNCPermissionUIServerRunningProvider)(void) = NULL;
+
+MacVNCPermissionUIInput macVNCSamplePermissionUI(void)
+{
+    BOOL running = macVNCPermissionUIServerRunningProvider
+                       ? macVNCPermissionUIServerRunningProvider()
+                       : NO;
+    return macVNCSamplePermissionUIInput(running);
+}
+
 MacVNCPermissionUIInput macVNCSamplePermissionUIInput(BOOL serverRunning)
 {
     MacVNCPermissionUIInput input;

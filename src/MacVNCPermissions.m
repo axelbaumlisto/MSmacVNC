@@ -5,18 +5,6 @@
 #import <ApplicationServices/ApplicationServices.h>
 #import <CoreGraphics/CoreGraphics.h>
 
-NSString * const MacVNCPermissionSnapshotKindKey = @"kind";
-NSString * const MacVNCPermissionSnapshotNameKey = @"name";
-NSString * const MacVNCPermissionSnapshotDescriptionKey = @"description";
-NSString * const MacVNCPermissionSnapshotStatusKey = @"status";
-NSString * const MacVNCPermissionSnapshotSettingsURLKey = @"settingsURL";
-
-NSArray<NSNumber *> *macVNCRequiredPermissionKinds(void)
-{
-    return @[@(MacVNCPermissionKindScreenRecording),
-             @(MacVNCPermissionKindAccessibility)];
-}
-
 NSString *macVNCPermissionDisplayName(MacVNCPermissionKind kind)
 {
     switch (kind) {
@@ -26,41 +14,6 @@ NSString *macVNCPermissionDisplayName(MacVNCPermissionKind kind)
             return @"Accessibility";
     }
     return @"Unknown permission";
-}
-
-NSString *macVNCPermissionDescription(MacVNCPermissionKind kind)
-{
-    switch (kind) {
-        case MacVNCPermissionKindScreenRecording:
-            return @"Required to share your display over VNC";
-        case MacVNCPermissionKindAccessibility:
-            return @"Required for remote keyboard and mouse control";
-    }
-    return @"Required by macVNC";
-}
-
-NSString *macVNCPermissionSettingsURL(MacVNCPermissionKind kind)
-{
-    switch (kind) {
-        case MacVNCPermissionKindScreenRecording:
-            return @"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
-        case MacVNCPermissionKindAccessibility:
-            return @"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
-    }
-    return @"x-apple.systempreferences:com.apple.preference.security?Privacy";
-}
-
-NSString *macVNCPermissionStatusText(MacVNCPermissionStatus status)
-{
-    switch (status) {
-        case MacVNCPermissionStatusGranted:
-            return @"Granted";
-        case MacVNCPermissionStatusNotGranted:
-            return @"Not granted";
-        case MacVNCPermissionStatusUnknown:
-            return @"Unknown";
-    }
-    return @"Unknown";
 }
 
 MacVNCPermissionStatus macVNCCheckPermission(MacVNCPermissionKind kind)
@@ -92,52 +45,18 @@ MacVNCPermissionStatus macVNCCheckPermission(MacVNCPermissionKind kind)
     return MacVNCPermissionStatusUnknown;
 }
 
-NSDictionary<NSString *, id> *macVNCPermissionSnapshot(MacVNCPermissionKind kind,
-                                                       MacVNCPermissionStatus status)
+/* Deep link to the relevant System Settings pane. Internal: only
+   macVNCOpenPermissionSettings needs it, and publishing it invited callers to
+   build their own settings flow. */
+static NSString *macVNCPermissionSettingsURL(MacVNCPermissionKind kind)
 {
-    return @{
-        MacVNCPermissionSnapshotKindKey: @(kind),
-        MacVNCPermissionSnapshotNameKey: macVNCPermissionDisplayName(kind),
-        MacVNCPermissionSnapshotDescriptionKey: macVNCPermissionDescription(kind),
-        MacVNCPermissionSnapshotStatusKey: @(status),
-        MacVNCPermissionSnapshotSettingsURLKey: macVNCPermissionSettingsURL(kind),
-    };
-}
-
-NSArray<NSDictionary<NSString *, id> *> *macVNCPermissionSnapshots(void)
-{
-    NSMutableArray<NSDictionary<NSString *, id> *> *snapshots = [NSMutableArray array];
-    for (NSNumber *kindNumber in macVNCRequiredPermissionKinds()) {
-        MacVNCPermissionKind kind = (MacVNCPermissionKind)kindNumber.integerValue;
-        [snapshots addObject:macVNCPermissionSnapshot(kind, macVNCCheckPermission(kind))];
+    switch (kind) {
+        case MacVNCPermissionKindScreenRecording:
+            return @"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
+        case MacVNCPermissionKindAccessibility:
+            return @"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
     }
-    return snapshots;
-}
-
-NSArray<NSDictionary<NSString *, id> *> *macVNCMissingPermissionsFromSnapshots(NSArray<NSDictionary<NSString *, id> *> *snapshots)
-{
-    NSMutableArray<NSDictionary<NSString *, id> *> *missing = [NSMutableArray array];
-    for (NSDictionary<NSString *, id> *snapshot in snapshots) {
-        MacVNCPermissionStatus status = (MacVNCPermissionStatus)[snapshot[MacVNCPermissionSnapshotStatusKey] integerValue];
-        if (status != MacVNCPermissionStatusGranted)
-            [missing addObject:snapshot];
-    }
-    return missing;
-}
-
-NSArray<NSDictionary<NSString *, id> *> *macVNCMissingPermissions(void)
-{
-    return macVNCMissingPermissionsFromSnapshots(macVNCPermissionSnapshots());
-}
-
-BOOL macVNCPermissionsAllGrantedFromSnapshots(NSArray<NSDictionary<NSString *, id> *> *snapshots)
-{
-    return macVNCMissingPermissionsFromSnapshots(snapshots).count == 0;
-}
-
-BOOL macVNCPermissionsAllGranted(void)
-{
-    return macVNCPermissionsAllGrantedFromSnapshots(macVNCPermissionSnapshots());
+    return @"x-apple.systempreferences:com.apple.preference.security";
 }
 
 static void macVNCOpenURLString(NSString *urlString)

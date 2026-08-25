@@ -67,6 +67,21 @@ typedef struct {
  */
 MacVNCPermissionUIInput macVNCSamplePermissionUIInput(BOOL serverRunning);
 
+/*
+ * Samples the permissions AND asks the installed provider whether the server is
+ * running, so a caller does not have to know how that is determined.
+ *
+ * The provider is injected (AppDelegate installs one that reads the server
+ * core) to keep the dependency pointing one way: UI code must not import the
+ * server core just to render a panel, and "running" was being re-derived as
+ * `vncServerGetPort() > 0` at four separate call sites.
+ *
+ * With no provider installed the answer is "not running", which is what a unit
+ * test without a server wants.
+ */
+extern BOOL (*macVNCPermissionUIServerRunningProvider)(void);
+MacVNCPermissionUIInput macVNCSamplePermissionUI(void);
+
 MacVNCPermissionUIState *macVNCResolvePermissionUI(MacVNCPermissionUIInput input);
 
 NS_ASSUME_NONNULL_END
