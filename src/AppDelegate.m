@@ -78,7 +78,7 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
     macVNCScreenCaptureFailureHandler = macVNCScreenCaptureFailed;
     macVNCScreenCaptureWorkingHandler = macVNCScreenCaptureWorking_;
     macVNCCaptureAllowed = macVNCCaptureAllowed_;
-    [self registerDefaults];
+    macVNCRegisterDefaults();
     [self setupStatusBarItem];
 
 
@@ -130,20 +130,6 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
 /* -----------------------------------------------------------------------
  * Defaults
  * ----------------------------------------------------------------------- */
-
-- (void)registerDefaults
-{
-    [[NSUserDefaults standardUserDefaults] registerDefaults:@{
-        MacVNCKeyPort:     @(MacVNCDefaultPort),
-        MacVNCKeyViewOnly: @NO,
-        MacVNCKeyDisplay:        @(-1),
-        MacVNCKeyPassword:       @"",
-        MacVNCKeyListenMode:        MacVNCListenModeLocalhost,
-        MacVNCKeyListenAddress:     @"",
-        MacVNCKeyAllowedClients:    MacVNCLoopbackIPv4,
-        MacVNCKeyAllowAllConfirmed: @NO,
-    }];
-}
 
 /* -----------------------------------------------------------------------
  * Status-bar item
