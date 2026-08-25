@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.58 LANGUAGES C)
+project(macVNC VERSION 0.3.59 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -298,6 +298,7 @@ if(BUILD_TESTING)
         src/ReadinessPolicy.c
     )
     target_include_directories(test_input_context PRIVATE src)
+    target_compile_definitions(test_input_context PRIVATE MACVNC_ENABLE_TEST_HOOKS=1)
     target_link_libraries(test_input_context
         LibVNCServer::vncserver
         ${CMAKE_THREAD_LIBS_INIT}
@@ -308,8 +309,11 @@ if(BUILD_TESTING)
     )
     add_test(NAME input_context COMMAND test_input_context)
 
-    add_executable(test_server_init_failure
-        tests/test_server_init_failure.m
+    # The server core plus everything it links, as ONE target. Two test
+    # executables previously repeated the same twenty source files verbatim, so
+    # adding a core source meant editing both and a miss showed up as a link
+    # error in only one of them.
+    add_library(macvnc_core_testable STATIC
         src/mac.m
         src/RFBKeySym.c
         src/DisplayLayout.c
@@ -331,9 +335,9 @@ if(BUILD_TESTING)
         src/MacVNCInput.m
         src/ScreenCapturer.m
     )
-    target_include_directories(test_server_init_failure PRIVATE src)
-    target_compile_definitions(test_server_init_failure PRIVATE MACVNC_ENABLE_TEST_HOOKS=1)
-    target_link_libraries(test_server_init_failure
+    target_include_directories(macvnc_core_testable PUBLIC src)
+    target_compile_definitions(macvnc_core_testable PUBLIC MACVNC_ENABLE_TEST_HOOKS=1)
+    target_link_libraries(macvnc_core_testable PUBLIC
         LibVNCServer::vncserver
         ${CMAKE_THREAD_LIBS_INIT}
         ${CARBON_LIBRARY}
@@ -344,48 +348,18 @@ if(BUILD_TESTING)
         ${FOUNDATION}
         ${APPKIT_LIBRARY}
     )
+
+    add_executable(test_server_init_failure tests/test_server_init_failure.m)
+    target_link_libraries(test_server_init_failure macvnc_core_testable)
     add_test(NAME server_init_failure COMMAND test_server_init_failure)
-    # The test exits 77 when no display is attached (headless CI, closed lid);
-    # without this that self-declared SKIP counts as a hard failure.
+    # Exits 77 when no display is attached (headless CI, closed lid); without
+    # this that self-declared SKIP counts as a hard failure.
     set_tests_properties(server_init_failure PROPERTIES SKIP_RETURN_CODE 77)
 
-    add_executable(test_capture_gate
-        tests/test_capture_gate.m
-        src/mac.m
-        src/RFBKeySym.c
-        src/DisplayLayout.c
-        src/DisplaySelection.c
-        src/CompositeFramebuffer.c
-        src/MacVNCCompositor.m
-        src/MacVNCCaptureSession.m
-        src/PointerState.c
-        src/KeyboardModifierState.c
-        src/CaptureRate.c
-        src/FrameMailbox.c
-        src/ReadinessPolicy.c
-        src/NetworkAccess.c
-        src/NetworkCIDR.c
-        src/NetworkInventory.c
-        src/NetworkPolicyResolver.c
-        src/MacVNCDisplayWake.m
-        src/MacVNCPowerMgmt.m
-        src/MacVNCInput.m
-        src/ScreenCapturer.m
-    )
-    target_include_directories(test_capture_gate PRIVATE src)
-    target_compile_definitions(test_capture_gate PRIVATE MACVNC_ENABLE_TEST_HOOKS=1)
-    target_link_libraries(test_capture_gate
-        LibVNCServer::vncserver
-        ${CMAKE_THREAD_LIBS_INIT}
-        ${CARBON_LIBRARY}
-        ${IOKIT_LIBRARY}
-        ${SCREEN_CAPTURE_KIT}
-        ${CORE_MEDIA}
-        ${CORE_VIDEO}
-        ${FOUNDATION}
-        ${APPKIT_LIBRARY}
-    )
+    add_executable(test_capture_gate tests/test_capture_gate.m)
+    target_link_libraries(test_capture_gate macvnc_core_testable)
     add_test(NAME capture_gate COMMAND test_capture_gate)
+
 
     add_test(NAME client_allowlist
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_client_allowlist.py
