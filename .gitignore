@@ -9,3 +9,7 @@
 /.DS_Store
 __pycache__/
 *.pyc
+
+# clang --analyze drops a report .plist next to the cwd; these were
+# committed by accident in v0.3.12 and are build output, not sources.
+/*.plist
