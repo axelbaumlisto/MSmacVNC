@@ -2,6 +2,7 @@
 
 #include <rfb/rfb.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include "NetworkPolicyResolver.h"
 
 #define MACVNC_LISTEN_ADDRESS_MAX 64
@@ -65,6 +66,20 @@ void vncServerStop(void);
  * Return the TCP port the server is listening on, or -1 if not started.
  */
 int vncServerGetPort(void);
+
+/*
+ * Report the configuration the RUNNING server actually applied, so the UI can
+ * never claim a restriction that is not in effect (saved defaults and env
+ * overrides can differ from the live server until it is restarted).
+ *
+ * bindAddress receives the bound IPv4 address, or an empty string when the
+ * server listens on all interfaces. Returns FALSE (and writes nothing) when
+ * the server is not running.
+ */
+rfbBool vncServerCopyActiveBindAddress(char *bindAddress, size_t size);
+
+/* Client access mode of the RUNNING server. Only valid when the server runs. */
+MacVNCClientAccessMode vncServerActiveAccessMode(void);
 
 #if defined(MACVNC_ENABLE_TEST_HOOKS)
 #include <stdbool.h>

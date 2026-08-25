@@ -1,3 +1,18 @@
+# macVNC 0.3.22
+
+## Truthful status & real start failures
+
+- **The menu bar and “Copy VNC Address” now report what the RUNNING server actually applied**, not the saved preferences. Previously they read `NSUserDefaults`, so after changing settings without restarting — or when launching with `MACVNC_LISTEN` / `MACVNC_ALLOWED_CLIENTS` overrides as the README documents — macVNC could display `Running • 127.0.0.1:5903 • allowlist` while actually listening on a tailnet address, and copy a useless `vnc://127.0.0.1` URL. Claiming a network restriction that is not in effect is security-relevant. New `vncServerCopyActiveBindAddress()` / `vncServerActiveAccessMode()` expose the live values.
+- **A failed bind is no longer reported as “Running”.** `rfbInitServer()` does not return bind errors, so a port collision (macOS Screen Sharing on 5900, or a second macVNC instance) left the app claiming to run on a port served by someone else — with a different auth and allowlist policy. The listen socket is now verified, and the user gets an explicit “port already in use” alert. Verified by holding the port and confirming the refusal.
+- **The allowlist no longer accumulates every network the Mac has ever joined.** Auto-generated interface CIDRs became indistinguishable from hand-typed entries once that network disappeared, so they were re-persisted forever. Auto-added entries are now recorded separately (`autoAllowedClients`) and stale ones are dropped on the next save.
+
+## Validation
+
+- Release build: passed. clang static analyzer: 0 warnings.
+- CTest: 17/17 passed.
+- Bind-collision behaviour verified end-to-end; reference libvncclient auth: AUTH_OK, composite 5552x2715.
+- Developer ID + hardened runtime + entitlements: signed, notarized, stapled.
+
 # macVNC 0.3.21
 
 ## Critical: release tooling is now version-controlled

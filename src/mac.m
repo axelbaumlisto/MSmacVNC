@@ -434,6 +434,16 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
   rfbInitServer(rfbScreen);
   rfbServerInitialized = TRUE;
 
+  /* rfbInitServer() does not report bind failures through a return value: on a
+     port collision (e.g. macOS Screen Sharing already owns 5900, or a second
+     macVNC instance) it leaves the listen socket invalid. Without this check the
+     app would happily report "Running" on a port served by someone else, with a
+     different auth and allowlist policy. */
+  if (rfbScreen->listenSock < 0 && rfbScreen->inetdSock < 0) {
+      rfbErr("Could not listen on port %d (already in use?)\n", rfbScreen->port);
+      return FALSE;
+  }
+
   return TRUE;
 }
 
@@ -684,6 +694,28 @@ int
 vncServerGetPort(void)
 {
     return atomic_load_explicit(&publishedServerPort, memory_order_acquire);
+}
+
+rfbBool
+vncServerCopyActiveBindAddress(char *bindAddress, size_t size)
+{
+    if (!bindAddress || size == 0)
+        return FALSE;
+    if (atomic_load_explicit(&publishedServerPort, memory_order_acquire) <= 0)
+        return FALSE;
+    pthread_mutex_lock(&serverLifecycleMutex);
+    snprintf(bindAddress, size, "%s", macVNCListenAddress);
+    pthread_mutex_unlock(&serverLifecycleMutex);
+    return TRUE;
+}
+
+MacVNCClientAccessMode
+vncServerActiveAccessMode(void)
+{
+    pthread_mutex_lock(&serverLifecycleMutex);
+    MacVNCClientAccessMode mode = macVNCClientAccessMode;
+    pthread_mutex_unlock(&serverLifecycleMutex);
+    return mode;
 }
 
 #if defined(MACVNC_ENABLE_TEST_HOOKS)
