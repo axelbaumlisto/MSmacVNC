@@ -66,7 +66,7 @@ rfbServerInitialized, publishedServerPort, serverGeneration,
 - **проверка:** новый unit-тест композитора на снимке из двух дисплеев;
       живой прогон обоих мониторов (сейчас это покрыто только вручную).
 
-### Шаг 3 — жизненный цикл клиентов (НЕ СДЕЛАН)
+### Шаг 3 — потоки захвата (СДЕЛАНО, d73c46f)
 - [ ] `MacVNCServerLifecycle.{h,m}`: `vncServerStart/Stop/StopLocked`,
       `serverHasLifecycleResourcesLocked`, `vncServerCloseListeners`;
 - [ ] `ScreenInit` остаётся сборщиком: вызывает уже извлечённые шаги;
@@ -81,7 +81,7 @@ rfbServerInitialized, publishedServerPort, serverGeneration,
 - **проверка:** тест ядра с подставной функцией «прав нет» → захват не
       стартует, диалог не поднимается. Сейчас это непроверяемо вообще.
 
-### Шаг 5 — AppDelegate (ЧАСТИЧНО, e309dea: defaults; меню/запуск не тронуты)
+### Шаг 5 — AppDelegate (СДЕЛАНО: e309dea defaults, d73c46f запуск, b13c6df меню)
 - [ ] `MacVNCStatusMenuController` — построение и обновление меню;
 - [ ] `MacVNCServerLauncher` — `startServer`, обработка ошибок старта;
 - [ ] `registerDefaults` — рядом с `MacVNCDefaultsKeys`;
@@ -137,6 +137,27 @@ mac.m       871 → 746   AppDelegate 662 → 590
 установлена 0.3.54, коммиты bc1d070 5aef4b5 46b5f2d e309dea
 ```
 
-Осталось: шаг 3 (клиентский жизненный цикл со своим мьютексом) и остаток
-шага 5 (StatusMenuController, ServerLauncher). Оба — связные куски, к ним
-можно вернуться независимо.
+### Итог всего прохода
+
+```text
+mac.m       871 → 732     AppDelegate 662 → 562
+тестов      18  → 24      каждый новый проверен мутацией
+коммиты     bc1d070 5aef4b5 46b5f2d e309dea d73c46f b13c6df
+установлена 0.3.56
+```
+
+Новые модули: DisplaySelection, MacVNCCompositor, MacVNCCaptureSession,
+MacVNCStatusText, MacVNCStartFailure, MacVNCRelauncher, MacVNCPermissionUI.
+
+Дефекты, найденные попутно и исправленные:
+- сигнал «захват работает» жил весь процесс вместо одного запуска —
+  после перезапуска не приходил никогда;
+- `selectedCount` дублировал `displayLayout.count`;
+- блокирующий мьютекс на главном потоке при закрытии слушателей;
+- `strdup` пароля без проверки на нехватку памяти;
+- осиротевшие и противоречивые комментарии про `CGPreflight`.
+
+Осознанно не сделано: клиентский `clientLifecycleMutex` и `MacVNCClientState`
+остаются в `mac.m`. Они завязаны на `rfbClientPtr` и хуки LibVNCServer;
+вынос дал бы модуль, который всё равно знает про libvncserver — перенос
+строк без развязки. Разумно только вместе со сменой модели клиента.
