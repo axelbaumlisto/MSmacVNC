@@ -33,7 +33,6 @@ static BOOL macVNCAllowsTestPermissionGateBypass(void)
 @property (nonatomic, strong) NSMenuItem    *screenPermissionMenuItem;
 @property (nonatomic, strong) NSMenuItem    *accessibilityPermissionMenuItem;
 @property (nonatomic, strong) NSTimer       *updateTimer;
-@property (nonatomic, assign) BOOL           permissionsPanelVisible;
 @property (nonatomic, retain) MacVNCPermissionsPanelController *permissionsPanel;
 @property (nonatomic, assign) BOOL           relaunchScheduled;
 
@@ -42,20 +41,18 @@ static BOOL macVNCAllowsTestPermissionGateBypass(void)
 
 static AppDelegate *gSharedAppDelegate = nil;
 
-/* First delivered frame: Screen Recording is proven to work in this process. */
-static void macVNCScreenCaptureWorking_(void)
-{
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [gSharedAppDelegate captureBecameWorking];
-    });
-}
-
 /* The server core asks before touching capture. Answered without prompting:
    CGPreflight never raises a dialog, and this app must never cause one. */
 static bool macVNCCaptureAllowed_(void)
 {
     return macVNCCheckPermission(MacVNCPermissionKindScreenRecording) ==
            MacVNCPermissionStatusGranted;
+}
+
+/* The one place that knows how "running" is determined. */
+static BOOL macVNCServerIsRunning_(void)
+{
+    return vncServerGetPort() > 0;
 }
 
 static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t generation)
@@ -76,8 +73,8 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
 {
     gSharedAppDelegate = self;
     macVNCScreenCaptureFailureHandler = macVNCScreenCaptureFailed;
-    macVNCScreenCaptureWorkingHandler = macVNCScreenCaptureWorking_;
     macVNCCaptureAllowed = macVNCCaptureAllowed_;
+    macVNCPermissionUIServerRunningProvider = macVNCServerIsRunning_;
     macVNCRegisterDefaults();
     [self setupStatusBarItem];
 
@@ -293,7 +290,7 @@ static NSMenuItem *addRow(NSMenu *menu, NSString *title, SEL action,
        re-derive it by hand is how the gate and the panel drifted apart before.
        shouldShowPanel was previously asserted only in tests — now it is the
        actual control flow. */
-    MacVNCPermissionUIInput input = macVNCSamplePermissionUIInput(vncServerGetPort() > 0);
+    MacVNCPermissionUIInput input = macVNCSamplePermissionUI();
     MacVNCPermissionUIState *ui = macVNCResolvePermissionUI(input);
 
     if (ui.shouldStartServer)
@@ -316,17 +313,9 @@ static NSMenuItem *addRow(NSMenu *menu, NSString *title, SEL action,
 
 - (void)startServerFromMenu:(id)sender
 {
-    if (vncServerGetPort() > 0)
+    if (macVNCServerIsRunning_())
         return; /* already running */
     [self startServerIfPermitted];
-}
-
-- (void)captureBecameWorking
-{
-    /* Proof arrived: Screen Recording really is granted to this process. The
-       chip flips to Granted on the next refresh; update the menu right away so
-       it cannot keep claiming a permission problem while frames are flowing. */
-    [self updateMenuStatus];
 }
 
 - (void)showPermissionsPanel
@@ -337,7 +326,6 @@ static NSMenuItem *addRow(NSMenu *menu, NSString *title, SEL action,
         [self.permissionsPanel bringToFront];
         return;
     }
-    self.permissionsPanelVisible = YES;
     /* Let the single renderer own the text: writing a status string by hand here
        claimed "permissions required" even when the server was running, and the
        2 s timer silently corrected it moments later. */
@@ -347,7 +335,6 @@ static NSMenuItem *addRow(NSMenu *menu, NSString *title, SEL action,
         [[[MacVNCPermissionsPanelController alloc] init] autorelease];
     self.permissionsPanel = controller;
     [controller presentWithCompletion:^(MacVNCPermissionPanelAction action) {
-        self.permissionsPanelVisible = NO;
         self.permissionsPanel = nil;
 
         switch (action) {

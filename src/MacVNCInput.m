@@ -104,6 +104,40 @@ static const MacVNCSpecialKey specialKeyMap[] = {
     {MACVNC_KEYSYM_FN, MACVNC_KEYCODE_FN},      /* Fn */
 };
 
+/* Index of the first modifier entry in specialKeyMap above. Everything from
+   here to the end of the table is a modifier, which is what lets
+   macVNCInputResetModifiers derive the keycodes to release instead of
+   restating them: a hand-written second list silently missed any modifier
+   added later, leaving that key stuck down for the local user. */
+#define MACVNC_FIRST_MODIFIER_KEYSYM XK_Shift_L
+#define MACVNC_MAX_MODIFIER_KEYCODES 16
+
+/*
+ * The distinct keycodes of every modifier in specialKeyMap.
+ *
+ * De-duplicated: the table maps left and right variants to the SAME keycode
+ * (Shift_L and Shift_R are both 56), so releasing per table row would post the
+ * same key-up twice.
+ */
+static size_t macVNCInputCollectModifierKeycodes(unsigned short *out, size_t capacity)
+{
+    size_t count = 0;
+    bool inModifiers = false;
+    for (size_t i = 0; i < sizeof(specialKeyMap) / sizeof(specialKeyMap[0]); ++i) {
+        if (specialKeyMap[i].sym == MACVNC_FIRST_MODIFIER_KEYSYM)
+            inModifiers = true;
+        if (!inModifiers)
+            continue;
+        unsigned short code = (unsigned short)specialKeyMap[i].code;
+        bool seen = false;
+        for (size_t j = 0; j < count; ++j)
+            if (out[j] == code) { seen = true; break; }
+        if (!seen && count < capacity)
+            out[count++] = code;
+    }
+    return count;
+}
+
 void macVNCInputSetContext(rfbScreenInfoPtr screen, const MacVNCDisplayLayout *layout)
 {
     inputScreen = screen;
@@ -125,11 +159,16 @@ currentKeyboardFlags(void)
 
 void macVNCInputResetModifiers(void)
 {
-    static const CGKeyCode modifierKeyCodes[] = {56, 59, 58, 55, 61, MACVNC_KEYCODE_FN};
     pthread_mutex_lock(&keyboardMutex);
     macVNCClearModifiers(&keyboardModifierState);
-    for (size_t i = 0; i < sizeof(modifierKeyCodes) / sizeof(modifierKeyCodes[0]); ++i) {
-        CGEventRef keyUp = CGEventCreateKeyboardEvent(eventSource, modifierKeyCodes[i], false);
+    /* Release every modifier the keymap knows about, taken FROM that keymap:
+       a separate hand-written list of keycodes went stale the moment a modifier
+       was added, and a modifier left down affects the local user's own
+       keyboard. */
+    unsigned short codes[MACVNC_MAX_MODIFIER_KEYCODES];
+    size_t count = macVNCInputCollectModifierKeycodes(codes, sizeof(codes) / sizeof(codes[0]));
+    for (size_t i = 0; i < count; ++i) {
+        CGEventRef keyUp = CGEventCreateKeyboardEvent(eventSource, codes[i], false);
         if (keyUp) {
             CGEventSetFlags(keyUp, 0);
             CGEventPost(kCGSessionEventTap, keyUp);
@@ -431,3 +470,12 @@ bool macVNCInputHasResources(void)
     return eventSource || charKeyMap || charShiftKeyMap ||
            charAltGrKeyMap || charShiftAltGrKeyMap;
 }
+
+#if defined(MACVNC_ENABLE_TEST_HOOKS)
+size_t macVNCInputCopyModifierKeycodesForTesting(unsigned short *out, size_t capacity)
+{
+    /* The production function itself, so the test cannot pass against a
+       re-implementation that drifted from what actually runs. */
+    return macVNCInputCollectModifierKeycodes(out, capacity);
+}
+#endif

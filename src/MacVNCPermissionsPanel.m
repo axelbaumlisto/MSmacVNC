@@ -1,6 +1,5 @@
 #import "MacVNCPermissionsPanel.h"
 #import "MacVNCPermissionUI.h"
-#import "mac.h"
 #import "MacVNCPermissions.h"
 
 @interface MacVNCPermissionsPanelController ()
@@ -12,7 +11,6 @@
 @property (nonatomic, retain) NSButton *startButton;
 @property (nonatomic, retain) NSTimer *refreshTimer;
 @property (nonatomic, retain) NSMutableSet<NSNumber *> *openedPermissionKinds;
-@property (nonatomic, assign) BOOL restartRequired;
 @property (nonatomic, assign) MacVNCPermissionPanelAction action;
 @property (nonatomic, copy)   void (^completion)(MacVNCPermissionPanelAction);
 
@@ -140,7 +138,7 @@
        could not be tested at all. */
     /* Read the server state, never assert it: the panel can be open while the
        server is (re)started from the menu. */
-    MacVNCPermissionUIInput input = macVNCSamplePermissionUIInput(vncServerGetPort() > 0);
+    MacVNCPermissionUIInput input = macVNCSamplePermissionUI();
 
     MacVNCPermissionUIState *ui = macVNCResolvePermissionUI(input);
 
@@ -155,7 +153,6 @@
     self.screenButton.toolTip = chipTip;
     self.accessibilityButton.toolTip = chipTip;
 
-    self.restartRequired     = ui.buttonRelaunches;
     self.startButton.title   = ui.buttonTitle;
     self.startButton.enabled = ui.buttonEnabled;
     self.hintLabel.stringValue = ui.hint;
@@ -192,13 +189,14 @@
 
     /* "Run macVNC" means: make it work now.
 
-       If capture is already proven to work in THIS process, just start. If it is
-       not, relaunching is the only way to find out honestly — macOS applies a
-       freshly granted Screen Recording permission to a new process, and no API
-       can tell us in advance whether it did. The relaunch runs via /usr/bin/open
-       so TCC attributes capture to macVNC itself. */
-    [self finishWithAction:self.restartRequired ? MacVNCPermissionPanelActionRestart
-                                                : MacVNCPermissionPanelActionStart];
+       Both permissions bind to a process at launch, so a process that was
+       already running when the user granted one can never see it: relaunching
+       is the only honest way to find out. The resolver decides which of the two
+       this is; re-deriving it here from a mirrored flag was one more place to
+       drift out of step with the button's own label. */
+    MacVNCPermissionUIState *ui = macVNCResolvePermissionUI(macVNCSamplePermissionUI());
+    [self finishWithAction:ui.buttonRelaunches ? MacVNCPermissionPanelActionRestart
+                                               : MacVNCPermissionPanelActionStart];
 }
 
 - (void)preferencesClicked:(id)sender
@@ -238,8 +236,8 @@
 
 /* User closed the window: finish with no action, otherwise the completion would
    never run, the controller would stay retained forever, the refresh timer would
-   keep polling TCC, and permissionsPanelVisible would stay YES — which makes
-   every recovery affordance a no-op. */
+   keep polling TCC, and AppDelegate would keep treating the panel as open —
+   which makes every recovery affordance a no-op. */
 - (BOOL)windowShouldClose:(NSWindow *)sender
 {
     (void)sender;

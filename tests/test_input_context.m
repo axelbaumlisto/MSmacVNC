@@ -31,6 +31,38 @@ int main(void)
     macVNCInputShutdown();
     assert(macVNCInputHasResources() == false);
 
+    /* Every modifier in the keymap must be in the reset set, and nothing else.
+       The set used to be a hand-written list of keycodes that went stale when a
+       modifier was added - leaving that key stuck down for the LOCAL user. */
+    unsigned short mods[32];
+    size_t modCount = macVNCInputCopyModifierKeycodesForTesting(mods, 32);
+    /* Shift, Control, Option(Meta), Command(Alt), AltGr-Option-R, Fn. */
+    const unsigned short expected[] = {56, 59, 58, 55, 61, 63};
+    const size_t expectedCount = sizeof(expected) / sizeof(expected[0]);
+    if (modCount != expectedCount) {
+        fprintf(stderr, "FAIL reset set has %zu keycodes, expected %zu\n",
+                modCount, expectedCount);
+        abort();
+    }
+    for (size_t i = 0; i < expectedCount; ++i) {
+        bool found = false;
+        for (size_t j = 0; j < modCount; ++j)
+            if (mods[j] == expected[i]) { found = true; break; }
+        if (!found) {
+            fprintf(stderr, "FAIL modifier keycode %u missing from the reset set\n",
+                    expected[i]);
+            abort();
+        }
+    }
+    /* No NON-modifier may be released: a stray key-up for Space or Return would
+       be injected into the local session. */
+    for (size_t j = 0; j < modCount; ++j) {
+        if (mods[j] == 49 || mods[j] == 36) {
+            fprintf(stderr, "FAIL non-modifier keycode %u in the reset set\n", mods[j]);
+            abort();
+        }
+    }
+
     puts("input context tests passed");
     return 0;
 }

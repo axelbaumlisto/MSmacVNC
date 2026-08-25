@@ -34,3 +34,15 @@ void macVNCInputResetModifiers(void);
 /* rfb callbacks — assigned to rfbScreen->kbdAddEvent / ptrAddEvent. */
 void KbdAddEvent(rfbBool down, rfbKeySym keySym, struct _rfbClientRec *cl);
 void PtrAddEvent(int buttonMask, int x, int y, rfbClientPtr cl);
+
+#if defined(MACVNC_ENABLE_TEST_HOOKS)
+/*
+ * Copies the modifier keycodes that macVNCInputResetModifiers() will release,
+ * derived from the keymap. Exposed so a test can prove the derivation covers
+ * every modifier: a stale hand-written list used to leave a modifier down,
+ * which affects the LOCAL user's keyboard, not just the client's.
+ *
+ * Returns the number written (bounded by capacity).
+ */
+size_t macVNCInputCopyModifierKeycodesForTesting(unsigned short *out, size_t capacity);
+#endif

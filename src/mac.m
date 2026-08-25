@@ -47,15 +47,6 @@ static rfbScreenInfoPtr rfbScreen;
 void (*macVNCScreenCaptureFailureHandler)(bool likelyPermissionDenial,
                                           uint64_t serverGeneration) = NULL;
 
-/* Set by AppDelegate; invoked once when capture first delivers a frame.
-   Informational: the authoritative status reader is
-   CGPreflightScreenCaptureAccess() (see mac.h). */
-void (*macVNCScreenCaptureWorkingHandler)(void) = NULL;
-
-/* Cleared by every ScreenInit so the "capture works" signal is raised once per
-   RUN. As a function-static it survived restarts, so a second run never
-   reported working capture although mac.h promises exactly that. */
-static _Atomic bool gReportedCaptureWorking = false;
 
 /* Injected permission gate; see mac.h. NULL means unrestricted. */
 bool (*macVNCCaptureAllowed)(void) = NULL;
@@ -380,18 +371,12 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
   /* displayLayout.count is the single source for how many displays were
      selected; a parallel local counter was the same fact stored twice. */
   macVNCCaptureSessionReset();
-  atomic_store(&gReportedCaptureWorking, false);
   for (size_t i = 0; i < displayLayout.count; ++i) {
       const MacVNCDisplayGeometry *geometry = &displayLayout.displays[i];
       ScreenCapturer *capturer = [[ScreenCapturer alloc]
           initWithDisplay:geometry->input.displayID
           captureFramesPerSecond:captureFramesPerSecond
           frameHandler:^BOOL(CMSampleBufferRef sampleBuffer) {
-              bool expected = false;
-              if (atomic_compare_exchange_strong(&gReportedCaptureWorking,
-                                                 &expected, true) &&
-                  macVNCScreenCaptureWorkingHandler)
-                  macVNCScreenCaptureWorkingHandler();
               return macVNCCompositorSubmitFrame(rfbScreen, sampleBuffer, geometry) ? YES : NO;
           }
           errorHandler:captureErrorHandler];

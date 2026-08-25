@@ -13,27 +13,14 @@ typedef NS_ENUM(NSInteger, MacVNCPermissionStatus) {
     MacVNCPermissionStatusUnknown = 3,
 };
 
-extern NSString * const MacVNCPermissionSnapshotKindKey;
-extern NSString * const MacVNCPermissionSnapshotNameKey;
-extern NSString * const MacVNCPermissionSnapshotDescriptionKey;
-extern NSString * const MacVNCPermissionSnapshotStatusKey;
-extern NSString * const MacVNCPermissionSnapshotSettingsURLKey;
-
-NSArray<NSNumber *> *macVNCRequiredPermissionKinds(void);
+/* Human-readable name, for the panel and the menu rows. */
 NSString *macVNCPermissionDisplayName(MacVNCPermissionKind kind);
-NSString *macVNCPermissionDescription(MacVNCPermissionKind kind);
-NSString *macVNCPermissionSettingsURL(MacVNCPermissionKind kind);
-NSString *macVNCPermissionStatusText(MacVNCPermissionStatus status);
 
+/* Non-prompting status read. See the note below on the single reader. */
 MacVNCPermissionStatus macVNCCheckPermission(MacVNCPermissionKind kind);
-NSDictionary<NSString *, id> *macVNCPermissionSnapshot(MacVNCPermissionKind kind,
-                                                       MacVNCPermissionStatus status);
-NSArray<NSDictionary<NSString *, id> *> *macVNCPermissionSnapshots(void);
-NSArray<NSDictionary<NSString *, id> *> *macVNCMissingPermissionsFromSnapshots(NSArray<NSDictionary<NSString *, id> *> *snapshots);
-NSArray<NSDictionary<NSString *, id> *> *macVNCMissingPermissions(void);
-BOOL macVNCPermissionsAllGrantedFromSnapshots(NSArray<NSDictionary<NSString *, id> *> *snapshots);
-BOOL macVNCPermissionsAllGranted(void);
 
+/* Opens the relevant System Settings pane. Does NOT request the permission:
+   only the user can grant it, via "+". */
 void macVNCOpenPermissionSettings(MacVNCPermissionKind kind);
 
 /*

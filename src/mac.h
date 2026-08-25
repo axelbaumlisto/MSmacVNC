@@ -48,14 +48,6 @@ extern _Atomic int vncConnectedClients;
 extern void (*macVNCScreenCaptureFailureHandler)(bool likelyPermissionDenial,
                                                  uint64_t serverGeneration);
 
-/*
- * Invoked once per server run, from the capture queue, when the first frame is
- * actually delivered. Informational only — permission STATUS is read from
- * CGPreflightScreenCaptureAccess(), which is accurate for a GUI-launched app and
- * never prompts. (Earlier readings suggesting otherwise were taken from
- * shell-launched runs, where TCC attributes the request to the terminal.)
- */
-extern void (*macVNCScreenCaptureWorkingHandler)(void);
 
 /*
  * Answers "may we touch screen capture right now?".
