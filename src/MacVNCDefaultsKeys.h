@@ -20,4 +20,14 @@ extern NSString * const MacVNCBundleID;
 
 extern const int MacVNCDefaultPort;
 
+/*
+ * Registers the fallback value for every key above.
+ *
+ * Lives with the key declarations so adding a key and forgetting its default
+ * is one edit away from being noticed: a missing default reads as nil/0, which
+ * for MacVNCKeyAllowedClients would mean an empty allowlist rather than
+ * loopback-only.
+ */
+void macVNCRegisterDefaults(void);
+
 NS_ASSUME_NONNULL_END

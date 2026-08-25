@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.53 LANGUAGES C)
+project(macVNC VERSION 0.3.54 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -233,6 +233,12 @@ if(BUILD_TESTING)
     target_link_libraries(test_permission_ui ${FOUNDATION} ${APPKIT_LIBRARY}
         ${APPLICATION_SERVICES} ${SCREEN_CAPTURE_KIT} ${CORE_GRAPHICS})
     add_test(NAME permission_ui COMMAND test_permission_ui)
+
+    add_executable(test_defaults tests/test_defaults.m
+        src/MacVNCDefaultsKeys.m src/MacVNCListenMode.m)
+    target_include_directories(test_defaults PRIVATE src)
+    target_link_libraries(test_defaults ${FOUNDATION})
+    add_test(NAME defaults COMMAND test_defaults)
 
     add_executable(test_status_text tests/test_status_text.m src/MacVNCStatusText.m)
     target_include_directories(test_status_text PRIVATE src)
