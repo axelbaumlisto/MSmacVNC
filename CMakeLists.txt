@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.51 LANGUAGES C)
+project(macVNC VERSION 0.3.52 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -44,6 +44,8 @@ set(SOURCE_FILES
     src/DisplaySelection.c
     src/CompositeFramebuffer.h
     src/CompositeFramebuffer.c
+    src/MacVNCCompositor.h
+    src/MacVNCCompositor.m
     src/PointerState.h
     src/PointerState.c
     src/KeyboardModifierState.h
@@ -289,6 +291,7 @@ if(BUILD_TESTING)
         src/DisplayLayout.c
         src/DisplaySelection.c
         src/CompositeFramebuffer.c
+        src/MacVNCCompositor.m
         src/PointerState.c
         src/KeyboardModifierState.c
         src/CaptureRate.c
