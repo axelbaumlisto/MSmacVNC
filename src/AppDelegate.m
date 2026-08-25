@@ -50,6 +50,14 @@ static void macVNCScreenCaptureWorking_(void)
     });
 }
 
+/* The server core asks before touching capture. Answered without prompting:
+   CGPreflight never raises a dialog, and this app must never cause one. */
+static bool macVNCCaptureAllowed_(void)
+{
+    return macVNCCheckPermission(MacVNCPermissionKindScreenRecording) ==
+           MacVNCPermissionStatusGranted;
+}
+
 static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t generation)
 {
     [gSharedAppDelegate performSelectorOnMainThread:@selector(handleScreenCaptureFailure:)
@@ -69,6 +77,7 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
     gSharedAppDelegate = self;
     macVNCScreenCaptureFailureHandler = macVNCScreenCaptureFailed;
     macVNCScreenCaptureWorkingHandler = macVNCScreenCaptureWorking_;
+    macVNCCaptureAllowed = macVNCCaptureAllowed_;
     [self registerDefaults];
     [self setupStatusBarItem];
 

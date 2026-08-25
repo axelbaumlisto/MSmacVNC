@@ -51,6 +51,14 @@ void (*macVNCScreenCaptureFailureHandler)(bool likelyPermissionDenial,
    CGPreflightScreenCaptureAccess() (see mac.h). */
 void (*macVNCScreenCaptureWorkingHandler)(void) = NULL;
 
+/* Injected permission gate; see mac.h. NULL means unrestricted. */
+bool (*macVNCCaptureAllowed)(void) = NULL;
+
+static bool captureIsAllowed(void)
+{
+    return !macVNCCaptureAllowed || macVNCCaptureAllowed();
+}
+
 /* One composite framebuffer; uncovered regions remain black. */
 static void *frameBufferOne;
 
@@ -418,12 +426,11 @@ prepareAuthenticatedClient(rfbClientPtr cl)
         state->captureCounted = TRUE;
         int previous = atomic_fetch_add(&vncConnectedClients, 1);
         if (previous == 0) {
-            /* Never touch capture without the permission: doing so is what makes
-               macOS raise its own "macVNC wants to record this screen" dialog.
-               CGPreflight answers this without prompting, so an unauthorised
-               connection is refused quietly and the user keeps dealing with our
-               own panel instead of a system alert. */
-            if (!CGPreflightScreenCaptureAccess()) {
+            /* Never touch capture without the permission: doing so is what
+               makes macOS raise its own dialog. The decision belongs to the
+               permission owner, injected via macVNCCaptureAllowed, so this
+               core file neither reads TCC nor depends on AppKit for it. */
+            if (!captureIsAllowed()) {
                 rfbLog("Screen Recording is not granted; refusing to start capture\n");
                 if (macVNCScreenCaptureFailureHandler)
                     macVNCScreenCaptureFailureHandler(true, vncServerCurrentGeneration());
@@ -735,6 +742,12 @@ vncServerActivePolicyAllowsEveryone(void)
 }
 
 #if defined(MACVNC_ENABLE_TEST_HOOKS)
+bool
+macVNCCaptureIsAllowedForTesting(void)
+{
+    return captureIsAllowed();
+}
+
 bool
 macVNCServerHasLifecycleResourcesForTesting(void)
 {
