@@ -43,29 +43,23 @@ static NSArray<NSString *> *macVNCTrimmedNonEmptyLines(NSString *text)
     return lines;
 }
 
-/* Extra manual allowlist lines = stored allowlist minus preset CIDRs and the
-   safe localhost default. Pure model helper, kept out of the view builder. */
+/* Extra manual allowlist lines = stored allowlist minus ONLY the entries a
+ * previous save added automatically (recorded in autoAllowedClients).
+ *
+ * Deliberately does NOT subtract every visible interface preset: a user may
+ * legitimately type a CIDR by hand that happens to equal some other interface's
+ * preset (e.g. a Tailscale subnet-router range that also matches the local LAN).
+ * Subtracting those would silently delete the user's own entry on an unrelated
+ * save — which, for a remote-access tool, can lock the operator out. */
 static NSString *macVNCManualAllowedText(NSString *currentAllowed,
-                                         NSArray<NSDictionary *> *networkRows,
                                          NSString *previouslyAutoAdded)
 {
-    NSMutableArray<NSString *> *presetCIDRs = [NSMutableArray array];
-    for (NSDictionary *row in networkRows) {
-        if ([row[MacVNCRowKeyAllowPresetVisible] boolValue])
-            [presetCIDRs addObject:row[MacVNCRowKeyAllowCIDR]];
-    }
-    /* Also subtract CIDRs a previous save added automatically. Without this,
-       once that network is gone its auto CIDR looks user-typed and would be
-       re-persisted forever — the allowlist would grow to include every network
-       the Mac has ever joined. */
     NSArray<NSString *> *autoAdded = macVNCTrimmedNonEmptyLines(previouslyAutoAdded ?: @"");
     NSMutableArray<NSString *> *manualLines = [NSMutableArray array];
     for (NSString *trimmed in macVNCTrimmedNonEmptyLines(currentAllowed)) {
         BOOL isSafeLocalhostDefault = [trimmed isEqualToString:MacVNCLoopbackIPv4] ||
                                       [trimmed isEqualToString:[MacVNCLoopbackIPv4 stringByAppendingString:@"/32"]];
-        if (![presetCIDRs containsObject:trimmed] &&
-            ![autoAdded containsObject:trimmed] &&
-            !isSafeLocalhostDefault)
+        if (![autoAdded containsObject:trimmed] && !isSafeLocalhostDefault)
             [manualLines addObject:trimmed];
     }
     return [manualLines componentsJoinedByString:@"\n"];
@@ -241,8 +235,7 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
     NSString *currentAllowed = [defaults stringForKey:MacVNCKeyAllowedClients] ?: @"";
     NSArray<NSDictionary *> *networkRows = macVNCActiveNetworkRows();
     NSString *manualAllowed = macVNCManualAllowedText(
-        currentAllowed, networkRows,
-        [defaults stringForKey:MacVNCKeyAutoAllowedClients]);
+        currentAllowed, [defaults stringForKey:MacVNCKeyAutoAllowedClients]);
 
     NSTextField *portField = nil;
     NSSecureTextField *pwdField = nil;
@@ -293,13 +286,34 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
     } else if ([newMode isEqualToString:MacVNCListenModeSelected] && tag >= kListenTagRowBase) {
         NSUInteger rowIndex = (NSUInteger)(tag - kListenTagRowBase);
         if (rowIndex < networkRows.count) {
-            NSString *autoCIDR = networkRows[rowIndex][MacVNCRowKeyAllowCIDR];
-            [allowedSet addObject:autoCIDR];
-            [autoAdded addObject:autoCIDR];
+            NSDictionary *row = networkRows[rowIndex];
+            /* Only auto-add a preset that is meaningful as an allowlist. For a
+               point-to-point interface the "CIDR" is the host's OWN /32, which
+               as an allowlist would match nobody and lock every client out. In
+               that case the user must supply the peer range explicitly. */
+            if ([row[MacVNCRowKeyAllowPresetVisible] boolValue]) {
+                NSString *autoCIDR = row[MacVNCRowKeyAllowCIDR];
+                [allowedSet addObject:autoCIDR];
+                [autoAdded addObject:autoCIDR];
+            }
         }
     }
     for (NSString *trimmed in macVNCTrimmedNonEmptyLines(allowedText.string))
         [allowedSet addObject:trimmed];
+
+    /* Refuse to save a policy that cannot admit anyone: with no listen-side
+       preset and no manual entries the server would fail closed at startup. */
+    if (allowedSet.count == 0) {
+        NSAlert *emptyAlert = [[[NSAlert alloc] init] autorelease];
+        emptyAlert.messageText = @"No clients would be allowed";
+        emptyAlert.informativeText = @"The selected interface does not imply a client "
+                                      "network (for example a point-to-point VPN link), "
+                                      "and no extra allowed clients were entered. Add the "
+                                      "peer IP or subnet under \u201cExtra allowed clients\u201d.";
+        [emptyAlert addButtonWithTitle:@"OK"];
+        [emptyAlert runModal];
+        return;
+    }
     NSMutableString *combinedAllowed = [NSMutableString string];
     for (NSString *entry in allowedSet)
         [combinedAllowed appendFormat:@"%@\n", entry];
@@ -345,15 +359,20 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
        than silently truncating their "long" password's security to 8 bytes. */
     NSString *trimmedPwd = [pwdField.stringValue stringByTrimmingCharactersInSet:
                             NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (trimmedPwd.length > MACVNC_VNC_PASSWORD_EFFECTIVE_MAX) {
+    /* DES truncates BYTES, not characters: an 8-character password can still be
+       cut mid-way if it contains non-ASCII (é = 2 bytes, emoji = 4). Measure the
+       UTF-8 byte length so the warning is accurate for any input. */
+    NSUInteger passwordBytes = [trimmedPwd lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+    if (passwordBytes > MACVNC_VNC_PASSWORD_EFFECTIVE_MAX) {
         NSAlert *pwdWarning = [[[NSAlert alloc] init] autorelease];
-        pwdWarning.messageText = @"Only the first 8 characters are used";
+        pwdWarning.messageText = @"Only the first 8 bytes of the password are used";
         pwdWarning.informativeText = [NSString stringWithFormat:
-            @"The VNC protocol derives its key from the first %d characters (DES). "
-            @"Your password is %lu characters, so the rest is ignored \u2014 and changing only "
-            @"the part after character %d would NOT change the credential.\n\n"
-            @"Save anyway, or go back and choose a different first %d characters?",
-            MACVNC_VNC_PASSWORD_EFFECTIVE_MAX, (unsigned long)trimmedPwd.length,
+            @"The VNC protocol derives its key from the first %d BYTES (DES). "
+            @"Your password is %lu bytes, so the rest is ignored \u2014 and changing only "
+            @"the part after byte %d would NOT change the credential.\n\n"
+            @"Note: non-ASCII characters take more than one byte (é = 2, emoji = 4).\n\n"
+            @"Save anyway, or go back and choose a different first %d bytes?",
+            MACVNC_VNC_PASSWORD_EFFECTIVE_MAX, (unsigned long)passwordBytes,
             MACVNC_VNC_PASSWORD_EFFECTIVE_MAX, MACVNC_VNC_PASSWORD_EFFECTIVE_MAX];
         [pwdWarning addButtonWithTitle:@"Save anyway"];
         [pwdWarning addButtonWithTitle:@"Cancel"];

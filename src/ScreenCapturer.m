@@ -31,7 +31,7 @@ static const void * const kMacVNCSampleQueueKey = &kMacVNCSampleQueueKey;
 @property (nonatomic, assign, readonly) NSInteger captureFramesPerSecond;
 
 // handlers
-@property (nonatomic, copy, nonnull) void (^frameHandler)(CMSampleBufferRef sampleBuffer);
+@property (nonatomic, copy, nonnull) BOOL (^frameHandler)(CMSampleBufferRef sampleBuffer);
 @property (nonatomic, copy, nonnull) void (^errorHandler)(NSError *error);
 
 @end
@@ -74,7 +74,7 @@ static void endMailboxActivity(void *context)
 
 - (instancetype)initWithDisplay:(CGDirectDisplayID)displayID
         captureFramesPerSecond:(NSInteger)captureFramesPerSecond
-                   frameHandler:(void (^)(CMSampleBufferRef))frameHandler
+                   frameHandler:(BOOL (^)(CMSampleBufferRef))frameHandler
                    errorHandler:(void (^)(NSError *))errorHandler {
     if (self = [super init]) {
         _displayID = displayID;
@@ -272,7 +272,29 @@ static void endMailboxActivity(void *context)
                     self.stream == (SCStream *)item.stream;
         });
         if (valid) {
-            self.frameHandler((CMSampleBufferRef)item.frame);
+            /* The handler may decline the frame (compositor could not take every
+               client's send lock right now). Dropping it would lose those pixels
+               until the screen changes again — on a screen that then goes static
+               the loss is permanent. So re-submit and retry shortly instead. */
+            BOOL composited = self.frameHandler((CMSampleBufferRef)item.frame);
+            if (!composited) {
+                if (macVNCFrameMailboxSubmit(&_frameMailbox, item.frame,
+                                             item.stream, item.generation)) {
+                    /* We now own a scheduling reference again; run the next drain
+                       after a short delay so the busy client can finish sending. */
+                    __block ScreenCapturer *strongSelf = [self retain];
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_MSEC),
+                                   self.frameQueue, ^{
+                        [strongSelf drainFrameMailbox];
+                        [strongSelf release];
+                    });
+                }
+                /* Submit consumed our reference on success; on failure the mailbox
+                   released it. Either way we must not release it again here. */
+                if (!macVNCFrameMailboxEndDrainIteration(&_frameMailbox))
+                    return;
+                return;
+            }
             /* Ready means the generation's frame has finished composition. */
             dispatch_sync(self.stateQueue, ^{
                 if (self.captureRequested &&

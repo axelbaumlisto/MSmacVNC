@@ -39,7 +39,16 @@ extern _Atomic int vncConnectedClients;
  * with a TCC/Screen-Recording denial. Other capture failures (display removed,
  * stream stopped for unrelated reasons) pass FALSE so the caller does not latch
  * a permanent "permission missing" state on a transient/topology error. */
-extern void (*macVNCScreenCaptureFailureHandler)(bool likelyPermissionDenial);
+extern void (*macVNCScreenCaptureFailureHandler)(bool likelyPermissionDenial,
+                                                 uint64_t serverGeneration);
+
+/*
+ * Monotonic id of the current server run, incremented by every vncServerStart().
+ * A capture-failure notification carries the generation it was raised for, so a
+ * notification queued by an already-stopped run (e.g. delivered after a modal
+ * finishes) can be discarded instead of killing a freshly started server.
+ */
+uint64_t vncServerCurrentGeneration(void);
 
 /* -----------------------------------------------------------------------
  * Server lifecycle
@@ -80,6 +89,14 @@ rfbBool vncServerCopyActiveBindAddress(char *bindAddress, size_t size);
 
 /* Client access mode of the RUNNING server. Only valid when the server runs. */
 MacVNCClientAccessMode vncServerActiveAccessMode(void);
+
+/*
+ * TRUE when the RUNNING server's effective policy admits every IPv4 client —
+ * either an explicitly confirmed allow-all, or an allowlist that contains a /0
+ * entry (which matches everyone). The UI must use this rather than inferring
+ * "allowlist" from the mode, or it would report a restriction that is not real.
+ */
+rfbBool vncServerActivePolicyAllowsEveryone(void);
 
 #if defined(MACVNC_ENABLE_TEST_HOOKS)
 #include <stdbool.h>

@@ -1,3 +1,37 @@
+# macVNC 0.3.23
+
+## Regression fixes in the 0.3.19–0.3.22 changes (found by review of the new code itself)
+
+- **Frames are no longer dropped when a client is busy.** 0.3.21 replaced the blocking
+  per-client send lock with a trylock to fix a real freeze, but simply discarded the frame
+  on contention. Since ScreenCaptureKit only delivers frames when content changes, the last
+  frame of a change burst could be lost permanently — leaving viewers on a stale screen with
+  no further updates. The capture handler now reports whether the frame was composited, and
+  a declined frame is re-submitted and retried shortly instead of dropped.
+- **Preferences no longer deletes hand-typed allowlist entries.** The “manual entries”
+  computation subtracted every visible interface preset, so a user-typed CIDR that happened
+  to match another interface’s preset vanished on an unrelated save — a possible remote
+  lockout. Only entries this app actually auto-added (tracked in `autoAllowedClients`) are
+  subtracted now.
+- **Selecting a point-to-point (VPN) interface no longer produces an allowlist that admits
+  nobody.** Such an interface’s “network” is the host’s own /32; it is no longer auto-added,
+  and saving a policy with no allowed clients is refused with an explanation.
+- **The 8-byte password warning now measures bytes, not characters.** DES truncates bytes,
+  so a short non-ASCII password (accents, emoji) could still be silently cut.
+- **A `/0` allowlist is now labelled “allow all”.** The status line inferred the label from
+  the access mode, which stayed `allowlist` for a confirmed `0.0.0.0/0` — exactly the kind of
+  false restriction claim 0.3.22 set out to remove. It now reflects the effective policy.
+- **A stale capture failure can no longer kill a freshly restarted server.** With one capturer
+  per display, several failure notifications could queue behind a modal and fire after the
+  user had already recovered. Notifications now carry a server generation and stale ones are
+  ignored; the non-permission path also no longer clears a latch it did not set.
+
+## Validation
+
+- Release build: passed. clang static analyzer: 0 warnings.
+- CTest: 17/17 passed. Reference libvncclient: AUTH_OK, composite 5552x2715.
+- Developer ID + hardened runtime + entitlements: signed, notarized, stapled.
+
 # macVNC 0.3.22
 
 ## Truthful status & real start failures
