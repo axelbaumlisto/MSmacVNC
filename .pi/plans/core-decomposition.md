@@ -41,7 +41,14 @@ rfbServerInitialized, publishedServerPort, serverGeneration,
 
 ## Шаги
 
-### Шаг 1 — сгруппировать состояние в структуры (без смены поведения)
+### Шаг 1 — ОТМЕНЁН как декоративный
+
+Перенос 20 глобалей в структуры оставил бы состояние общим, просто
+адресуемым через точку: большой diff по всем путям, выгода нулевая.
+Вместо этого каждый извлекаемый модуль владеет своим состоянием сам —
+глобали исчезают инкапсуляцией, а не переездом.
+
+### Шаг 1-бис — выбор дисплеев (СДЕЛАНО, bc1d070)
 - [ ] `MacVNCCompositor`  — `frameBufferOne`, `displayLayout`, `compositorMutex`;
 - [ ] `MacVNCClientRegistry` — `screenCapturers`, `clientLifecycleMutex`,
       `publishedServerPort`, `serverGeneration`;
@@ -52,21 +59,21 @@ rfbServerInitialized, publishedServerPort, serverGeneration,
   только адресацию полей. Тесты и живой прогон обязательны — это самый
   «безопасный на вид» и потому опасный шаг.
 
-### Шаг 2 — вынести компоновку кадра
+### Шаг 2 — компоновщик (СДЕЛАНО, 5aef4b5)
 - [ ] `MacVNCCompositor.{h,m}`: `updateCompositeFrame`, `markCompositeDirty`,
       `lockCurrentClients`, `unlockCurrentClients`;
 - [ ] на вход — структура из шага 1, никаких глобалей;
 - **проверка:** новый unit-тест композитора на снимке из двух дисплеев;
       живой прогон обоих мониторов (сейчас это покрыто только вручную).
 
-### Шаг 3 — вынести жизненный цикл сервера
+### Шаг 3 — жизненный цикл клиентов (НЕ СДЕЛАН)
 - [ ] `MacVNCServerLifecycle.{h,m}`: `vncServerStart/Stop/StopLocked`,
       `serverHasLifecycleResourcesLocked`, `vncServerCloseListeners`;
 - [ ] `ScreenInit` остаётся сборщиком: вызывает уже извлечённые шаги;
 - **проверка:** старт/стоп 10 раз подряд без утечек портов
       (`lsof -nP -iTCP:5903` после каждого), `leaks`.
 
-### Шаг 4 — убрать TCC из ядра (Dependency Inversion)
+### Шаг 4 — TCC вне ядра (СДЕЛАНО, 46b5f2d)
 - [ ] `prepareAuthenticatedClient` сейчас сам решает про права
       (`CGPreflightScreenCaptureAccess` внутри `mac.m`);
 - [ ] заменить на инъекцию: `bool (*macVNCCaptureAllowed)(void)`, задаётся
@@ -74,14 +81,14 @@ rfbServerInitialized, publishedServerPort, serverGeneration,
 - **проверка:** тест ядра с подставной функцией «прав нет» → захват не
       стартует, диалог не поднимается. Сейчас это непроверяемо вообще.
 
-### Шаг 5 — AppDelegate: остальные извлечения
+### Шаг 5 — AppDelegate (ЧАСТИЧНО, e309dea: defaults; меню/запуск не тронуты)
 - [ ] `MacVNCStatusMenuController` — построение и обновление меню;
 - [ ] `MacVNCServerLauncher` — `startServer`, обработка ошибок старта;
 - [ ] `registerDefaults` — рядом с `MacVNCDefaultsKeys`;
 - **проверка:** меню живое (щёлкнуть каждый пункт), строки обновляются при
       открытом меню (таймер в `NSRunLoopCommonModes`).
 
-### Шаг 6 — привести ARCHITECTURE.md к реальности
+### Шаг 6 — ARCHITECTURE.md (СДЕЛАНО, e309dea + packaging/check_architecture.sh)
 - [ ] карта слоёв, новые модули, порядок захвата мьютексов;
 - **проверка:** каждое имя из документа существует в коде (скриптом).
 
@@ -120,3 +127,16 @@ rfbServerInitialized, publishedServerPort, serverGeneration,
 - установка `ditto` поверх, никогда `rm -rf`;
 - бэкап `/Applications/macVNC.app` перед заменой;
 - один экземпляр перед каждым замером.
+
+
+## Итог прохода (2026-08-25)
+
+```text
+mac.m       871 → 746   AppDelegate 662 → 590
+тестов      18  → 22    все новые проверены мутацией
+установлена 0.3.54, коммиты bc1d070 5aef4b5 46b5f2d e309dea
+```
+
+Осталось: шаг 3 (клиентский жизненный цикл со своим мьютексом) и остаток
+шага 5 (StatusMenuController, ServerLauncher). Оба — связные куски, к ним
+можно вернуться независимо.
