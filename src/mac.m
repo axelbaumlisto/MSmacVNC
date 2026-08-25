@@ -29,6 +29,7 @@
 #import "DisplayLayout.h"
 #import "DisplaySelection.h"
 #import "MacVNCCompositor.h"
+#import "MacVNCCaptureSession.h"
 #import "MacVNCInput.h"
 #import "ReadinessPolicy.h"
 #import "CaptureRate.h"
@@ -50,6 +51,11 @@ void (*macVNCScreenCaptureFailureHandler)(bool likelyPermissionDenial,
    Informational: the authoritative status reader is
    CGPreflightScreenCaptureAccess() (see mac.h). */
 void (*macVNCScreenCaptureWorkingHandler)(void) = NULL;
+
+/* Cleared by every ScreenInit so the "capture works" signal is raised once per
+   RUN. As a function-static it survived restarts, so a second run never
+   reported working capture although mac.h promises exactly that. */
+static _Atomic bool gReportedCaptureWorking = false;
 
 /* Injected permission gate; see mac.h. NULL means unrestricted. */
 bool (*macVNCCaptureAllowed)(void) = NULL;
@@ -84,7 +90,6 @@ static void macVNCClearStoredPassword(void)
     }
 }
 static MacVNCDisplayLayout displayLayout;
-static NSMutableArray<ScreenCapturer *> *screenCapturers;
 static rfbBool rfbServerInitialized = FALSE;
 static _Atomic int publishedServerPort = -1;
 /* Bumped by every start; stamped into capture-failure notifications so stale
@@ -358,16 +363,17 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
 
   /* displayLayout.count is the single source for how many displays were
      selected; a parallel local counter was the same fact stored twice. */
-  screenCapturers = [[NSMutableArray alloc] initWithCapacity:displayLayout.count];
+  macVNCCaptureSessionReset();
+  atomic_store(&gReportedCaptureWorking, false);
   for (size_t i = 0; i < displayLayout.count; ++i) {
       const MacVNCDisplayGeometry *geometry = &displayLayout.displays[i];
       ScreenCapturer *capturer = [[ScreenCapturer alloc]
           initWithDisplay:geometry->input.displayID
           captureFramesPerSecond:captureFramesPerSecond
           frameHandler:^BOOL(CMSampleBufferRef sampleBuffer) {
-              static _Atomic bool reportedWorking = false;
               bool expected = false;
-              if (atomic_compare_exchange_strong(&reportedWorking, &expected, true) &&
+              if (atomic_compare_exchange_strong(&gReportedCaptureWorking,
+                                                 &expected, true) &&
                   macVNCScreenCaptureWorkingHandler)
                   macVNCScreenCaptureWorkingHandler();
               return macVNCCompositorSubmitFrame(rfbScreen, sampleBuffer, geometry) ? YES : NO;
@@ -377,7 +383,7 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
           rfbErr("Could not initialize display capture mailbox\n");
           return FALSE;
       }
-      [screenCapturers addObject:capturer];
+      macVNCCaptureSessionAdd(capturer);
       [capturer release];
   }
 
@@ -397,20 +403,6 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
   return TRUE;
 }
 
-
-static void
-startDisplayCaptures(void)
-{
-    for (ScreenCapturer *capturer in screenCapturers)
-        [capturer startCapture];
-}
-
-static void
-stopDisplayCapturesAndWait(void)
-{
-    for (ScreenCapturer *capturer in screenCapturers)
-        [capturer stopCaptureAndWait];
-}
 
 static BOOL
 prepareAuthenticatedClient(rfbClientPtr cl)
@@ -435,9 +427,9 @@ prepareAuthenticatedClient(rfbClientPtr cl)
                 if (macVNCScreenCaptureFailureHandler)
                     macVNCScreenCaptureFailureHandler(true, vncServerCurrentGeneration());
             } else {
-                startDisplayCaptures();
+                macVNCCaptureSessionStart();
                 rfbLog("First client password accepted; starting %lu display captures\n",
-                       (unsigned long)screenCapturers.count);
+                       (unsigned long)macVNCCaptureSessionCount());
             }
         }
     }
@@ -446,19 +438,8 @@ prepareAuthenticatedClient(rfbClientPtr cl)
 
     BOOL allReady = alreadyReady;
     if (!alreadyReady) {
-        MacVNCReadinessBudget budget = macVNCReadinessBudgetStart(
-            macVNCReadinessNow(), INITIAL_READINESS_TIMEOUT_NANOSECONDS);
-        allReady = YES;
-        for (ScreenCapturer *capturer in screenCapturers) {
-            uint64_t remaining = macVNCReadinessBudgetRemaining(
-                &budget, macVNCReadinessNow());
-            if (remaining == 0 ||
-                ![capturer waitForFirstFrameWithTimeout:
-                    (NSTimeInterval)remaining / NSEC_PER_SEC]) {
-                allReady = NO;
-                break;
-            }
-        }
+        allReady = macVNCCaptureSessionWaitForFirstFrames(
+            INITIAL_READINESS_TIMEOUT_NANOSECONDS) ? YES : NO;
         BOOL logTimeout = NO;
         pthread_mutex_lock(&clientLifecycleMutex);
         if (cl->clientData == state)
@@ -491,14 +472,7 @@ displayHook(rfbClientPtr cl)
     if (!timedOut)
         return;
 
-    BOOL allReady = YES;
-    for (ScreenCapturer *capturer in screenCapturers) {
-        if (![capturer isCurrentGenerationReady]) {
-            allReady = NO;
-            break;
-        }
-    }
-    if (!allReady)
+    if (!macVNCCaptureSessionAllReady())
         return;
 
     BOOL logRecovery = NO;
@@ -520,10 +494,10 @@ static void clientGone(rfbClientPtr cl)
         if (remaining <= 0) {
             remaining = 0;
             atomic_store(&vncConnectedClients, 0);
-            stopDisplayCapturesAndWait();
+            macVNCCaptureSessionStopAndWait();
             macVNCInputResetModifiers();
             rfbLog("Last authenticated client disconnected; %lu display captures stopped and modifiers reset\n",
-                   (unsigned long)screenCapturers.count);
+                   (unsigned long)macVNCCaptureSessionCount());
         }
     } else {
         /* Un-counted client (never authenticated): report the current count. */
@@ -565,7 +539,7 @@ static enum rfbNewClientAction newClient(rfbClientPtr cl)
 static bool
 serverHasLifecycleResourcesLocked(void)
 {
-    return rfbScreen || frameBufferOne || screenCapturers ||
+    return rfbScreen || frameBufferOne || macVNCCaptureSessionCount() > 0 ||
            macVNCInputHasResources();
 }
 
@@ -580,9 +554,8 @@ vncServerStopLocked(void)
         rfbShutdownServer(rfbScreen, TRUE);
     rfbServerInitialized = FALSE;
 
-    stopDisplayCapturesAndWait();
-    [screenCapturers release];
-    screenCapturers = nil;
+    macVNCCaptureSessionStopAndWait();
+    macVNCCaptureSessionReset();
     atomic_store(&vncConnectedClients, 0);
     if (rfbScreen) {
         rfbScreenCleanup(rfbScreen);
