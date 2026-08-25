@@ -5,6 +5,7 @@
 
 #import "MacVNCCaptureSession.h"
 #import "ScreenCapturer.h"
+#import <CoreGraphics/CoreGraphics.h>
 
 /*
  * The capture-stream set for one server run.
@@ -36,8 +37,31 @@ int main(void)
         assert(macVNCCaptureSessionAdd(nil) == false);
         assert(macVNCCaptureSessionCount() == 0);
 
-        /* Reset is idempotent and safe to call between runs. */
+        /* A NON-empty set: without this every assertion above also holds for an
+           implementation whose Add does nothing. Constructing a ScreenCapturer
+           touches no ScreenCaptureKit and no TCC - capture only starts on
+           -startCapture, which is deliberately not called here. */
+        ScreenCapturer *capturer =
+            [[ScreenCapturer alloc] initWithDisplay:CGMainDisplayID()
+                             captureFramesPerSecond:30
+                                       frameHandler:^BOOL(CMSampleBufferRef b) {
+                                           (void)b; return YES;
+                                       }
+                                       errorHandler:^(NSError *e) { (void)e; }];
+        assert(capturer != nil);
+        assert(macVNCCaptureSessionAdd(capturer) == true);
+        assert(macVNCCaptureSessionCount() == 1);
+
+        /* The session retains, so our release is not the last one. Over-release
+           here would crash; failing to retain would leave a dangling capturer. */
+        assert(capturer.retainCount >= 2);
+        [capturer release];
+        assert(macVNCCaptureSessionCount() == 1);
+
+        /* Reset releases the previous set - the one MRC operation in the module.
+           Running it twice also proves it is idempotent between runs. */
         macVNCCaptureSessionReset();
+        assert(macVNCCaptureSessionCount() == 0);
         macVNCCaptureSessionReset();
         assert(macVNCCaptureSessionCount() == 0);
 

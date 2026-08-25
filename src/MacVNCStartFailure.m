@@ -5,6 +5,11 @@ MacVNCStartAdvice macVNCResolveStartAdvice(MacVNCStartOutcome outcome)
     if (outcome.started)
         return MacVNCStartAdviceNone;
 
+    /* Already running is not a failure. Advising a port change here would be
+       actively misleading: the server is serving on the current port. */
+    if (outcome.alreadyRunning)
+        return MacVNCStartAdviceNone;
+
     /* A bad configuration is reported even when permissions are missing: the
        user must fix it regardless, and its message is specific. */
     if (outcome.hasConfigurationError)

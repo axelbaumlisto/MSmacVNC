@@ -3,6 +3,8 @@
 #include <assert.h>
 #include <stdio.h>
 
+#include <stdatomic.h>
+
 #include "mac.h"
 
 /*
@@ -56,6 +58,35 @@ int main(void)
            previous run's process state. */
         macVNCCaptureAllowed = NULL;
         assert(macVNCCaptureIsAllowedForTesting() == true);
+
+        /* The rule that actually matters is not "the gate returns false" but
+           "the core does not START capture when it does". Asserted through the
+           real reconciler and a start counter, because touching capture without
+           the permission is what makes macOS raise its own dialog. */
+        macVNCResetCaptureStateForTesting();
+        assert(macVNCCaptureStartCountForTesting() == 0);
+
+        macVNCCaptureAllowed = countingGate;
+        gAnswer = false;
+        atomic_store(&vncConnectedClients, 1);   /* a client is waiting */
+        macVNCReconcileCaptureForTesting();       /* the real decision path */
+        assert(macVNCCaptureStartCountForTesting() == 0); /* refused: no start */
+
+        /* Drop the client and settle, without clearing the counter yet. */
+        atomic_store(&vncConnectedClients, 0);
+        macVNCReconcileCaptureForTesting();
+        assert(macVNCCaptureStartCountForTesting() == 0);
+
+        /* With the permission, the same path does start capture - so the zero
+           above is a real refusal, not a path that never runs. */
+        gAnswer = true;
+        atomic_store(&vncConnectedClients, 1);
+        macVNCReconcileCaptureForTesting();
+        assert(macVNCCaptureStartCountForTesting() == 1);
+
+        atomic_store(&vncConnectedClients, 0);
+        macVNCReconcileCaptureForTesting();
+        macVNCCaptureAllowed = NULL;
 
         printf("test_capture_gate: all assertions passed\n");
     }

@@ -25,9 +25,13 @@ NS_ASSUME_NONNULL_BEGIN
  * caller MUST stay alive: this is an accessory app with no Dock icon, so quitting
  * without a successor leaves the user nothing to click.
  *
- * `closeListeners` runs immediately before the spawn, once the call is committed:
- * the child inherits descriptors, and an open listener makes its bind() fail.
- * Doing it earlier would strand the app with no listeners if the spawn failed.
+ * `closeListeners` runs immediately before the spawn. It cannot be deferred:
+ * the child inherits descriptors, and a listener still held here makes its
+ * bind() fail.
+ *
+ * So the port IS already released when a spawn fails. On NO the caller must
+ * therefore stop the server as well, or the app keeps advertising a port it no
+ * longer serves (see -[AppDelegate scheduleRelaunchHelper]).
  */
 + (BOOL)relaunchClosingListeners:(void (^)(void))closeListeners;
 

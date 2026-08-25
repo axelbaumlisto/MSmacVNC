@@ -8,10 +8,13 @@ macVNCSelectDisplays(const MacVNCDisplayInput *available,
                      MacVNCDisplayInput *selected,
                      size_t *selectedCount)
 {
+    /* Zero the count BEFORE any early return: the header promises it is 0 on
+       every non-OK result, and a caller that trusts that while the value is
+       untouched garbage would build a layout from uninitialised displays. */
+    if (selectedCount)
+        *selectedCount = 0;
     if (!available || !selected || !selectedCount)
         return MACVNC_DISPLAY_SELECTION_UNSUPPORTED_COUNT;
-
-    *selectedCount = 0;
 
     if (availableCount == 0 || availableCount > MACVNC_MAX_DISPLAYS)
         return MACVNC_DISPLAY_SELECTION_UNSUPPORTED_COUNT;

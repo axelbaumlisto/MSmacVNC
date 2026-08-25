@@ -11,6 +11,9 @@
 /* Identity key for the sample-handler queue (see -dealloc). The address of this
    static is the key; its value is irrelevant. */
 static const void * const kMacVNCSampleQueueKey = &kMacVNCSampleQueueKey;
+/* Same purpose for the state queue: the last reference can be dropped by a
+   block finishing there, and a dispatch_sync from that thread would deadlock. */
+static const void * const kMacVNCStateQueueKey = &kMacVNCStateQueueKey;
 
 @interface ScreenCapturer () {
     pthread_mutex_t _readinessMutex;
@@ -71,7 +74,11 @@ static void endMailboxActivity(void *context)
     dispatch_group_leave((dispatch_group_t)context);
 }
 
-@implementation ScreenCapturer
+@implementation ScreenCapturer {
+    /* Set when a stop timed out with capture work still in flight; read by
+       -isSafeToDeallocate from another thread, hence atomic. */
+    _Atomic bool _stuckWork;
+}
 
 - (instancetype)initWithDisplay:(CGDirectDisplayID)displayID
         captureFramesPerSecond:(NSInteger)captureFramesPerSecond
@@ -94,6 +101,10 @@ static void endMailboxActivity(void *context)
         dispatch_queue_set_specific(_sampleHandlerQueue,
                                     kMacVNCSampleQueueKey,
                                     (void *)kMacVNCSampleQueueKey,
+                                    NULL);
+        dispatch_queue_set_specific(_stateQueue,
+                                    kMacVNCStateQueueKey,
+                                    (void *)kMacVNCStateQueueKey,
                                     NULL);
         _operationGroup = dispatch_group_create();
         _captureRequested = NO;
@@ -246,8 +257,23 @@ static void endMailboxActivity(void *context)
         NSLog(@"macVNC: capture stop timed out waiting for in-flight "
               @"ScreenCaptureKit work (display %u); continuing shutdown",
               self.displayID);
+        /* Remember it: -dealloc must not free state a live callback still uses,
+           and it cannot re-derive this - the group may complete later. */
+        atomic_store(&_stuckWork, true);
     }
     [stream release];
+}
+
+/*
+ * NO when in-flight capture work never finished, so this object must not be
+ * deallocated - freeing its queues and mailbox would be a use-after-free from
+ * the stuck callback. The owner keeps such a capturer alive on purpose; that
+ * leak only happens on an already-degraded shutdown and is far cheaper than
+ * either a crash or the unbounded wait it replaced.
+ */
+- (BOOL)isSafeToDeallocate
+{
+    return !atomic_load(&_stuckWork);
 }
 
 
@@ -412,14 +438,27 @@ static void endMailboxActivity(void *context)
     return ready;
 }
 
+/* Waits, bounded, for every already-admitted sample callback to finish. */
+- (BOOL)waitForSampleQueueDrain
+{
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    dispatch_async(_sampleHandlerQueue, ^{ dispatch_semaphore_signal(done); });
+    BOOL drained = dispatch_semaphore_wait(
+        done, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0;
+    dispatch_release(done);
+    return drained;
+}
+
 - (void)dealloc {
-    /* vncServerStop quiesces each capturer first. This final serial drain keeps
-       the owned sample queue alive until no callback can still touch state.
-       If we are ALREADY executing on that queue (last reference dropped by GCD
-       while releasing a completed block), the drain has by definition happened
-       and dispatch_sync would deadlock on ourselves — so skip it. */
-    if (dispatch_get_specific(kMacVNCSampleQueueKey) == NULL)
-        dispatch_sync(_sampleHandlerQueue, ^{});
+    /* Bounded final drain. -isSafeToDeallocate has already told the owner not to
+       release a capturer whose work never quiesced, so reaching here means the
+       stream was stopped cleanly; this only waits out callbacks already admitted
+       to the owned queue. Skipped when we are running ON one of those queues,
+       where a sync would deadlock on ourselves. */
+    if (dispatch_get_specific(kMacVNCSampleQueueKey) == NULL &&
+        dispatch_get_specific(kMacVNCStateQueueKey) == NULL)
+        [self waitForSampleQueueDrain];
+
     if (_frameMailboxInitialized)
         macVNCFrameMailboxDestroy(&_frameMailbox);
     pthread_cond_destroy(&_readinessCondition);

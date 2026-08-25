@@ -90,6 +90,9 @@ macVNCCompositorSubmitFrame(rfbScreenInfoPtr screen,
                             CMSampleBufferRef sampleBuffer,
                             const MacVNCDisplayGeometry *geometry)
 {
+    /* Runs on a ScreenCaptureKit callback queue, which has no autorelease pool
+       of its own; NSLog/description below would otherwise leak permanently. */
+    @autoreleasepool {
     if (!screen || !screen->frameBuffer || !geometry)
         return TRUE; /* server torn down mid-flight; nothing to retry into */
 
@@ -136,4 +139,5 @@ macVNCCompositorSubmitFrame(rfbScreenInfoPtr screen,
     pthread_mutex_unlock(&compositorMutex);
     CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
     return TRUE;
+    }
 }

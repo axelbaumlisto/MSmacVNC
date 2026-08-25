@@ -1,5 +1,6 @@
 #import "MacVNCRelauncher.h"
 
+#import <limits.h>
 #import <spawn.h>
 #import <signal.h>
 #import <fcntl.h>
@@ -39,8 +40,16 @@ extern char **environ;
     posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
     posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
 
-    const char *path = exePath.fileSystemRepresentation;
-    char *const argv[] = { (char *)path, NULL };
+    /* Copy out of the autoreleased buffer: fileSystemRepresentation returns
+       pool-owned memory, and it is used after the caller's closeListeners block
+       has run. Owning the bytes removes the dependency on what that block does
+       with the current pool. */
+    char path[PATH_MAX];
+    if (![exePath getFileSystemRepresentation:path maxLength:sizeof(path)]) {
+        NSLog(@"macVNC relaunch failed: executable path too long");
+        return NO;
+    }
+    char *const argv[] = { path, NULL };
 
     if (closeListeners)
         closeListeners();

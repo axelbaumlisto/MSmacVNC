@@ -32,9 +32,15 @@ typedef struct {
 /* Number of VNC clients currently connected. */
 extern _Atomic int vncConnectedClients;
 
-/* Optional handler invoked (on the main queue) when ScreenCaptureKit fails at
- * runtime, e.g. Screen Recording permission is not effectively granted. The
- * server does not show any UI itself; AppDelegate owns the permission popup. */
+/* Optional handler invoked when screen capture cannot proceed, e.g. Screen
+ * Recording is not effectively granted or ScreenCaptureKit failed at runtime.
+ * The server shows no UI itself; AppDelegate owns the permission popup.
+ *
+ * THREAD: any. Raised from the ScreenCaptureKit error queue AND from a client
+ * thread when a connection is refused for lack of permission. The handler must
+ * therefore hop to the main queue itself (AppDelegate does, via
+ * performSelectorOnMainThread:). An earlier version of this comment promised
+ * "on the main queue", which was not true of every call site. */
 /* likelyPermissionDenial is TRUE only when the underlying error is consistent
  * with a TCC/Screen-Recording denial. Other capture failures (display removed,
  * stream stopped for unrelated reasons) pass FALSE so the caller does not latch
@@ -67,10 +73,16 @@ extern void (*macVNCScreenCaptureWorkingHandler)(void);
 extern bool (*macVNCCaptureAllowed)(void);
 
 /*
- * Monotonic id of the current server run, incremented by every vncServerStart().
+ * Monotonic id of the current server run, incremented by every start.
  * A capture-failure notification carries the generation it was raised for, so a
  * notification queued by an already-stopped run (e.g. delivered after a modal
  * finishes) can be discarded instead of killing a freshly started server.
+ *
+ * The stamp is read when the notification is RAISED and compared when it is
+ * HANDLED on the main queue, so it can only filter out notifications from a run
+ * that had already ended by then — which is exactly its purpose. It is not a
+ * lock: a start that lands between the two points is handled by the handler
+ * re-checking live state.
  */
 uint64_t vncServerCurrentGeneration(void);
 
@@ -79,14 +91,30 @@ uint64_t vncServerCurrentGeneration(void);
  * ----------------------------------------------------------------------- */
 
 /*
+ * Outcome of a start attempt. "Already running" must be distinguishable from a
+ * genuine failure: reporting it as one made the UI advise the user to change the
+ * port while the server was in fact serving on the current one.
+ */
+typedef enum {
+    MacVNCServerStartOK = 0,
+    /* A run is already live; nothing was changed. */
+    MacVNCServerStartAlreadyRunning,
+    /* Bad configuration, no displays, bind refused, out of memory, ... */
+    MacVNCServerStartFailed,
+} MacVNCServerStartResult;
+
+/*
  * Initialise and start the VNC server from an immutable configuration.
  * config->password must be non-empty (authentication is mandatory); a NULL
  * or empty password makes this fail.
  *
- * Returns TRUE on success. On failure the reason is printed via rfbLog().
+ * On failure the reason is printed via rfbLog().
  * Must not be called on the main thread because rfbInitServer() briefly
  * blocks while binding the listen socket.
  */
+MacVNCServerStartResult vncServerStartWithResult(const MacVNCServerConfig *config);
+
+/* Convenience wrapper: TRUE only for MacVNCServerStartOK. */
 rfbBool vncServerStart(const MacVNCServerConfig *config);
 
 /*
@@ -96,16 +124,29 @@ rfbBool vncServerStart(const MacVNCServerConfig *config);
 void vncServerStop(void);
 
 /*
- * Close the listening sockets (IPv4 and IPv6) and nothing else.
+ * Close the listening sockets without a full stop, freeing the port.
  *
- * For the relaunch path: the new process inherits our descriptors, and a still
- * open listener makes its bind() fail. Cheap and non-blocking, unlike
- * vncServerStop(), which joins client threads and waits on capture work.
+ * Used immediately before relaunching: the successor inherits descriptors, and
+ * a still-open listener makes its bind() fail. Both the IPv4 and IPv6 listeners
+ * are closed and the published port is zeroed, so the UI stops advertising a
+ * dead socket.
+ *
+ * Deliberately NOT vncServerStop(): that joins client threads and waits for
+ * in-flight capture work, which can sit behind a system prompt and would freeze
+ * the menu bar at the moment the user pressed Restart.
+ *
+ * Takes the lifecycle lock with a bounded retry, never a blocking wait, and
+ * logs if it cannot get it — a concurrent start would otherwise reopen the
+ * listener after this returns.
  */
 void vncServerCloseListeners(void);
 
 /*
- * Return the TCP port the server is listening on, or -1 if not started.
+ * Return the TCP port the server is listening on.
+ *
+ * <= 0 means "not serving": -1 before a run has ever started or after a stop,
+ * and 0 once vncServerCloseListeners() has freed the port for a successor.
+ * Callers must test for > 0, never for != -1.
  */
 int vncServerGetPort(void);
 
@@ -136,6 +177,14 @@ rfbBool vncServerActivePolicyAllowsEveryone(void);
 /* Exposes the core's own capture decision so the "no permission, no capture"
    rule can be asserted without a real TCC grant. */
 bool macVNCCaptureIsAllowedForTesting(void);
+
+/* Number of times the core actually started the capture streams. Lets a test
+   assert that a refused permission produces NO start, rather than only that the
+   gate returned false. */
+unsigned macVNCCaptureStartCountForTesting(void);
+void macVNCResetCaptureStateForTesting(void);
+/* Runs the real start/stop reconciler for the current client count. */
+void macVNCReconcileCaptureForTesting(void);
 
 bool macVNCServerHasLifecycleResourcesForTesting(void);
 #endif

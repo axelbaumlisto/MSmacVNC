@@ -50,7 +50,9 @@ server, and would make the "no permission, no capture" rule untestable.
 
 ## Module responsibilities
 
-Pure C (each with a `tests/test_*.c` wired into `ctest`):
+Pure logic, each with a unit test wired into `ctest` (`.c` for C modules,
+`.m` for the Objective-C ones — `MacVNCStatusText`, `MacVNCPermissionUI`,
+`MacVNCStartFailure`, which are Foundation-only and free of AppKit):
 - **DisplayLayout** — build a non-overlapping composite layout; map a
   framebuffer point back to a global display coordinate.
 - **DisplaySelection** — which attached displays a run captures (all / primary /
@@ -152,6 +154,10 @@ must not be counted as automated coverage.
 - **Lock order:** `compositorMutex` → per-client `sendMutex`
   (`lockCurrentClients` retains each client so it can't be freed mid-composite).
   `clientLifecycleMutex` is never taken while holding the compositor lock.
+  The reverse edge exists and is why the compositor must use `trylock`:
+  LibVNCServer calls `displayHook` while holding a client's `sendMutex`, and
+  `displayHook` takes `clientLifecycleMutex` — so a blocking acquisition of
+  `sendMutex` from the compositor could close the cycle.
 - **Screen publication:** `rfbScreen` is set to NULL *before* `rfbScreenCleanup`,
   because the capture stop is deliberately bounded and a late frame must see
   NULL rather than a freed pointer.

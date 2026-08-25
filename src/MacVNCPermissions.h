@@ -39,16 +39,15 @@ void macVNCOpenPermissionSettings(MacVNCPermissionKind kind);
 /*
  * Screen Recording has exactly ONE status reader:
  * CGPreflightScreenCaptureAccess(). It never prompts and is accurate for a
- * GUI-launched app, which is the only supported launch mode. These hooks are
- * informational; a second source of truth previously let the gate and the UI
- * disagree, so do not reintroduce one.
+ * GUI-launched app, which is the only supported launch mode.
+ *
+ * There is deliberately no "capture worked at runtime" flag here. One used to
+ * exist and let the gate and the UI disagree — the app reported all permissions
+ * active while refusing to start. Do not reintroduce a second source of truth.
  */
 /* Whether the running bundle sits in an Applications folder — the "+" flow
  * depends on it, see MacVNCPermissionUI.h. */
 BOOL macVNCRunningFromApplicationsFolder(void);
-
-void macVNCNoteScreenCaptureWorking(void);
-BOOL macVNCScreenCaptureWorking(void);
 
 
 NS_ASSUME_NONNULL_END

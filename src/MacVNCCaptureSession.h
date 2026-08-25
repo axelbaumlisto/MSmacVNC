@@ -28,6 +28,16 @@
  * So a reader never overlaps a writer. Adding a call to Reset or Add from a
  * client thread, or stopping the server without joining clients first, breaks
  * that invariant and needs a lock here.
+ *
+ * StopAndWait BLOCKS - bounded, but up to five seconds per display while
+ * in-flight ScreenCaptureKit work drains. Never call it while holding
+ * clientLifecycleMutex (that stalls every other client thread, including a
+ * reconnect) and never from a thread that must stay responsive. mac.m routes
+ * both the connect and the disconnect path through one reconciler that runs
+ * after the client lock is released.
+ *
+ * Reset releases the capturers, and releasing one drains its sample queue, so
+ * it can block for the same reason. Call it only after StopAndWait.
  */
 
 /* Replaces the current set; releases any previous capturers. */

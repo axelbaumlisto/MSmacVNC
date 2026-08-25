@@ -16,6 +16,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 typedef struct {
     BOOL started;              /* vncServerStart() succeeded                   */
+    BOOL alreadyRunning;       /* a run was already live; nothing changed      */
     BOOL hasConfigurationError;/* startup config refused to build              */
     BOOL permissionsGranted;   /* both permissions currently read as granted   */
 } MacVNCStartOutcome;
