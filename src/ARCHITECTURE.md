@@ -14,34 +14,46 @@ modules**, and keep the Objective-C layer as thin glue to macOS frameworks
 ## Layers
 
 ```
-                 ┌─────────────────────────────────────────────┐
-   UI / glue     │ main.m → AppDelegate (status bar, lifecycle) │
-   (Obj-C)       │   MacVNCPreferences · MacVNCPermissionsPanel │
-                 │   MacVNCStartupConfig (defaults+env → config)│
-                 │   MacVNCLoginItem · MacVNCPassword           │
-                 └───────────────┬─────────────────────────────┘
+                 ┌──────────────────────────────────────────────┐
+   UI / glue     │ main.m → AppDelegate (status bar, lifecycle)  │
+   (Obj-C)       │   MacVNCPreferences · MacVNCPermissionsPanel  │
+                 │   MacVNCStartupConfig (defaults+env → config) │
+                 │   MacVNCRelauncher · MacVNCLoginItem          │
+                 │   MacVNCPassword · MacVNCDefaultsKeys         │
+                 └───────────────┬──────────────────────────────┘
                                  │ MacVNCServerConfig (by value)
-                 ┌───────────────▼─────────────────────────────┐
-   Server core   │ mac.m: ScreenInit, client lifecycle,         │
-   (C / Obj-C)   │        compositing pump, start/stop           │
-                 │   MacVNCInput (kbd/ptr)  MacVNCPowerMgmt       │
-                 │   MacVNCDisplayWake      ScreenCapturer (SCK)  │
-                 └───────────────┬─────────────────────────────┘
+                                 │ macVNCCaptureAllowed (policy in)
+                 ┌───────────────▼──────────────────────────────┐
+   Server core   │ mac.m: ScreenInit, client lifecycle,          │
+   (C / Obj-C)   │        start/stop, listener teardown          │
+                 │   MacVNCCompositor (frame → canvas, locking)  │
+                 │   MacVNCInput (kbd/ptr)  MacVNCPowerMgmt      │
+                 │   MacVNCDisplayWake      ScreenCapturer (SCK) │
+                 └───────────────┬──────────────────────────────┘
                                  │ function-pointer / block seams
-                 ┌───────────────▼─────────────────────────────┐
-   Pure logic    │ DisplayLayout · CompositeFramebuffer          │
-   (C, tested)   │ NetworkAccess · NetworkCIDR · NetworkInventory│
-                 │ NetworkPolicyResolver · ReadinessPolicy       │
+                 ┌───────────────▼──────────────────────────────┐
+   Pure logic    │ DisplayLayout · DisplaySelection              │
+   (C, tested)   │ CompositeFramebuffer · MacVNCStatusText       │
+                 │ MacVNCPermissionUI                            │
+                 │ NetworkAccess · NetworkCIDR · NetworkInventory │
+                 │ NetworkPolicyResolver · ReadinessPolicy        │
                  │ FrameMailbox · PointerState                    │
                  │ KeyboardModifierState · CaptureRate · RFBKeySym│
                  └───────────────────────────────────────────────┘
 ```
+
+The core holds no permission policy: it asks through `macVNCCaptureAllowed`
+(NULL = unrestricted). Reading TCC in the core would put the decision that can
+raise macOS's own screen-recording dialog inside the file that starts the
+server, and would make the "no permission, no capture" rule untestable.
 
 ## Module responsibilities
 
 Pure C (each with a `tests/test_*.c`):
 - **DisplayLayout** — build a non-overlapping composite layout; map a
   framebuffer point back to a global display coordinate.
+- **DisplaySelection** — which attached displays a run captures (all / primary /
+  one index); order is preserved because the composite layout depends on it.
 - **CompositeFramebuffer** — tile-diff copy of one BGRA display into the shared
   canvas; reports dirty rects through an injected callback.
 - **NetworkAccess / NetworkCIDR / NetworkInventory** — IPv4/CIDR parsing,
@@ -54,9 +66,24 @@ Pure C (each with a `tests/test_*.c`):
   injected release/activity callbacks.
 - **PointerState / KeyboardModifierState** — input resolution state machines.
 - **CaptureRate** — validate FPS, derive the frame interval.
+- **MacVNCStatusText** — status-bar strings from observed state (a stopped
+  server reports no clients whatever the counter holds).
+- **MacVNCPermissionUI** — chips, hint, button title, and the
+  `shouldStartServer` / `shouldShowPanel` decisions, from one snapshot.
 
 Objective-C glue:
-- **AppDelegate** — status-bar UI, timers, server start/stop, permission flow.
+- **AppDelegate** — status-bar UI, timers, server start/stop, permission flow;
+  installs the capture-permission policy into the core.
+- **MacVNCCompositor** — composites a captured frame into the shared canvas.
+  Takes every client's `sendMutex` with `trylock` only: LibVNCServer holds it
+  for the whole encode-and-write, so waiting would let one stalled viewer
+  freeze the screen for all clients. A refused frame must be re-submitted, not
+  dropped.
+- **MacVNCRelauncher** — `posix_spawn` of our own executable, used when a newly
+  granted permission needs a fresh process. Both permissions bind at launch.
+- **MacVNCDefaultsKeys** — defaults keys *and* their registered fallbacks, so a
+  new key without a default cannot slip through (an absent allowlist default
+  would mean an empty allowlist, not loopback-only).
 - **MacVNCStartupConfig** — pure builder: `NSUserDefaults` + environment →
   `MacVNCServerConfig` (owns backing storage; unit-tested).
 - **MacVNCPreferences** — the Preferences dialog (view build / policy resolve /
