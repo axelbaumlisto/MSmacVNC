@@ -11,6 +11,10 @@ extern NSString * const MacVNCKeyListenMode;
 extern NSString * const MacVNCKeyListenAddress;
 extern NSString * const MacVNCKeyAllowedClients;
 extern NSString * const MacVNCKeyAllowAllConfirmed;
+/* CIDRs that Preferences added automatically for the selected interface. Kept
+ * separately so a later save can drop stale ones instead of mistaking them for
+ * user-typed entries (which would accumulate every network ever joined). */
+extern NSString * const MacVNCKeyAutoAllowedClients;
 
 extern NSString * const MacVNCBundleID;
 

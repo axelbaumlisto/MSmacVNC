@@ -46,18 +46,26 @@ static NSArray<NSString *> *macVNCTrimmedNonEmptyLines(NSString *text)
 /* Extra manual allowlist lines = stored allowlist minus preset CIDRs and the
    safe localhost default. Pure model helper, kept out of the view builder. */
 static NSString *macVNCManualAllowedText(NSString *currentAllowed,
-                                         NSArray<NSDictionary *> *networkRows)
+                                         NSArray<NSDictionary *> *networkRows,
+                                         NSString *previouslyAutoAdded)
 {
     NSMutableArray<NSString *> *presetCIDRs = [NSMutableArray array];
     for (NSDictionary *row in networkRows) {
         if ([row[MacVNCRowKeyAllowPresetVisible] boolValue])
             [presetCIDRs addObject:row[MacVNCRowKeyAllowCIDR]];
     }
+    /* Also subtract CIDRs a previous save added automatically. Without this,
+       once that network is gone its auto CIDR looks user-typed and would be
+       re-persisted forever — the allowlist would grow to include every network
+       the Mac has ever joined. */
+    NSArray<NSString *> *autoAdded = macVNCTrimmedNonEmptyLines(previouslyAutoAdded ?: @"");
     NSMutableArray<NSString *> *manualLines = [NSMutableArray array];
     for (NSString *trimmed in macVNCTrimmedNonEmptyLines(currentAllowed)) {
         BOOL isSafeLocalhostDefault = [trimmed isEqualToString:MacVNCLoopbackIPv4] ||
                                       [trimmed isEqualToString:[MacVNCLoopbackIPv4 stringByAppendingString:@"/32"]];
-        if (![presetCIDRs containsObject:trimmed] && !isSafeLocalhostDefault)
+        if (![presetCIDRs containsObject:trimmed] &&
+            ![autoAdded containsObject:trimmed] &&
+            !isSafeLocalhostDefault)
             [manualLines addObject:trimmed];
     }
     return [manualLines componentsJoinedByString:@"\n"];
@@ -232,7 +240,9 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
     NSString *currentAddress = [defaults stringForKey:MacVNCKeyListenAddress] ?: @"";
     NSString *currentAllowed = [defaults stringForKey:MacVNCKeyAllowedClients] ?: @"";
     NSArray<NSDictionary *> *networkRows = macVNCActiveNetworkRows();
-    NSString *manualAllowed = macVNCManualAllowedText(currentAllowed, networkRows);
+    NSString *manualAllowed = macVNCManualAllowedText(
+        currentAllowed, networkRows,
+        [defaults stringForKey:MacVNCKeyAutoAllowedClients]);
 
     NSTextField *portField = nil;
     NSSecureTextField *pwdField = nil;
@@ -276,12 +286,17 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
     /* Assemble the combined allowlist: the auto CIDR for the chosen interface
        plus any manual advanced lines, de-duplicated in order. */
     NSMutableOrderedSet<NSString *> *allowedSet = [NSMutableOrderedSet orderedSet];
+    NSMutableArray<NSString *> *autoAdded = [NSMutableArray array];
     if ([newMode isEqualToString:MacVNCListenModeLocalhost]) {
         [allowedSet addObject:MacVNCLoopbackIPv4];
+        [autoAdded addObject:MacVNCLoopbackIPv4];
     } else if ([newMode isEqualToString:MacVNCListenModeSelected] && tag >= kListenTagRowBase) {
         NSUInteger rowIndex = (NSUInteger)(tag - kListenTagRowBase);
-        if (rowIndex < networkRows.count)
-            [allowedSet addObject:networkRows[rowIndex][MacVNCRowKeyAllowCIDR]];
+        if (rowIndex < networkRows.count) {
+            NSString *autoCIDR = networkRows[rowIndex][MacVNCRowKeyAllowCIDR];
+            [allowedSet addObject:autoCIDR];
+            [autoAdded addObject:autoCIDR];
+        }
     }
     for (NSString *trimmed in macVNCTrimmedNonEmptyLines(allowedText.string))
         [allowedSet addObject:trimmed];
@@ -356,6 +371,10 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
     [defaults setObject:newMode forKey:MacVNCKeyListenMode];
     [defaults setObject:newAddress forKey:MacVNCKeyListenAddress];
     [defaults setObject:combinedAllowed forKey:MacVNCKeyAllowedClients];
+    /* Remember which entries we added automatically so the next save can tell
+       them apart from user-typed ones and drop the stale ones. */
+    [defaults setObject:[autoAdded componentsJoinedByString:@"\n"]
+                 forKey:MacVNCKeyAutoAllowedClients];
     [defaults setBool:newAllowAll forKey:MacVNCKeyAllowAllConfirmed];
     [defaults synchronize];
 }

@@ -8,6 +8,7 @@ NSString * const MacVNCKeyListenMode        = @"listenMode";
 NSString * const MacVNCKeyListenAddress     = @"listenAddress";
 NSString * const MacVNCKeyAllowedClients    = @"allowedClients";
 NSString * const MacVNCKeyAllowAllConfirmed = @"allowAllConfirmed";
+NSString * const MacVNCKeyAutoAllowedClients = @"autoAllowedClients";
 
 NSString * const MacVNCBundleID = @"net.christianbeier.macVNC";
 

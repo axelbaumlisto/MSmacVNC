@@ -338,9 +338,23 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial)
                 alert.alertStyle      = NSAlertStyleCritical;
                 [alert runModal];
             } else {
-                /* Non-configuration failure (e.g. capture/permissions). The
-                   single permission popup is driven by the capture handler. */
+                /* Non-configuration failure. If permissions are fine, the server
+                   itself refused to start (most commonly the port is already in
+                   use) — say so instead of silently showing "Not running". A
+                   permission problem is handled by the capture-failure popup. */
                 [self updateMenuStatus];
+                if (macVNCPermissionsAllGranted()) {
+                    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+                    alert.messageText     = @"macVNC could not start the server";
+                    alert.informativeText = @"The VNC server failed to start. The most likely "
+                                             "cause is that the port is already in use — for "
+                                             "example macOS Screen Sharing on port 5900, or "
+                                             "another macVNC instance. Choose a different port "
+                                             "in Preferences and start the server again.";
+                    alert.alertStyle      = NSAlertStyleWarning;
+                    [alert addButtonWithTitle:@"OK"];
+                    [alert runModal];
+                }
             }
         });
     });
@@ -355,10 +369,16 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial)
     int port = vncServerGetPort();
 
     if (port > 0) {
-        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-        NSString *mode = [defaults stringForKey:MacVNCKeyListenMode] ?: MacVNCListenModeLocalhost;
-        NSString *bind = macVNCBindHostForMode(mode, [defaults stringForKey:MacVNCKeyListenAddress]) ?: @"all interfaces";
-        NSString *access = [defaults boolForKey:MacVNCKeyAllowAllConfirmed] ? @"allow all" : @"allowlist";
+        /* Report what the RUNNING server actually applied — never the saved
+           defaults, which may already describe an unsaved/unrestarted change or
+           be overridden by MACVNC_* env vars. Claiming a restriction that is not
+           in effect would be a security-relevant lie. */
+        char activeBind[MACVNC_LISTEN_ADDRESS_MAX] = {0};
+        NSString *bind = @"all interfaces";
+        if (vncServerCopyActiveBindAddress(activeBind, sizeof(activeBind)) && activeBind[0])
+            bind = [NSString stringWithUTF8String:activeBind];
+        NSString *access = (vncServerActiveAccessMode() == MACVNC_CLIENT_ACCESS_ALLOW_ALL_CONFIRMED)
+            ? @"allow all" : @"allowlist";
         self.statusMenuItem.title = [NSString stringWithFormat:@"Running  •  %@:%d  •  %@", bind, port, access];
     } else if (!macVNCPermissionsAllGranted()) {
         self.statusMenuItem.title = @"Not running  •  permissions required";
@@ -380,9 +400,12 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial)
     int port = vncServerGetPort();
     if (port <= 0) return;
 
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    NSString *mode = [defaults stringForKey:MacVNCKeyListenMode] ?: MacVNCListenModeLocalhost;
-    NSString *hostname = macVNCBindHostForMode(mode, [defaults stringForKey:MacVNCKeyListenAddress]);
+    /* Same rule as the status line: use the address the server is actually
+       bound to, so the copied URL matches reality (e.g. under MACVNC_LISTEN). */
+    char activeBind[MACVNC_LISTEN_ADDRESS_MAX] = {0};
+    NSString *hostname = nil;
+    if (vncServerCopyActiveBindAddress(activeBind, sizeof(activeBind)) && activeBind[0])
+        hostname = [NSString stringWithUTF8String:activeBind];
     if (hostname.length == 0)
         hostname = [NSHost currentHost].localizedName;
     NSString *address  = [NSString stringWithFormat:@"vnc://%@:%d", hostname, port];
