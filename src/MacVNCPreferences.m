@@ -3,6 +3,7 @@
 #import "MacVNCPassword.h"
 #import "MacVNCNetworkRows.h"
 #import "MacVNCListenMode.h"
+#import "MacVNCAllowlistPlan.h"
 #import "NetworkAccess.h"
 #import "NetworkPolicyResolver.h"
 
@@ -31,18 +32,6 @@ static const NSInteger kCustomAddressLabelTag = 9101;
 static const NSInteger kCustomAddressFieldTag = 9102;
 static const NSInteger kAllowedSummaryTag = 9103;
 
-/* Split newline-separated text into trimmed, non-empty lines. */
-static NSArray<NSString *> *macVNCTrimmedNonEmptyLines(NSString *text)
-{
-    NSMutableArray<NSString *> *lines = [NSMutableArray array];
-    for (NSString *line in [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
-        NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-        if (trimmed.length > 0)
-            [lines addObject:trimmed];
-    }
-    return lines;
-}
-
 /* Extra manual allowlist lines = stored allowlist minus ONLY the entries a
  * previous save added automatically (recorded in autoAllowedClients).
  *
@@ -64,6 +53,35 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
     }
     return [manualLines componentsJoinedByString:@"\n"];
 }
+
+/*
+ * The controls the caller reads back after the modal closes.
+ *
+ * Replaces five out-parameters: at that count the call site said nothing about
+ * which value went where, and adding a sixth field meant touching the
+ * signature, the declaration block and the assignment block in three places.
+ */
+@interface MacVNCPreferencesForm : NSObject
+@property (nonatomic, retain) NSView *view;
+@property (nonatomic, retain) NSTextField *portField;
+@property (nonatomic, retain) NSSecureTextField *pwdField;
+@property (nonatomic, retain) NSPopUpButton *listenPopup;
+@property (nonatomic, retain) NSTextField *customField;
+@property (nonatomic, retain) NSTextView *allowedText;
+@end
+
+@implementation MacVNCPreferencesForm
+- (void)dealloc
+{
+    [_view release];
+    [_portField release];
+    [_pwdField release];
+    [_listenPopup release];
+    [_customField release];
+    [_allowedText release];
+    [super dealloc];
+}
+@end
 
 @implementation MacVNCPreferencesController
 
@@ -110,19 +128,14 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
     }
 }
 
-/* Builds the Preferences form view, populated from the given values, and
- * returns the save-time controls the caller reads back after the modal. */
-- (NSView *)buildFormForPort:(int)port
-                    password:(NSString *)pwd
-                 currentMode:(NSString *)currentMode
-              currentAddress:(NSString *)currentAddress
-               manualAllowed:(NSString *)manualAllowed
-                 networkRows:(NSArray<NSDictionary *> *)networkRows
-                   portField:(NSTextField **)outPortField
-                    pwdField:(NSSecureTextField **)outPwdField
-                 listenPopup:(NSPopUpButton **)outListenPopup
-                 customField:(NSTextField **)outCustomField
-                 allowedText:(NSTextView **)outAllowedText
+/* Builds the Preferences form, populated from the given values, and returns it
+ * together with the controls the caller reads back after the modal. */
+- (MacVNCPreferencesForm *)buildFormForPort:(int)port
+                                   password:(NSString *)pwd
+                                currentMode:(NSString *)currentMode
+                             currentAddress:(NSString *)currentAddress
+                              manualAllowed:(NSString *)manualAllowed
+                                networkRows:(NSArray<NSDictionary *> *)networkRows
 {
     NSView *form = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, kFormWidth, kFormHeight)] autorelease];
 
@@ -217,12 +230,105 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
     [form addSubview:manualLabel]; [form addSubview:scroll]; [form addSubview:manualHint];
     [self listenPopupChanged:listenPopup];
 
-    *outPortField = portField;
-    *outPwdField = pwdField;
-    *outListenPopup = listenPopup;
-    *outCustomField = customField;
-    *outAllowedText = allowedText;
-    return form;
+    MacVNCPreferencesForm *result =
+        [[[MacVNCPreferencesForm alloc] init] autorelease];
+    result.view = form;
+    result.portField = portField;
+    result.pwdField = pwdField;
+    result.listenPopup = listenPopup;
+    result.customField = customField;
+    result.allowedText = allowedText;
+    return result;
+}
+
+/*
+ * Decodes the listen popup's selected tag into what gets saved: the mode, the
+ * bind address, and the allowlist preset that interface implies.
+ *
+ * The three were derived in two separate passes over the same tag, each
+ * re-deriving the row index; they are one decision and belong together.
+ *
+ * `autoCIDR` stays nil when the interface implies no usable client network. A
+ * point-to-point link's "CIDR" is the host's OWN /32, which as an allowlist
+ * matches nobody and would lock every client out, so the user must name the
+ * peer range explicitly.
+ */
+static void macVNCDecodeListenSelection(NSInteger tag,
+                                        NSString *customAddress,
+                                        NSArray<NSDictionary *> *networkRows,
+                                        NSString **outMode,
+                                        NSString **outAddress,
+                                        NSString **outAutoCIDR)
+{
+    *outMode = MacVNCListenModeLocalhost;
+    *outAddress = @"";
+    *outAutoCIDR = nil;
+
+    if (tag == kListenTagCustom) {
+        *outMode = MacVNCListenModeCustom;
+        *outAddress = customAddress;
+        return;
+    }
+    if (tag < kListenTagRowBase)
+        return;                     /* localhost */
+
+    NSUInteger rowIndex = (NSUInteger)(tag - kListenTagRowBase);
+    if (rowIndex >= networkRows.count)
+        return;                     /* stale selection: fall back to localhost */
+
+    NSDictionary *row = networkRows[rowIndex];
+    *outMode = MacVNCListenModeSelected;
+    *outAddress = row[MacVNCRowKeyAddress];
+    if ([row[MacVNCRowKeyAllowPresetVisible] boolValue])
+        *outAutoCIDR = row[MacVNCRowKeyAllowCIDR];
+}
+
+/* One construction site for the dialog's alerts: four near-identical NSAlert
+   allocations differed only in text and buttons. Returns YES when the user chose
+   the first (affirmative) button. */
+static BOOL macVNCConfirm(NSString *title, NSString *body,
+                          NSString *affirmative, NSString *_Nullable cancel)
+{
+    NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+    alert.messageText = title;
+    alert.informativeText = body;
+    [alert addButtonWithTitle:affirmative];
+    if (cancel)
+        [alert addButtonWithTitle:cancel];
+    return [alert runModal] == NSAlertFirstButtonReturn;
+}
+
+static void macVNCTell(NSString *title, NSString *body)
+{
+    macVNCConfirm(title, body, @"OK", nil);
+}
+
+/* Writes the accepted settings. Everything above this point may still bail out;
+   nothing is written until every check has passed, so a cancelled dialog cannot
+   leave half a policy behind. */
+static void macVNCPersistPreferences(NSUserDefaults *defaults,
+                                     int port,
+                                     NSString *password,
+                                     NSString *mode,
+                                     NSString *address,
+                                     MacVNCAllowlistPlan *plan,
+                                     BOOL allowAllConfirmed)
+{
+    /* Plaintext in defaults, by explicit request; also clears any older
+       Keychain copy. */
+    macVNCStorePassword(defaults, password);
+
+    if (port > 0 && port <= 65535)
+        [defaults setInteger:port forKey:MacVNCKeyPort];
+    [defaults setObject:mode forKey:MacVNCKeyListenMode];
+    [defaults setObject:address forKey:MacVNCKeyListenAddress];
+    [defaults setObject:plan.combined forKey:MacVNCKeyAllowedClients];
+    /* Remember which entries were added automatically, so the next save can
+       tell them apart from user-typed ones and drop only the stale ones. */
+    [defaults setObject:[plan.autoAdded componentsJoinedByString:@"\n"]
+                 forKey:MacVNCKeyAutoAllowedClients];
+    [defaults setBool:allowAllConfirmed forKey:MacVNCKeyAllowAllConfirmed];
+    [defaults synchronize];
 }
 
 - (void)runModal
@@ -237,107 +343,54 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
     NSString *manualAllowed = macVNCManualAllowedText(
         currentAllowed, [defaults stringForKey:MacVNCKeyAutoAllowedClients]);
 
-    NSTextField *portField = nil;
-    NSSecureTextField *pwdField = nil;
-    NSPopUpButton *listenPopup = nil;
-    NSTextField *customField = nil;
-    NSTextView *allowedText = nil;
-    NSView *form = [self buildFormForPort:port password:pwd
-                              currentMode:currentMode currentAddress:currentAddress
-                            manualAllowed:manualAllowed networkRows:networkRows
-                                portField:&portField pwdField:&pwdField
-                              listenPopup:&listenPopup customField:&customField
-                              allowedText:&allowedText];
+    MacVNCPreferencesForm *form =
+        [self buildFormForPort:port password:pwd
+                   currentMode:currentMode currentAddress:currentAddress
+                 manualAllowed:manualAllowed networkRows:networkRows];
 
     NSAlert *alert = [[[NSAlert alloc] init] autorelease];
     alert.messageText     = @"macVNC Preferences";
     alert.informativeText = @"Changes take effect after restarting macVNC. IPv4 only in this version.";
     [alert addButtonWithTitle:@"Save"];
     [alert addButtonWithTitle:@"Cancel"];
-    alert.accessoryView = form;
+    alert.accessoryView = form.view;
 
     if ([alert runModal] != NSAlertFirstButtonReturn)
         return;
 
-    int newPort = portField.intValue;
+    int newPort = form.portField.intValue;
 
-    /* Decode the popup selection into (mode, address). */
-    NSString *newMode = MacVNCListenModeLocalhost;
-    NSString *newAddress = @"";
-    NSInteger tag = listenPopup.selectedItem.tag;
-    if (tag == kListenTagCustom) {
-        newMode = MacVNCListenModeCustom;
-        newAddress = customField.stringValue;
-    } else if (tag >= kListenTagRowBase) {
-        NSUInteger rowIndex = (NSUInteger)(tag - kListenTagRowBase);
-        if (rowIndex < networkRows.count) {
-            newMode = MacVNCListenModeSelected;
-            newAddress = networkRows[rowIndex][MacVNCRowKeyAddress];
-        }
-    }
+    NSString *newMode = nil, *newAddress = nil, *autoCIDR = nil;
+    macVNCDecodeListenSelection(form.listenPopup.selectedItem.tag,
+                                form.customField.stringValue,
+                                networkRows, &newMode, &newAddress, &autoCIDR);
 
-    /* Assemble the combined allowlist: the auto CIDR for the chosen interface
-       plus any manual advanced lines, de-duplicated in order. */
-    NSMutableOrderedSet<NSString *> *allowedSet = [NSMutableOrderedSet orderedSet];
-    NSMutableArray<NSString *> *autoAdded = [NSMutableArray array];
-    if ([newMode isEqualToString:MacVNCListenModeLocalhost]) {
-        [allowedSet addObject:MacVNCLoopbackIPv4];
-        [autoAdded addObject:MacVNCLoopbackIPv4];
-    } else if ([newMode isEqualToString:MacVNCListenModeSelected] && tag >= kListenTagRowBase) {
-        NSUInteger rowIndex = (NSUInteger)(tag - kListenTagRowBase);
-        if (rowIndex < networkRows.count) {
-            NSDictionary *row = networkRows[rowIndex];
-            /* Only auto-add a preset that is meaningful as an allowlist. For a
-               point-to-point interface the "CIDR" is the host's OWN /32, which
-               as an allowlist would match nobody and lock every client out. In
-               that case the user must supply the peer range explicitly. */
-            if ([row[MacVNCRowKeyAllowPresetVisible] boolValue]) {
-                NSString *autoCIDR = row[MacVNCRowKeyAllowCIDR];
-                [allowedSet addObject:autoCIDR];
-                [autoAdded addObject:autoCIDR];
-            }
-        }
-    }
-    for (NSString *trimmed in macVNCTrimmedNonEmptyLines(allowedText.string))
-        [allowedSet addObject:trimmed];
+    MacVNCAllowlistPlan *plan =
+        macVNCPlanAllowlist(newMode, autoCIDR, form.allowedText.string);
 
-    /* Refuse to save a policy that cannot admit anyone: with no listen-side
-       preset and no manual entries the server would fail closed at startup. */
-    if (allowedSet.count == 0) {
-        NSAlert *emptyAlert = [[[NSAlert alloc] init] autorelease];
-        emptyAlert.messageText = @"No clients would be allowed";
-        emptyAlert.informativeText = @"The selected interface does not imply a client "
-                                      "network (for example a point-to-point VPN link), "
-                                      "and no extra allowed clients were entered. Add the "
-                                      "peer IP or subnet under \u201cExtra allowed clients\u201d.";
-        [emptyAlert addButtonWithTitle:@"OK"];
-        [emptyAlert runModal];
+    if (plan.verdict == MacVNCAllowlistVerdictAdmitsNobody) {
+        macVNCTell(@"No clients would be allowed",
+                   @"The selected interface does not imply a client network (for "
+                   @"example a point-to-point VPN link), and no extra allowed "
+                   @"clients were entered. Add the peer IP or subnet under "
+                   @"\u201cExtra allowed clients\u201d.");
         return;
     }
-    NSMutableString *combinedAllowed = [NSMutableString string];
-    for (NSString *entry in allowedSet)
-        [combinedAllowed appendFormat:@"%@\n", entry];
+
     BOOL newAllowAll = NO;
-
-    /* Semantic check: ANY /0 entry (e.g. 10.0.0.0/0, 1.2.3.4/0) matches every
-       IPv4 address, not just the literal "0.0.0.0/0". Parse the list and ask
-       the access module rather than substring-matching. */
-    MacVNCNetworkAccessList probeList;
-    BOOL allowsEveryone = macVNCParseAccessList(combinedAllowed.UTF8String, &probeList, NULL, 0) &&
-                          macVNCNetworkAccessContainsAllowAll(&probeList);
-
-    if (allowsEveryone) {
-        NSAlert *warning = [[[NSAlert alloc] init] autorelease];
-        warning.messageText = @"Allow all clients?";
-        warning.informativeText = @"This allowlist contains an entry that matches every IPv4 client that can reach macVNC (a /0 prefix). This is unsafe outside a trusted VPN.";
-        [warning addButtonWithTitle:@"Continue"];
-        [warning addButtonWithTitle:@"Cancel"];
-        if ([warning runModal] != NSAlertFirstButtonReturn)
+    if (plan.verdict == MacVNCAllowlistVerdictAdmitsEveryone) {
+        if (!macVNCConfirm(@"Allow all clients?",
+                           @"This allowlist contains an entry that matches every "
+                           @"IPv4 client that can reach macVNC (a /0 prefix). This "
+                           @"is unsafe outside a trusted VPN.",
+                           @"Continue", @"Cancel"))
             return;
-        /* User explicitly confirmed allow-all: record it so the resolved policy
-           uses ALLOW_ALL_CONFIRMED and the status label reflects reality. */
+        /* Recorded so the resolved policy uses ALLOW_ALL_CONFIRMED and the
+           status label reflects reality. */
         newAllowAll = YES;
     }
+
+    NSString *combinedAllowed = plan.combined;
 
     MacVNCPolicyInput input = {
         .listenMode = newMode.UTF8String,
@@ -347,26 +400,21 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
     };
     MacVNCResolvedPolicy resolved;
     if (!macVNCResolveNetworkPolicy(&input, NULL, &resolved)) {
-        NSAlert *errorAlert = [[[NSAlert alloc] init] autorelease];
-        errorAlert.messageText = @"Invalid network policy";
-        errorAlert.informativeText = [NSString stringWithUTF8String:resolved.error];
-        [errorAlert addButtonWithTitle:@"OK"];
-        [errorAlert runModal];
+        macVNCTell(@"Invalid network policy",
+                   [NSString stringWithUTF8String:resolved.error]);
         return;
     }
 
     /* The RFB DES auth only uses the first 8 characters. Tell the user rather
        than silently truncating their "long" password's security to 8 bytes. */
-    NSString *trimmedPwd = [pwdField.stringValue stringByTrimmingCharactersInSet:
+    NSString *trimmedPwd = [form.pwdField.stringValue stringByTrimmingCharactersInSet:
                             NSCharacterSet.whitespaceAndNewlineCharacterSet];
     /* DES truncates BYTES, not characters: an 8-character password can still be
        cut mid-way if it contains non-ASCII (é = 2 bytes, emoji = 4). Measure the
        UTF-8 byte length so the warning is accurate for any input. */
     NSUInteger passwordBytes = [trimmedPwd lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
     if (passwordBytes > MACVNC_VNC_PASSWORD_EFFECTIVE_MAX) {
-        NSAlert *pwdWarning = [[[NSAlert alloc] init] autorelease];
-        pwdWarning.messageText = @"Only the first 8 bytes of the password are used";
-        pwdWarning.informativeText = [NSString stringWithFormat:
+        NSString *body = [NSString stringWithFormat:
             @"The VNC protocol derives its key from the first %d BYTES (DES). "
             @"Your password is %lu bytes, so the rest is ignored \u2014 and changing only "
             @"the part after byte %d would NOT change the credential.\n\n"
@@ -374,28 +422,13 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
             @"Save anyway, or go back and choose a different first %d bytes?",
             MACVNC_VNC_PASSWORD_EFFECTIVE_MAX, (unsigned long)passwordBytes,
             MACVNC_VNC_PASSWORD_EFFECTIVE_MAX, MACVNC_VNC_PASSWORD_EFFECTIVE_MAX];
-        [pwdWarning addButtonWithTitle:@"Save anyway"];
-        [pwdWarning addButtonWithTitle:@"Cancel"];
-        if ([pwdWarning runModal] != NSAlertFirstButtonReturn)
+        if (!macVNCConfirm(@"Only the first 8 bytes of the password are used",
+                           body, @"Save anyway", @"Cancel"))
             return;
     }
 
-    /* Store password in plaintext defaults (by request), trimmed, and remove
-       any previously stored Keychain copy. */
-    macVNCStorePassword(defaults, pwdField.stringValue);
-
-
-    if (newPort > 0 && newPort <= 65535)
-        [defaults setInteger:newPort forKey:MacVNCKeyPort];
-    [defaults setObject:newMode forKey:MacVNCKeyListenMode];
-    [defaults setObject:newAddress forKey:MacVNCKeyListenAddress];
-    [defaults setObject:combinedAllowed forKey:MacVNCKeyAllowedClients];
-    /* Remember which entries we added automatically so the next save can tell
-       them apart from user-typed ones and drop the stale ones. */
-    [defaults setObject:[autoAdded componentsJoinedByString:@"\n"]
-                 forKey:MacVNCKeyAutoAllowedClients];
-    [defaults setBool:newAllowAll forKey:MacVNCKeyAllowAllConfirmed];
-    [defaults synchronize];
+    macVNCPersistPreferences(defaults, newPort, form.pwdField.stringValue,
+                             newMode, newAddress, plan, newAllowAll);
 }
 
 @end

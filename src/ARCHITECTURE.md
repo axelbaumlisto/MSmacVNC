@@ -36,6 +36,7 @@ modules**, and keep the Objective-C layer as thin glue to macOS frameworks
    Pure logic    │ DisplayLayout · DisplaySelection              │
    (C, tested)   │ CompositeFramebuffer · MacVNCStatusText       │
                  │ MacVNCPermissionUI · MacVNCStartFailure       │
+                 │ MacVNCAllowlistPlan                           │
                  │ NetworkAccess · NetworkCIDR · NetworkInventory │
                  │ NetworkPolicyResolver · ReadinessPolicy        │
                  │ FrameMailbox · PointerState                    │
@@ -73,6 +74,10 @@ Pure logic, each with a unit test wired into `ctest` (`.c` for C modules,
   server reports no clients whatever the counter holds).
 - **MacVNCPermissionUI** — chips, hint, button title, and the
   `shouldStartServer` / `shouldShowPanel` decisions, from one snapshot.
+- **MacVNCAllowlistPlan** — turns a Preferences selection into the allowlist
+  that gets saved: interface preset plus manual entries, de-duplicated in order,
+  with a verdict of OK / admits-nobody / admits-everyone. Allow-all is detected
+  by PREFIX (any `/0`), never by matching the literal `0.0.0.0/0`.
 - **MacVNCStartFailure** — what to say when the server does not come up.
   Silence on a real failure and a port-collision alert stacked over the
   permission panel are both wrong; the decision is pure and tested.

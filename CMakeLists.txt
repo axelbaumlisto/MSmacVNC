@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.60 LANGUAGES C)
+project(macVNC VERSION 0.3.61 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -94,6 +94,8 @@ set(SOURCE_FILES
     src/MacVNCStatusText.m
     src/MacVNCStartFailure.h
     src/MacVNCStartFailure.m
+    src/MacVNCAllowlistPlan.h
+    src/MacVNCAllowlistPlan.m
     src/MacVNCPassword.h
     src/MacVNCPassword.m
     src/MacVNCPermissionsPanel.h
@@ -240,6 +242,13 @@ if(BUILD_TESTING)
     target_link_libraries(test_compositor_submit
         LibVNCServer::vncserver ${CMAKE_THREAD_LIBS_INIT} ${FOUNDATION})
     add_test(NAME compositor_submit COMMAND test_compositor_submit)
+
+    add_executable(test_allowlist_plan tests/test_allowlist_plan.m
+        src/MacVNCAllowlistPlan.m src/MacVNCListenMode.m
+        src/NetworkAccess.c src/NetworkCIDR.c)
+    target_include_directories(test_allowlist_plan PRIVATE src)
+    target_link_libraries(test_allowlist_plan ${FOUNDATION})
+    add_test(NAME allowlist_plan COMMAND test_allowlist_plan)
 
     add_executable(test_capture_session tests/test_capture_session.m
         src/MacVNCCaptureSession.m src/ScreenCapturer.m src/FrameMailbox.c

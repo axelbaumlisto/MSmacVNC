@@ -32,6 +32,7 @@ check_declared macVNCCompositorSubmitFrame # compositing is its own module
 check_declared macVNCSelectDisplays        # display choice is testable
 check_declared macVNCResolveStartAdvice    # start-failure messaging is pure
 check_declared macVNCCaptureSessionBuild   # the session owns ScreenCaptureKit
+check_declared macVNCPlanAllowlist         # allowlist decisions are pure
 
 # The server core must not depend on the capture framework: holding that
 # dependency is what MacVNCCaptureSession is for. Checked against the code only,
