@@ -1,3 +1,22 @@
+# macVNC 0.3.21
+
+## Critical: release tooling is now version-controlled
+
+- `make_release.sh` and `entitlements.plist` lived in `build/`, which `.gitignore` excluded — they were **never committed**. A routine `rm -rf build` (or a fresh clone) destroyed the signing recipe irrecoverably, including the two hard-won invariants it encodes (realpath dylib bundling; the `disable-library-validation` entitlement required for VNC DES auth). Moved to a tracked `packaging/` directory.
+
+## Reliability / availability fixes
+
+- **One stalled client no longer freezes every client.** The compositor took each client's `sendMutex` with a blocking lock while holding the compositor lock; since LibVNCServer holds that mutex for the entire encode+socket write, a single viewer that stopped reading (suspended laptop, dead link, or a hostile peer stalling TCP) froze the screen for all co-viewers indefinitely, and could also wedge capture teardown. Locking is now non-blocking: a busy client simply causes that frame to be skipped and retried. `maxClientWait` is also bounded so a dead client gets dropped.
+- **A capture error is no longer permanently misdiagnosed as “no Screen Recording permission”.** Any ScreenCaptureKit failure (e.g. a display being unplugged) latched a process-global “permission missing” flag that nothing could clear, killing the session with a false diagnosis and no recovery. The failure handler now receives the error class and only latches on a genuine TCC denial (`SCStreamErrorUserDeclined` / `MissingEntitlements`); other failures clear the latch and report a recoverable error.
+- **The permissions gate is no longer a dead end.** Choosing “Preferences” on the permission panel previously left the app with no way to ever start the server again. That branch now returns to the gate, and a permanent **Start Server** menu item was added (it also clears a stale capture-failure latch).
+
+## Validation
+
+- Release build: passed. clang static analyzer: 0 warnings.
+- CTest: 17/17 passed.
+- A/B verified that the non-blocking compositor change does not affect frame delivery (frame capture in a shell-launched build is limited by TCC, not by this change; the GUI-launched instance streams normally).
+- Developer ID + hardened runtime + entitlements: signed, notarized, stapled.
+
 # macVNC 0.3.20
 
 ## Security fixes (found by an adversarial security review)

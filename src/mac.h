@@ -34,7 +34,11 @@ extern _Atomic int vncConnectedClients;
 /* Optional handler invoked (on the main queue) when ScreenCaptureKit fails at
  * runtime, e.g. Screen Recording permission is not effectively granted. The
  * server does not show any UI itself; AppDelegate owns the permission popup. */
-extern void (*macVNCScreenCaptureFailureHandler)(void);
+/* likelyPermissionDenial is TRUE only when the underlying error is consistent
+ * with a TCC/Screen-Recording denial. Other capture failures (display removed,
+ * stream stopped for unrelated reasons) pass FALSE so the caller does not latch
+ * a permanent "permission missing" state on a transient/topology error. */
+extern void (*macVNCScreenCaptureFailureHandler)(bool likelyPermissionDenial);
 
 /* -----------------------------------------------------------------------
  * Server lifecycle
