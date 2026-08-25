@@ -1,5 +1,7 @@
 #import "MacVNCCaptureSession.h"
 
+#include <ScreenCaptureKit/ScreenCaptureKit.h>
+
 #import "ScreenCapturer.h"
 #import "ReadinessPolicy.h"
 
@@ -24,14 +26,76 @@ void macVNCCaptureSessionReset(void)
   }
 }
 
-bool macVNCCaptureSessionAdd(ScreenCapturer *capturer)
+bool macVNCCaptureSessionBuild(const MacVNCDisplayLayout *layout,
+                               int captureFramesPerSecond,
+                               MacVNCCaptureFrameHandler frameHandler,
+                               MacVNCCaptureFailureHandler failureHandler)
 {
-    if (!capturer)
+  @autoreleasepool {
+    /* Drop any previous session FIRST, whatever happens next. A failed rebuild
+       must not leave the old run's streams installed: the caller then believes
+       it has no session while stale streams still hold their displays. */
+    macVNCCaptureSessionReset();
+
+    if (!layout || layout->count == 0 || !frameHandler)
         return false;
-    if (!gCapturers)
-        gCapturers = [[NSMutableArray alloc] init];
-    [gCapturers addObject:capturer];
+
+    /* Classifying the error belongs here, with the framework that defines the
+       codes; the server core must not need SCStreamError to decide whether a
+       permission is missing. */
+    void (^errorHandler)(NSError *) = ^(NSError *error) {
+        NSLog(@"macVNC: screen capture error: %@", error.description);
+        bool likelyPermissionDenial =
+            [error.domain isEqualToString:SCStreamErrorDomain] &&
+            (error.code == SCStreamErrorUserDeclined ||
+             error.code == SCStreamErrorMissingEntitlements);
+        if (failureHandler)
+            failureHandler(likelyPermissionDenial);
+    };
+
+    NSMutableArray<ScreenCapturer *> *built =
+        [[[NSMutableArray alloc] initWithCapacity:layout->count] autorelease];
+
+    for (size_t i = 0; i < layout->count; ++i) {
+        /* Points into the caller's layout, which outlives the session: mac.m
+           keeps it in the run's private state. */
+        const MacVNCDisplayGeometry *geometry = &layout->displays[i];
+        ScreenCapturer *capturer = [[ScreenCapturer alloc]
+            initWithDisplay:geometry->input.displayID
+            captureFramesPerSecond:captureFramesPerSecond
+            frameHandler:^BOOL(CMSampleBufferRef sampleBuffer) {
+                /* Unwrap ScreenCaptureKit here so the consumer sees only
+                   pixels: it has no business locking a CVPixelBuffer. */
+                CVPixelBufferRef pixelBuffer =
+                    CMSampleBufferGetImageBuffer(sampleBuffer);
+                if (!pixelBuffer)
+                    return YES; /* nothing to composite; not retryable */
+
+                CVPixelBufferLockBaseAddress(pixelBuffer,
+                                             kCVPixelBufferLock_ReadOnly);
+                bool accepted = frameHandler(
+                    geometry,
+                    CVPixelBufferGetBaseAddress(pixelBuffer),
+                    CVPixelBufferGetBytesPerRow(pixelBuffer),
+                    (int)CVPixelBufferGetWidth(pixelBuffer),
+                    (int)CVPixelBufferGetHeight(pixelBuffer));
+                CVPixelBufferUnlockBaseAddress(pixelBuffer,
+                                               kCVPixelBufferLock_ReadOnly);
+                return accepted ? YES : NO;
+            }
+            errorHandler:errorHandler];
+        if (!capturer) {
+            NSLog(@"macVNC: could not initialize capture for display %u",
+                  geometry->input.displayID);
+            return false;   /* `built` autoreleases; no session installed */
+        }
+        [built addObject:capturer];
+        [capturer release];
+    }
+
+    gCapturers = [built retain];
     return true;
+  }
 }
 
 size_t macVNCCaptureSessionCount(void)

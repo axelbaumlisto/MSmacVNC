@@ -6,6 +6,20 @@
 #import "MacVNCCaptureSession.h"
 #import "ScreenCapturer.h"
 #import <CoreGraphics/CoreGraphics.h>
+#include <string.h>
+
+static bool acceptFrame(const MacVNCDisplayGeometry *geometry,
+                        const uint8_t *pixels, size_t stride,
+                        int width, int height)
+{
+    (void)geometry; (void)pixels; (void)stride; (void)width; (void)height;
+    return true;
+}
+
+static void noteFailure(bool likelyPermissionDenial)
+{
+    (void)likelyPermissionDenial;
+}
 
 /*
  * The capture-stream set for one server run.
@@ -32,31 +46,53 @@ int main(void)
         assert(macVNCCaptureSessionWaitForFirstFrames(1000) == true);
         assert(macVNCCaptureSessionAllReady() == true);
 
-        /* nil is rejected rather than stored: a nil in the set would silently
-           reduce the number of displays actually captured. */
-        assert(macVNCCaptureSessionAdd(nil) == false);
+        /* A NON-empty session: without this every assertion above also holds
+           for a Build that does nothing. Building touches no TCC and starts no
+           capture - Start does, and is deliberately not called. */
+        MacVNCDisplayLayout layout;
+        memset(&layout, 0, sizeof(layout));
+        layout.count = 2;
+        layout.width = 100;
+        layout.height = 50;
+        for (size_t i = 0; i < 2; ++i) {
+            layout.displays[i].input.displayID = CGMainDisplayID();
+            layout.displays[i].input.pixelWidth = 50;
+            layout.displays[i].input.pixelHeight = 50;
+            layout.displays[i].framebufferX = (int)i * 50;
+        }
+
+        assert(macVNCCaptureSessionBuild(&layout, 30, acceptFrame, noteFailure));
+        /* One stream PER display: a Build that stopped after the first would
+           silently capture only one monitor. */
+        assert(macVNCCaptureSessionCount() == 2);
+
+        /* Rebuilding REPLACES rather than appends - otherwise every restart
+           would accumulate the previous run's streams, and each would keep
+           capturing its display. Checked with a DIFFERENT display count so an
+           appending implementation cannot coincide with the right number. */
+        MacVNCDisplayLayout single;
+        memset(&single, 0, sizeof(single));
+        single.count = 1;
+        single.width = 50;
+        single.height = 50;
+        single.displays[0].input.displayID = CGMainDisplayID();
+        single.displays[0].input.pixelWidth = 50;
+        single.displays[0].input.pixelHeight = 50;
+        assert(macVNCCaptureSessionBuild(&single, 30, acceptFrame, noteFailure));
+        assert(macVNCCaptureSessionCount() == 1);
+        assert(macVNCCaptureSessionBuild(&layout, 30, acceptFrame, noteFailure));
+        assert(macVNCCaptureSessionCount() == 2);
+
+        /* Refused inputs must leave NO session installed. */
+        assert(macVNCCaptureSessionBuild(&layout, 30, NULL, noteFailure) == false);
+        assert(macVNCCaptureSessionCount() == 0);
+        assert(macVNCCaptureSessionBuild(NULL, 30, acceptFrame, noteFailure) == false);
+        MacVNCDisplayLayout empty;
+        memset(&empty, 0, sizeof(empty));
+        assert(macVNCCaptureSessionBuild(&empty, 30, acceptFrame, noteFailure) == false);
         assert(macVNCCaptureSessionCount() == 0);
 
-        /* A NON-empty set: without this every assertion above also holds for an
-           implementation whose Add does nothing. Constructing a ScreenCapturer
-           touches no ScreenCaptureKit and no TCC - capture only starts on
-           -startCapture, which is deliberately not called here. */
-        ScreenCapturer *capturer =
-            [[ScreenCapturer alloc] initWithDisplay:CGMainDisplayID()
-                             captureFramesPerSecond:30
-                                       frameHandler:^BOOL(CMSampleBufferRef b) {
-                                           (void)b; return YES;
-                                       }
-                                       errorHandler:^(NSError *e) { (void)e; }];
-        assert(capturer != nil);
-        assert(macVNCCaptureSessionAdd(capturer) == true);
-        assert(macVNCCaptureSessionCount() == 1);
-
-        /* The session retains, so our release is not the last one. Over-release
-           here would crash; failing to retain would leave a dangling capturer. */
-        assert(capturer.retainCount >= 2);
-        [capturer release];
-        assert(macVNCCaptureSessionCount() == 1);
+        assert(macVNCCaptureSessionBuild(&layout, 30, acceptFrame, noteFailure));
 
         /* Reset releases the previous set - the one MRC operation in the module.
            Running it twice also proves it is idempotent between runs. */

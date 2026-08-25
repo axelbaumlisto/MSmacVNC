@@ -13,7 +13,6 @@
  * input injection lives in MacVNCInput; power management in MacVNCPowerMgmt.
  */
 
-#include <ScreenCaptureKit/ScreenCaptureKit.h>
 #include <rfb/rfb.h>
 #include <rfb/keysym.h>
 #include <stdio.h>
@@ -24,7 +23,6 @@
 #include <arpa/inet.h>
 #include <time.h>
 
-#import "ScreenCapturer.h"
 #import "RFBKeySym.h"
 #import "DisplayLayout.h"
 #import "DisplaySelection.h"
@@ -248,6 +246,39 @@ buildClientAccessList(void)
   return TRUE;
 }
 
+/* Capture callbacks. Plain C function pointers rather than blocks: the session
+   must not capture this file's state, and these two are the whole seam. */
+
+static bool
+compositeCapturedFrame(const MacVNCDisplayGeometry *geometry,
+                       const uint8_t *pixels, size_t stride,
+                       int width, int height)
+{
+    if (!pixels || !geometry)
+        return true; /* nothing to composite; not a retryable condition */
+    if (width != geometry->input.pixelWidth ||
+        height != geometry->input.pixelHeight) {
+        rfbErr("Unexpected display %u frame size %dx%d (expected %dx%d)\n",
+               geometry->input.displayID, width, height,
+               geometry->input.pixelWidth, geometry->input.pixelHeight);
+        return true; /* wrong geometry: retrying cannot help */
+    }
+    return macVNCCompositorSubmitFrame(rfbScreen, geometry, pixels, stride)
+               ? true : false;
+}
+
+static void
+reportCaptureFailure(bool likelyPermissionDenial)
+{
+    /* Stamp the run this failure belongs to, so a notification delivered late
+       (queued behind a modal, after the server was stopped and restarted) can be
+       discarded by the handler. */
+    uint64_t generation = atomic_load(&serverGeneration);
+    /* No UI here: AppDelegate owns the single permission popup. */
+    if (macVNCScreenCaptureFailureHandler)
+        macVNCScreenCaptureFailureHandler(likelyPermissionDenial, generation);
+}
+
 static rfbBool
 ScreenInit(int port, const char *password, int captureFramesPerSecond)
 {
@@ -347,46 +378,12 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
   rfbScreen->kbdAddEvent = KbdAddEvent;
   macVNCInputSetContext(rfbScreen, &displayLayout);
 
-  void (^captureErrorHandler)(NSError *) = ^(NSError *error) {
-      rfbLog("Screen capture error: %s\n", [error.description UTF8String]);
-      /* Distinguish a real TCC denial from unrelated capture failures (display
-         unplugged, stream stopped). Only the former may latch a permanent
-         "Screen Recording missing" state upstream. */
-      bool likelyPermissionDenial =
-          [error.domain isEqualToString:SCStreamErrorDomain] &&
-          (error.code == SCStreamErrorUserDeclined ||
-           error.code == SCStreamErrorMissingEntitlements);
-      /* Stamp the run this failure belongs to, so a notification that is
-         delivered late (e.g. queued behind a modal, after the server was
-         already stopped and restarted) can be discarded by the handler. */
-      uint64_t generation = atomic_load(&serverGeneration);
-      /* Do not show UI here. Report upward; AppDelegate owns the single
-         permission popup and decides how to recover. */
-      dispatch_async(dispatch_get_main_queue(), ^{
-          if (macVNCScreenCaptureFailureHandler)
-              macVNCScreenCaptureFailureHandler(likelyPermissionDenial, generation);
-      });
-  };
-
-  /* displayLayout.count is the single source for how many displays were
-     selected; a parallel local counter was the same fact stored twice. */
-  macVNCCaptureSessionReset();
-  for (size_t i = 0; i < displayLayout.count; ++i) {
-      const MacVNCDisplayGeometry *geometry = &displayLayout.displays[i];
-      ScreenCapturer *capturer = [[ScreenCapturer alloc]
-          initWithDisplay:geometry->input.displayID
-          captureFramesPerSecond:captureFramesPerSecond
-          frameHandler:^BOOL(CMSampleBufferRef sampleBuffer) {
-              return macVNCCompositorSubmitFrame(rfbScreen, sampleBuffer, geometry) ? YES : NO;
-          }
-          errorHandler:captureErrorHandler];
-      if (!capturer) {
-          rfbErr("Could not initialize display capture mailbox\n");
-          return FALSE;
-      }
-      macVNCCaptureSessionAdd(capturer);
-      [capturer release];
-  }
+  /* One call: MacVNCCaptureSession owns ScreenCaptureKit, unwraps each frame
+     to plain pixels and classifies capture errors, so this file needs neither
+     SCStream nor SCStreamError. */
+  if (!macVNCCaptureSessionBuild(&displayLayout, captureFramesPerSecond,
+                                 compositeCapturedFrame, reportCaptureFailure))
+      return FALSE;
 
   rfbInitServer(rfbScreen);
   rfbServerInitialized = TRUE;
