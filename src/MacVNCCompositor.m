@@ -83,42 +83,19 @@ unlockCurrentClients(LockedClientSet *set)
     memset(set, 0, sizeof(*set));
 }
 
-/* Returns TRUE when the frame was composited. FALSE means "not now" (a client
-   was mid-send): the caller must retry this frame rather than drop it. */
 rfbBool
 macVNCCompositorSubmitFrame(rfbScreenInfoPtr screen,
-                            CMSampleBufferRef sampleBuffer,
-                            const MacVNCDisplayGeometry *geometry)
+                            const MacVNCDisplayGeometry *geometry,
+                            const uint8_t *pixels,
+                            size_t stride)
 {
-    /* Runs on a ScreenCaptureKit callback queue, which has no autorelease pool
-       of its own; NSLog/description below would otherwise leak permanently. */
-    @autoreleasepool {
-    if (!screen || !screen->frameBuffer || !geometry)
+    if (!screen || !screen->frameBuffer || !geometry || !pixels)
         return TRUE; /* server torn down mid-flight; nothing to retry into */
-
-    CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
-    if (!pixelBuffer)
-        return TRUE; /* nothing to composite; not a retryable condition */
-    if ((int)CVPixelBufferGetWidth(pixelBuffer) != geometry->input.pixelWidth ||
-        (int)CVPixelBufferGetHeight(pixelBuffer) != geometry->input.pixelHeight) {
-        rfbErr("Unexpected display %u frame size %zux%zu (expected %dx%d)\n",
-               geometry->input.displayID,
-               CVPixelBufferGetWidth(pixelBuffer),
-               CVPixelBufferGetHeight(pixelBuffer),
-               geometry->input.pixelWidth,
-               geometry->input.pixelHeight);
-        return TRUE; /* wrong geometry: retrying cannot help */
-    }
-
-    CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
-    const uint8_t *source = CVPixelBufferGetBaseAddress(pixelBuffer);
-    size_t sourceStride = CVPixelBufferGetBytesPerRow(pixelBuffer);
 
     pthread_mutex_lock(&compositorMutex);
     LockedClientSet lockedClients;
     if (!lockCurrentClients(screen, &lockedClients)) {
         pthread_mutex_unlock(&compositorMutex);
-        CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
         /* Either OOM or (far more commonly) a client is mid-send. Report
            "not composited" so the caller re-submits this frame instead of
            losing its pixels (the screen may go static right after). */
@@ -129,15 +106,13 @@ macVNCCompositorSubmitFrame(rfbScreenInfoPtr screen,
                                 screen->width,
                                 screen->height,
                                 geometry,
-                                source,
-                                sourceStride,
+                                pixels,
+                                stride,
                                 TILE_SIZE,
                                 markCompositeDirty,
                                 screen);
 
     unlockCurrentClients(&lockedClients);
     pthread_mutex_unlock(&compositorMutex);
-    CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
     return TRUE;
-    }
 }

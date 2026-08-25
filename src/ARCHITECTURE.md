@@ -26,8 +26,8 @@ modules**, and keep the Objective-C layer as thin glue to macOS frameworks
                  ┌───────────────▼──────────────────────────────┐
    Server core   │ mac.m: ScreenInit, client lifecycle,          │
    (C / Obj-C)   │        start/stop, listener teardown          │
-                 │   MacVNCCompositor (frame → canvas, locking)  │
-                 │   MacVNCCaptureSession (per-run streams)      │
+                 │   MacVNCCaptureSession (owns ScreenCaptureKit) │
+                 │   MacVNCCompositor (pixels → canvas, locking) │
                  │   MacVNCInput (kbd/ptr)  MacVNCPowerMgmt      │
                  │   MacVNCDisplayWake      ScreenCapturer (SCK) │
                  └───────────────┬──────────────────────────────┘
@@ -80,14 +80,20 @@ Pure logic, each with a unit test wired into `ctest` (`.c` for C modules,
 Objective-C glue:
 - **AppDelegate** — status-bar UI, timers, server start/stop, permission flow;
   installs the capture-permission policy into the core.
-- **MacVNCCompositor** — composites a captured frame into the shared canvas.
+- **MacVNCCompositor** — composites raw BGRA pixels into the shared canvas
+  (`macVNCCompositorSubmitFrame(screen, geometry, pixels, stride)`). Taking
+  pixels rather than a `CMSampleBuffer` is what makes the hot path unit-testable
+  without a live capture stream — see `tests/test_compositor_submit.m`.
   Takes every client's `sendMutex` with `trylock` only: LibVNCServer holds it
   for the whole encode-and-write, so waiting would let one stalled viewer
   freeze the screen for all clients. A refused frame must be re-submitted, not
   dropped.
-- **MacVNCCaptureSession** — the per-run set of `ScreenCapturer` streams;
-  start/stop/count and a *shared* first-frame budget, so a two-monitor Mac does
-  not make the client wait twice as long.
+- **MacVNCCaptureSession** — owns ScreenCaptureKit. Builds one stream per
+  display from a `MacVNCDisplayLayout`, unwraps each `CMSampleBuffer` to plain
+  BGRA pixels, classifies `SCStreamError` into "permission denial or not", and
+  shares ONE first-frame budget across displays so a two-monitor Mac does not
+  make the client wait twice as long. Because it holds the framework, `mac.m`
+  no longer includes ScreenCaptureKit at all.
 - **MacVNCRelauncher** — `posix_spawn` of our own executable, used when a newly
   granted permission needs a fresh process. Both permissions bind at launch.
 - **MacVNCDefaultsKeys** — defaults keys *and* their registered fallbacks, so a

@@ -1,6 +1,8 @@
 #pragma once
 
-#include <CoreMedia/CoreMedia.h>
+#include <stddef.h>
+#include <stdint.h>
+
 #include <rfb/rfb.h>
 
 #include "DisplayLayout.h"
@@ -16,8 +18,13 @@
  */
 
 /*
- * Composites one captured frame for `geometry` into rfbScreen's framebuffer and
- * marks the changed tiles.
+ * Composites one display's BGRA pixels into `screen`'s framebuffer and marks the
+ * changed tiles. `stride` is bytes per row; the pixels need only be valid for
+ * the duration of the call.
+ *
+ * Takes raw pixels, not a CMSampleBuffer: compositing has nothing to do with
+ * ScreenCaptureKit, and depending on it made this module untestable without a
+ * live capture stream.
  *
  * Returns FALSE for "not now" - a client was mid-send, or memory ran out. The
  * caller must RE-SUBMIT the same frame rather than drop it: after a static
@@ -25,5 +32,6 @@
  * would stay missing on the client.
  */
 rfbBool macVNCCompositorSubmitFrame(rfbScreenInfoPtr screen,
-                                    CMSampleBufferRef sampleBuffer,
-                                    const MacVNCDisplayGeometry *geometry);
+                                    const MacVNCDisplayGeometry *geometry,
+                                    const uint8_t *pixels,
+                                    size_t stride);
