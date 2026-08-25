@@ -27,6 +27,7 @@
 #import "ScreenCapturer.h"
 #import "RFBKeySym.h"
 #import "DisplayLayout.h"
+#import "DisplaySelection.h"
 #import "CompositeFramebuffer.h"
 #import "MacVNCInput.h"
 #import "ReadinessPolicy.h"
@@ -225,15 +226,137 @@ updateCompositeFrame(CMSampleBufferRef sampleBuffer,
     return TRUE;
 }
 
+/* Enumerate the attached displays. Retries because a dimmed or slept screen
+   reports zero active displays and capture would then fail. */
+static rfbBool
+readAttachedDisplays(MacVNCDisplayInput *displays, size_t *count, int *primaryIndex)
+{
+  CGDirectDisplayID ids[MACVNC_MAX_DISPLAYS];
+  CGDisplayCount reported = 0;
+
+  macVNCWakeDisplays();
+  for (int attempt = 0; attempt < 20; ++attempt) {
+      CGGetActiveDisplayList(MACVNC_MAX_DISPLAYS, ids, &reported);
+      if (reported > 0)
+          break;
+      macVNCWakeDisplays();
+      usleep(250000); /* 250ms */
+  }
+  if (reported == 0 || reported > MACVNC_MAX_DISPLAYS) {
+      rfbErr("Unsupported active display count: %u\n", reported);
+      return FALSE;
+  }
+
+  CGDirectDisplayID mainID = CGMainDisplayID();
+  *primaryIndex = -1;
+  for (size_t i = 0; i < reported; ++i) {
+      CGRect bounds = CGDisplayBounds(ids[i]);
+      displays[i] = (MacVNCDisplayInput){
+          .displayID     = ids[i],
+          .logicalX      = bounds.origin.x,
+          .logicalY      = bounds.origin.y,
+          .logicalWidth  = bounds.size.width,
+          .logicalHeight = bounds.size.height,
+          .pixelWidth    = (int)CGDisplayPixelsWide(ids[i]),
+          .pixelHeight   = (int)CGDisplayPixelsHigh(ids[i]),
+      };
+      if (ids[i] == mainID)
+          *primaryIndex = (int)i;
+      printf("Found %s display %zu id=%u at (%.0f,%.0f), logical %.0fx%.0f, pixels %dx%d\n",
+             ids[i] == mainID ? "primary" : "secondary", i, ids[i],
+             displays[i].logicalX, displays[i].logicalY,
+             displays[i].logicalWidth, displays[i].logicalHeight,
+             displays[i].pixelWidth, displays[i].pixelHeight);
+  }
+  *count = reported;
+  return TRUE;
+}
+
+/* Discover displays, apply the configured selection, build the composite
+   layout. Split out of ScreenInit: display topology has nothing to do with
+   networking, auth or framebuffer setup, and the selection rules are now
+   unit-tested in DisplaySelection.c. */
+static rfbBool
+resolveDisplayLayout(void)
+{
+  MacVNCDisplayInput attached[MACVNC_MAX_DISPLAYS];
+  MacVNCDisplayInput selected[MACVNC_MAX_DISPLAYS];
+  size_t attachedCount = 0, selectedCount = 0;
+  int primaryIndex = -1;
+
+  if (!readAttachedDisplays(attached, &attachedCount, &primaryIndex))
+      return FALSE;
+
+  switch (macVNCSelectDisplays(attached, attachedCount, primaryIndex,
+                               displayNumber, selected, &selectedCount)) {
+  case MACVNC_DISPLAY_SELECTION_OK:
+      break;
+  case MACVNC_DISPLAY_SELECTION_NO_SUCH_DISPLAY:
+      rfbErr("Specified display %d does not exist\n", displayNumber);
+      return FALSE;
+  case MACVNC_DISPLAY_SELECTION_UNSUPPORTED_COUNT:
+  default:
+      rfbErr("Unsupported display selection\n");
+      return FALSE;
+  }
+
+  if (!macVNCBuildDisplayLayout(selected, selectedCount, &displayLayout)) {
+      rfbErr("Could not build a non-overlapping RFB display layout\n");
+      return FALSE;
+  }
+  printf("Capturing %zu display(s); composite framebuffer: %dx%d\n",
+         displayLayout.count, displayLayout.width, displayLayout.height);
+  return TRUE;
+}
+
+/* Install VNC password authentication. Refuses an empty password: an
+   unauthenticated listener on a remote-control server is not an option. */
+static rfbBool
+installPassword(const char *password)
+{
+  if (!password || strlen(password) == 0) {
+      rfbErr("A non-empty VNC password is required\n");
+      return FALSE;
+  }
+  macVNCClearStoredPassword();
+  gPasswdList[0] = strdup(password);
+  if (!gPasswdList[0]) {
+      rfbErr("Out of memory storing the VNC password\n");
+      return FALSE;
+  }
+  rfbScreen->authPasswdData = gPasswdList;
+  rfbScreen->passwordCheck = macVNCPasswordCheck;
+  return TRUE;
+}
+
+static rfbBool
+buildClientAccessList(void)
+{
+  char accessError[160] = {0};
+  clientAccessList.count = 0;
+
+  if (macVNCClientAccessMode == MACVNC_CLIENT_ACCESS_FAIL_CLOSED) {
+      rfbErr("Client access policy is fail-closed; no listener opened\n");
+      return FALSE;
+  }
+  if (macVNCClientAccessMode == MACVNC_CLIENT_ACCESS_ALLOW_LIST) {
+      if (!macVNCParseAccessList(macVNCAllowedClients, &clientAccessList,
+                                 accessError, sizeof(accessError))) {
+          rfbErr("Invalid allowed clients list: %s\n", accessError);
+          return FALSE;
+      }
+      if (clientAccessList.count == 0) {
+          rfbErr("Client access policy allowList has no entries\n");
+          return FALSE;
+      }
+  }
+  return TRUE;
+}
+
 static rfbBool
 ScreenInit(int port, const char *password, int captureFramesPerSecond)
 {
   int bitsPerSample = 8;
-  CGDisplayCount displayCount;
-  CGDirectDisplayID displays[32];
-  CGDirectDisplayID selectedDisplays[MACVNC_MAX_DISPLAYS];
-  MacVNCDisplayInput layoutInputs[MACVNC_MAX_DISPLAYS];
-  size_t selectedCount = 0;
 
   if (captureFramesPerSecond < MACVNC_CAPTURE_FPS_MIN ||
       captureFramesPerSecond > MACVNC_CAPTURE_FPS_MAX) {
@@ -257,65 +380,8 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
   char  progName[]      = "macVNC";
   char *dummyArgv[2]    = {progName, NULL};
 
-  /* Wake the display first: if the Mac dimmed/slept the screen there are 0
-     active displays and capture would fail. Nudge it awake, then retry. */
-  macVNCWakeDisplays();
-  displayCount = 0;
-  for (int attempt = 0; attempt < 20; ++attempt) {
-      CGGetActiveDisplayList(32, displays, &displayCount);
-      if (displayCount > 0)
-          break;
-      macVNCWakeDisplays();
-      usleep(250000); /* 250ms */
-  }
-  if (displayCount == 0 || displayCount > MACVNC_MAX_DISPLAYS) {
-      rfbErr("Unsupported active display count: %u\n", displayCount);
+  if (!resolveDisplayLayout())
       return FALSE;
-  }
-  for (int i = 0; i < (int)displayCount; ++i) {
-      CGRect bounds = CGDisplayBounds(displays[i]);
-      printf("Found %s display %d id=%u at (%.0f,%.0f), logical %.0fx%.0f, pixels %zux%zu\n",
-             CGDisplayIsMain(displays[i]) ? "primary" : "secondary",
-             i, displays[i], bounds.origin.x, bounds.origin.y,
-             bounds.size.width, bounds.size.height,
-             CGDisplayPixelsWide(displays[i]), CGDisplayPixelsHigh(displays[i]));
-  }
-
-  if (displayNumber == -2) {
-      selectedCount = displayCount;
-      for (size_t i = 0; i < selectedCount; ++i)
-          selectedDisplays[i] = displays[i];
-      printf("Using all %zu active displays in one framebuffer\n", selectedCount);
-  } else if (displayNumber == -1) {
-      selectedCount = 1;
-      selectedDisplays[0] = CGMainDisplayID();
-      printf("Using primary display\n");
-  } else if (displayNumber >= 0 && displayNumber < (int)displayCount) {
-      selectedCount = 1;
-      selectedDisplays[0] = displays[displayNumber];
-      printf("Using specified display %d\n", displayNumber);
-  } else {
-      rfbErr("Specified display %d does not exist\n", displayNumber);
-      return FALSE;
-  }
-
-  for (size_t i = 0; i < selectedCount; ++i) {
-      CGRect bounds = CGDisplayBounds(selectedDisplays[i]);
-      layoutInputs[i] = (MacVNCDisplayInput){
-          .displayID = selectedDisplays[i],
-          .logicalX = bounds.origin.x,
-          .logicalY = bounds.origin.y,
-          .logicalWidth = bounds.size.width,
-          .logicalHeight = bounds.size.height,
-          .pixelWidth = (int)CGDisplayPixelsWide(selectedDisplays[i]),
-          .pixelHeight = (int)CGDisplayPixelsHigh(selectedDisplays[i]),
-      };
-  }
-  if (!macVNCBuildDisplayLayout(layoutInputs, selectedCount, &displayLayout)) {
-      rfbErr("Could not build a non-overlapping RFB display layout\n");
-      return FALSE;
-  }
-  printf("Composite framebuffer: %dx%d\n", displayLayout.width, displayLayout.height);
 
 
   rfbScreen = rfbGetScreen(&dummyArgc, dummyArgv,
@@ -343,34 +409,11 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
   /* v1 network policy is IPv4-only; do not expose an IPv6 listener. */
   rfbScreen->ipv6port = 0;
 
-  char accessError[160] = {0};
-  clientAccessList.count = 0;
-  if (macVNCClientAccessMode == MACVNC_CLIENT_ACCESS_FAIL_CLOSED) {
-      rfbErr("Client access policy is fail-closed; no listener opened\n");
+  if (!buildClientAccessList())
       return FALSE;
-  }
-  if (macVNCClientAccessMode == MACVNC_CLIENT_ACCESS_ALLOW_LIST) {
-      if (!macVNCParseAccessList(macVNCAllowedClients, &clientAccessList,
-                                 accessError, sizeof(accessError))) {
-          rfbErr("Invalid allowed clients list: %s\n", accessError);
-          return FALSE;
-      }
-      if (clientAccessList.count == 0) {
-          rfbErr("Client access policy allowList has no entries\n");
-          return FALSE;
-      }
-  }
 
-  /* Configure password authentication if a password was supplied. */
-  if (password && strlen(password) > 0) {
-      macVNCClearStoredPassword();
-      gPasswdList[0] = strdup(password);
-      rfbScreen->authPasswdData = gPasswdList;
-      rfbScreen->passwordCheck = macVNCPasswordCheck;
-  } else {
-      rfbErr("A non-empty VNC password is required\n");
+  if (!installPassword(password))
       return FALSE;
-  }
 
   rfbScreen->serverFormat.redShift   = bitsPerSample * 2;
   rfbScreen->serverFormat.greenShift = bitsPerSample * 1;
@@ -430,8 +473,10 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
       });
   };
 
-  screenCapturers = [[NSMutableArray alloc] initWithCapacity:selectedCount];
-  for (size_t i = 0; i < selectedCount; ++i) {
+  /* displayLayout.count is the single source for how many displays were
+     selected; a parallel local counter was the same fact stored twice. */
+  screenCapturers = [[NSMutableArray alloc] initWithCapacity:displayLayout.count];
+  for (size_t i = 0; i < displayLayout.count; ++i) {
       const MacVNCDisplayGeometry *geometry = &displayLayout.displays[i];
       ScreenCapturer *capturer = [[ScreenCapturer alloc]
           initWithDisplay:geometry->input.displayID
