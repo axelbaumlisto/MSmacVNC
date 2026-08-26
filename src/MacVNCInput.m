@@ -185,12 +185,42 @@ void macVNCInputResetModifiers(void)
   in order to allow for keyboard combos with other modifiers.
   As a last resort, the incoming keysym is simply used as a Unicode value. This way MacOS does not support any modifiers though.
 */
+/* Rebuild the char keymaps if the user has switched input source since they
+   were built. Called with keyboardMutex held; compare-then-rebuild keeps the
+   common path at one TIS call. Stale maps used to mean: switch US->Russian
+   mid-session, and every Cyrillic keysym silently degraded to the
+   modifier-blind unicode fallback. */
+static CFStringRef gMappedSourceID = NULL;
+static rfbBool keyboardInit(void);
+static void keyboardShutdownLocked(void);
+
+static void
+keyboardRefreshIfLayoutChangedLocked(void)
+{
+    TISInputSourceRef current = TISCopyCurrentKeyboardInputSource();
+    if (!current)
+        return;
+    CFStringRef currentID = (CFStringRef)TISGetInputSourceProperty(
+        current, kTISPropertyInputSourceID);
+    bool changed = true;
+    if (currentID && gMappedSourceID)
+        changed = !CFEqual(currentID, gMappedSourceID);
+    CFRelease(current);
+    if (!changed)
+        return;
+    keyboardShutdownLocked();
+    if (!keyboardInit())
+        fprintf(stderr, "macVNC: keyboard layout changed but the new layout "
+                        "could not be mapped; keeping no char maps\n");
+}
+
 void
 KbdAddEvent(rfbBool down, rfbKeySym keySym, struct _rfbClientRec* cl)
 {
     (void)cl;
     undim();
     pthread_mutex_lock(&keyboardMutex);
+    keyboardRefreshIfLayoutChangedLocked();
 
     CGKeyCode keyCode = (CGKeyCode)-1;
     for (size_t i = 0; i < sizeof(specialKeyMap) / sizeof(specialKeyMap[0]); ++i) {
@@ -225,6 +255,11 @@ KbdAddEvent(rfbBool down, rfbKeySym keySym, struct _rfbClientRec* cl)
             keyboardEvent = CGEventCreateKeyboardEvent(
                 eventSource, (CGKeyCode)keyCodeFromDictionary, down);
         } else {
+            /* Unicode-string fallback: synthesizes TEXT, not a keystroke. A
+               keystroke carries its modifiers; a unicode string with e.g.
+               Command set is interpreted by many apps as a SHORTCUT, not as
+               the character with a modifier. The fallback is modifier-blind
+               by construction, so it must not inherit live modifier flags. */
             keyboardEvent = CGEventCreateKeyboardEvent(eventSource, 0, down);
             if (keyboardEvent)
                 CGEventKeyboardSetUnicodeString(keyboardEvent, 1, &unicodeChar);
@@ -233,7 +268,9 @@ KbdAddEvent(rfbBool down, rfbKeySym keySym, struct _rfbClientRec* cl)
     }
 
     if (keyboardEvent) {
-        CGEventSetFlags(keyboardEvent, currentKeyboardFlags());
+        bool unicodeFallback = (keyCode == (CGKeyCode)-1);
+        CGEventSetFlags(keyboardEvent,
+                        unicodeFallback ? 0 : currentKeyboardFlags());
         CGEventPost(kCGSessionEventTap, keyboardEvent);
         CFRelease(keyboardEvent);
     }
@@ -283,9 +320,16 @@ PtrAddEvent(int buttonMask, int x, int y, rfbClientPtr cl)
        PointerPos encoding receive a position update in the next
        FramebufferUpdate, so they can render the cursor locally at the
        exact position without waiting for framebuffer data. Written under
-       pointerMutex so concurrent multi-client events cannot tear the fields. */
-    inputScreen->cursorX = x;
-    inputScreen->cursorY = y;
+       pointerMutex so concurrent multi-client events cannot tear the fields.
+
+       Published ONLY when the point mapped to real display space. On a
+       mapping failure the OS cursor never moved (no event is posted), so
+       telling PointerPos clients the clamped framebuffer coordinates would
+       be a phantom position the user's cursor is not at. */
+    if (validPosition) {
+        inputScreen->cursorX = x;
+        inputScreen->cursorY = y;
+    }
     pthread_mutex_unlock(&pointerMutex);
     if (!shouldPost)
         return;
@@ -306,8 +350,13 @@ PtrAddEvent(int buttonMask, int x, int y, rfbClientPtr cl)
     if (mouseEvent) {
 	CGEventPost(kCGSessionEventTap, mouseEvent);
 	CFRelease(mouseEvent);
+	/* A scroll event (mask bits 4-7) does NOT imply "no pointer movement":
+	   trackpad-driven viewers routinely send the new x/y in the SAME
+	   PointerEvent as the scroll bit. Swallowing the move here desynced the
+	   OS cursor from what PointerPos clients had been told. Fall through to
+	   the move/button injection as well. */
     }
-    else {
+    {
 	/*
 	  Use the deprecated CGPostMouseEvent API here as we get a buttonmask plus position which is pretty low-level
 	  whereas CGEventCreateMouseEvent is expecting higher-level events. This allows for direct injection of
@@ -323,8 +372,9 @@ PtrAddEvent(int buttonMask, int x, int y, rfbClientPtr cl)
     }
 }
 
+/* Caller holds keyboardMutex (see macVNCInputShutdown). */
 static void
-keyboardShutdown(void)
+keyboardShutdownLocked(void)
 {
     CFMutableDictionaryRef *keyMaps[] = {
         &charKeyMap,
@@ -356,14 +406,25 @@ static rfbBool keyboardInit(void)
     }
 
     /* kTISPropertyUnicodeKeyLayoutData is NULL for input sources with no uchr
-       data (e.g. CJK/handwriting IMEs). Guard it: CFDataGetBytePtr(NULL) is a
-       contract violation and UCKeyTranslate(NULL,...) would crash on launch. */
+       data (e.g. CJK/handwriting IMEs). CFDataGetBytePtr(NULL) is a contract
+       violation and UCKeyTranslate(NULL,...) would crash - so instead of
+       failing startup outright (which left such users with NO input at all),
+       fall back to the ASCII-capable layout: ASCII keys keep working. */
     CFDataRef layoutData = (CFDataRef)TISGetInputSourceProperty(currentKeyboard, kTISPropertyUnicodeKeyLayoutData);
     keyboardLayout = layoutData ? (const UCKeyboardLayout *)CFDataGetBytePtr(layoutData) : NULL;
     if (!keyboardLayout) {
-        fprintf(stderr, "Active keyboard input source has no Unicode layout data\n");
+        fprintf(stderr, "Active keyboard input source has no Unicode layout data; "
+                        "falling back to the ASCII-capable layout\n");
         CFRelease(currentKeyboard);
-        return FALSE;
+        currentKeyboard = TISCopyCurrentASCIICapableKeyboardInputSource();
+        if (!currentKeyboard)
+            return FALSE;
+        layoutData = (CFDataRef)TISGetInputSourceProperty(currentKeyboard, kTISPropertyUnicodeKeyLayoutData);
+        keyboardLayout = layoutData ? (const UCKeyboardLayout *)CFDataGetBytePtr(layoutData) : NULL;
+        if (!keyboardLayout) {
+            CFRelease(currentKeyboard);
+            return FALSE;
+        }
     }
 
     /* CFStringGetCStringPtr may return NULL when no direct buffer exists; copy
@@ -433,6 +494,15 @@ static rfbBool keyboardInit(void)
 	}
     }
 
+    /* Remember WHICH source these maps describe (may be the ASCII fallback,
+       which is why the ID is read from currentKeyboard, not from the system). */
+    if (gMappedSourceID)
+        CFRelease(gMappedSourceID);
+    gMappedSourceID = (CFStringRef)TISGetInputSourceProperty(
+        currentKeyboard, kTISPropertyInputSourceID);
+    if (gMappedSourceID)
+        CFRetain(gMappedSourceID);
+
     CFRelease(currentKeyboard);
 
     return TRUE;
@@ -456,13 +526,24 @@ rfbBool macVNCInputStart(void)
 
 void macVNCInputShutdown(void)
 {
+    /* Under keyboardMutex: KbdAddEvent reads eventSource and the keymaps under
+       it, and the join-then-clear ordering that protects us is an INVARIANT OF
+       THE CALLER, not of this function. A future caller that clears context
+       while a client thread still runs must not turn that mistake into a
+       use-after-free for free. */
+    pthread_mutex_lock(&keyboardMutex);
     if (eventSource) {
         CFRelease(eventSource);
         eventSource = NULL;
     }
-    keyboardShutdown();
+    keyboardShutdownLocked();
+    if (gMappedSourceID) {
+        CFRelease(gMappedSourceID);
+        gMappedSourceID = NULL;
+    }
     inputScreen = NULL;
     inputLayout = NULL;
+    pthread_mutex_unlock(&keyboardMutex);
 }
 
 bool macVNCInputHasResources(void)

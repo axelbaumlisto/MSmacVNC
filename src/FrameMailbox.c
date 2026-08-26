@@ -1,6 +1,7 @@
 #include "FrameMailbox.h"
 
 #include <assert.h>
+#include <stdio.h>
 #include <string.h>
 
 bool
@@ -92,7 +93,18 @@ macVNCFrameMailboxDestroy(MacVNCFrameMailbox *mailbox)
     if (!mailbox)
         return;
     pthread_mutex_lock(&mailbox->mutex);
-    assert(!mailbox->drainScheduled);
+    /* A drain still scheduled means a callback is in flight and will use this
+       mailbox after we return. Destroying would be a use-after-free, and the
+       old assert() was compiled out under NDEBUG exactly in release builds.
+       Leak the pending frame instead (the owner of an already-degraded
+       shutdown keeps the capturer alive for the same reason - see
+       MacVNCCaptureSession's stuck-capturer note). */
+    if (mailbox->drainScheduled) {
+        pthread_mutex_unlock(&mailbox->mutex);
+        fprintf(stderr, "macVNC: frame mailbox still draining at destroy; "
+                        "leaking pending frame to avoid use-after-free\n");
+        return;
+    }
     if (mailbox->pending.frame) {
         mailbox->releaseFrame(mailbox->pending.frame);
         memset(&mailbox->pending, 0, sizeof(mailbox->pending));

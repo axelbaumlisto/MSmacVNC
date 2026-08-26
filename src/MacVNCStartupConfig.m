@@ -31,9 +31,31 @@
     NSString *error = nil;
 
     int port = (int)[defaults integerForKey:MacVNCKeyPort];
+    /* A port outside 1..65535 is a misconfiguration, not a preference: silently
+       falling back to 5900 gives the operator a listener they never asked for
+       (and possibly believe they did not have). Error instead, matching how
+       the capture rate and password paths treat bad input. */
+    if (port <= 0 || port > 65535) {
+        if (!error)
+            error = [NSString stringWithFormat:
+                @"Port %d is outside 1-65535; set a valid port in Preferences.", port];
+        NSLog(@"macVNC: %@", error);
+    }
+    /* A non-empty MACVNC_PORT that does not parse to 1..65535 is an error too:
+       integerValue==0 used to swallow it into "no override", while the sibling
+       MACVNC_CAPTURE_FPS surfaced its parse failures. */
     NSString *portOverride = environment[@"MACVNC_PORT"];
-    if (portOverride.integerValue > 0 && portOverride.integerValue <= 65535)
-        port = (int)portOverride.integerValue;
+    if (portOverride.length > 0) {
+        int overridePort = (int)portOverride.integerValue;
+        if (overridePort > 0 && overridePort <= 65535) {
+            port = overridePort;
+        } else if (!error) {
+            error = [NSString stringWithFormat:
+                @"Invalid MACVNC_PORT '%@'; expected an integer from 1 to 65535",
+                portOverride];
+            NSLog(@"macVNC: %@", error);
+        }
+    }
 
     NSString *password = macVNCLoadPassword(defaults);
     NSString *passwordFile = environment[@"MACVNC_PASSWORD_FILE"];
@@ -84,8 +106,6 @@
         NSLog(@"macVNC network policy uses environment override(s)");
     }
 
-    if (port <= 0 || port > 65535)
-        port = MacVNCDefaultPort;
     _port = port;
     _captureFramesPerSecond = captureFramesPerSecond;
 
