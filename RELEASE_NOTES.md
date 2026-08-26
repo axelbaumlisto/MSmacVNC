@@ -1,3 +1,40 @@
+# macVNC 0.3.66
+
+## Six adversarial review rounds applied to the whole codebase
+
+- **The machine's sleep settings are never touched again.** Earlier versions saved the
+  global Energy Saver timers and wrote zeros over them to keep the Mac awake; a crash,
+  a force-quit, or the app's own Restart could leave the Mac on "never sleep" forever.
+  The server now holds ordinary per-process power assertions (system sleep + display
+  sleep), created when the first viewer authenticates and released when the last one
+  disconnects - an idle listener costs nothing, and the kernel cleans up on any exit.
+- **A stalled viewer can no longer freeze the screen for others.** The compositor takes
+  each client's send lock with a bounded trylock and re-submits declined frames, so one
+  congested or hostile connection cannot block everybody's updates.
+- **A user's Start request can no longer be silently swallowed** by an in-flight stop:
+  all server lifecycle work runs on one serial queue.
+- **Multi-display permission failure shows one alert, not N.** Capture-failure
+  notifications are stamped with the server run and latched; duplicates from the same
+  run and stale ones from a previous run are ignored.
+- **The first frame after authentication is guaranteed bounded, not black.**
+- **Preferences round-trips preserve every entry byte-identically**, and auto-added
+  CIDRs are tracked separately from hand-typed ones (no more disappearing user entries).
+- **Significant internal decomposition** (compositor, capture session, power management,
+  allowlist planning, permission UI, relauncher, status text, input context) with the
+  architecture documented in `src/ARCHITECTURE.md` and mechanically guarded: a test
+  fails if the document drifts from the source, if the server core regains a
+  ScreenCaptureKit dependency, or if any test would run with assertions compiled out.
+- **29 automated tests**, each new assertion mutation-checked (verified to fail against
+  a deliberately broken implementation).
+
+## Validation
+
+- Release build: passed. clang static analyzer: 0 warnings on all touched files.
+- CTest: 29/29 passed. Reference libvncclient: AUTH_OK, composite 5552x2715,
+  wrong password rejected. Leaks: 0.
+- Power assertions verified live: idle listener holds none, an authenticated session
+  holds system-sleep and display-sleep, disconnect releases both, kill -9 drops both.
+
 # macVNC 0.3.23
 
 ## Regression fixes in the 0.3.19–0.3.22 changes (found by review of the new code itself)
