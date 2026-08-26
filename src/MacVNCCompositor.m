@@ -10,8 +10,9 @@
 #define TILE_SIZE 64
 
 /* Serialises compositing so two displays' frames cannot interleave writes into
-   the shared canvas. */
+   the shared canvas - AND owns the screen pointer's lifetime (see SetScreen). */
 static pthread_mutex_t compositorMutex = PTHREAD_MUTEX_INITIALIZER;
+static rfbScreenInfoPtr compositorScreen = NULL;
 
 static void
 markCompositeDirty(void *context, int x, int y, int width, int height)
@@ -83,16 +84,32 @@ unlockCurrentClients(LockedClientSet *set)
     memset(set, 0, sizeof(*set));
 }
 
+void
+macVNCCompositorSetScreen(rfbScreenInfoPtr screen)
+{
+    /* Blocks until any in-flight composite finishes, so returning here
+       guarantees no callback will touch this screen again. */
+    pthread_mutex_lock(&compositorMutex);
+    compositorScreen = screen;
+    pthread_mutex_unlock(&compositorMutex);
+}
+
 rfbBool
-macVNCCompositorSubmitFrame(rfbScreenInfoPtr screen,
-                            const MacVNCDisplayGeometry *geometry,
+macVNCCompositorSubmitFrame(const MacVNCDisplayGeometry *geometry,
                             const uint8_t *pixels,
                             size_t stride)
 {
-    if (!screen || !screen->frameBuffer || !geometry || !pixels)
-        return TRUE; /* server torn down mid-flight; nothing to retry into */
+    if (!geometry || !pixels)
+        return TRUE; /* nothing to composite; not a retryable condition */
 
     pthread_mutex_lock(&compositorMutex);
+    /* Read INSIDE the lock: the pointer was loaded before a teardown detached
+       it once, and then pointed at freed memory. */
+    rfbScreenInfoPtr screen = compositorScreen;
+    if (!screen || !screen->frameBuffer) {
+        pthread_mutex_unlock(&compositorMutex);
+        return TRUE; /* server torn down mid-flight; nothing to retry into */
+    }
     LockedClientSet lockedClients;
     if (!lockCurrentClients(screen, &lockedClients)) {
         pthread_mutex_unlock(&compositorMutex);

@@ -65,6 +65,7 @@ int main(void)
            the permission is what makes macOS raise its own dialog. */
         macVNCResetCaptureStateForTesting();
         assert(macVNCCaptureStartCountForTesting() == 0);
+        assert(macVNCCaptureStopCountForTesting() == 0);
 
         macVNCCaptureAllowed = countingGate;
         gAnswer = false;
@@ -84,8 +85,26 @@ int main(void)
         macVNCReconcileCaptureForTesting();
         assert(macVNCCaptureStartCountForTesting() == 1);
 
+        /* The OTHER half of "captures run iff clients > 0": the last client
+           leaving must STOP them. Without this witness, deleting the stop
+           branch wholesale leaves every target green while captures (and the
+           macOS capture indicator) run forever with nobody watching. */
         atomic_store(&vncConnectedClients, 0);
         macVNCReconcileCaptureForTesting();
+        assert(macVNCCaptureStopCountForTesting() == 1);
+
+        /* Idempotent in both directions: a reconcile with nobody connected
+           must not stop again, one with a client must not start again. */
+        macVNCReconcileCaptureForTesting();
+        assert(macVNCCaptureStopCountForTesting() == 1);
+
+        atomic_store(&vncConnectedClients, 1);
+        macVNCReconcileCaptureForTesting();
+        assert(macVNCCaptureStartCountForTesting() == 2);
+
+        atomic_store(&vncConnectedClients, 0);
+        macVNCReconcileCaptureForTesting();
+        assert(macVNCCaptureStopCountForTesting() == 2);
         macVNCCaptureAllowed = NULL;
 
         printf("test_capture_gate: all assertions passed\n");

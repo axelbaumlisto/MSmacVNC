@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.63 LANGUAGES C)
+project(macVNC VERSION 0.3.64 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -318,6 +318,7 @@ if(BUILD_TESTING)
         src/PointerState.c
         src/KeyboardModifierState.c
         src/MacVNCPowerMgmt.m
+        src/MacVNCDisplayWake.m
         src/FirstFrameBudget.c
     )
     target_include_directories(test_input_context PRIVATE src)
@@ -382,6 +383,10 @@ if(BUILD_TESTING)
     add_executable(test_capture_gate tests/test_capture_gate.m)
     target_link_libraries(test_capture_gate macvnc_core_testable)
     add_test(NAME capture_gate COMMAND test_capture_gate)
+
+    add_executable(test_server_generation tests/test_server_generation.c)
+    target_link_libraries(test_server_generation macvnc_core_testable)
+    add_test(NAME server_generation COMMAND test_server_generation)
 
 
     add_test(NAME client_allowlist

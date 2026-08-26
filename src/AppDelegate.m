@@ -36,6 +36,9 @@ static BOOL macVNCAllowsTestPermissionGateBypass(void)
 @property (nonatomic, retain) MacVNCPermissionsPanelController *permissionsPanel;
 @property (nonatomic, assign) BOOL           relaunchScheduled;
 
+/* Serial queue owning every server start/stop (see applicationDidFinishLaunching). */
+@property (nonatomic, strong) dispatch_queue_t lifecycleQueue;
+
 @end
 
 
@@ -72,6 +75,16 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification
 {
     gSharedAppDelegate = self;
+    /* ALL server start/stop work runs on this ONE serial queue. It used to be
+       three dispatches onto the CONCURRENT global queue, where a user's Start
+       could win serverLifecycleMutex ahead of an in-flight stop, hear "already
+       running", and then watch that stop tear the server down: the explicit
+       request silently swallowed, the UI none the wiser. Serialised here, a
+       Start pressed during a stop is simply queued behind it. */
+    dispatch_queue_t q = dispatch_queue_create("net.christianbeier.macVNC.lifecycle",
+                                                DISPATCH_QUEUE_SERIAL);
+    self.lifecycleQueue = q;
+    [q release]; /* the property holds its own retain */
     macVNCScreenCaptureFailureHandler = macVNCScreenCaptureFailed;
     macVNCCaptureAllowed = macVNCCaptureAllowed_;
     macVNCPermissionUIServerRunningProvider = macVNCServerIsRunning_;
@@ -104,8 +117,19 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
     [self.updateTimer invalidate];
     self.updateTimer = nil;
 
-
-    vncServerStop();
+    /* Stop OFF the main thread, then wait bounded: vncServerStop() joins client
+       threads and waits for capture work that may sit behind a prompt (up to 5 s
+       per display). Blocking the main thread here re-introduced exactly the
+       freeze vncServerCloseListeners() was written to avoid on the Restart path.
+       The process is about to exit anyway; the kernel reclaims anything we time
+       out on. */
+    dispatch_group_t group = dispatch_group_create();
+    dispatch_group_enter(group);
+    dispatch_async(self.lifecycleQueue, ^{
+        vncServerStop();
+        dispatch_group_leave(group);
+    });
+    dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, 8LL * NSEC_PER_SEC));
 }
 
 - (void)dealloc
@@ -117,6 +141,7 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
     [_loginItemMenuItem release];
     [_permissionsPanel release];
     [_screenPermissionMenuItem release];
+    [_lifecycleQueue release];
     [_accessibilityPermissionMenuItem release];
     [_updateTimer release];
     if (gSharedAppDelegate == self)
@@ -258,7 +283,7 @@ static NSMenuItem *addRow(NSMenu *menu, NSString *title, SEL action,
     if (!self.relaunchScheduled) {
         /* No successor, and the listeners are already gone: stop the server so
            its state matches reality instead of advertising a dead port. */
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        dispatch_async(self.lifecycleQueue, ^{
             vncServerStop();
         });
     }
@@ -380,7 +405,7 @@ static NSMenuItem *addRow(NSMenu *menu, NSString *title, SEL action,
        for in-flight ScreenCaptureKit work, which can be pending behind a system
        permission prompt. Blocking the main thread here would freeze the menu bar
        — including the very buttons the user needs to recover. */
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    dispatch_async(self.lifecycleQueue, ^{
         vncServerStop();
         dispatch_async(dispatch_get_main_queue(), ^{
             [self presentCaptureFailure:info];
@@ -428,7 +453,7 @@ static NSMenuItem *addRow(NSMenu *menu, NSString *title, SEL action,
 
 - (void)startServer
 {
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    dispatch_async(self.lifecycleQueue, ^{
 
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
         MacVNCStartupConfig *startup = [MacVNCStartupConfig
