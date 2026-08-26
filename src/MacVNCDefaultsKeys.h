@@ -30,4 +30,14 @@ extern const int MacVNCDefaultPort;
  */
 void macVNCRegisterDefaults(void);
 
+/*
+ * Every key the app reads, as a set.
+ *
+ * Exposed so a completeness check does not have to restate the list: a
+ * hand-kept copy in the test had already drifted, omitting the one key that
+ * actually lacked a registered default - so the check could not see the very
+ * bug it existed to catch.
+ */
+NSArray<NSString *> *macVNCAllDefaultsKeys(void);
+
 NS_ASSUME_NONNULL_END

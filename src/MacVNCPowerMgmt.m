@@ -7,7 +7,7 @@
 #include <stdatomic.h>
 #include <mach/mach_init.h>
 #include <mach/mach_port.h>
-#include "ReadinessPolicy.h" /* macVNCReadinessNow() — shared monotonic clock */
+#include "FirstFrameBudget.h" /* macVNCMonotonicNow() — shared monotonic clock */
 
 static rfbBool preventDimming = FALSE;
 static rfbBool preventSleep   = TRUE;
@@ -121,7 +121,7 @@ undim(void)
        nudged within the last second. */
     static const uint64_t kUndimMinIntervalNs = 1000000000ULL; /* 1s */
     static _Atomic uint64_t lastUndimNs = 0;
-    uint64_t now = macVNCReadinessNow();
+    uint64_t now = macVNCMonotonicNow();
     uint64_t last = atomic_load_explicit(&lastUndimNs, memory_order_relaxed);
     if (last != 0 && now - last < kUndimMinIntervalNs)
         return 0;
