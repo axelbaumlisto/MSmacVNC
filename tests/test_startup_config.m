@@ -55,6 +55,28 @@ int main(void)
     assert(sc2.displayNumber == -1);
     assert(c2.usedEnvironmentOverride == YES);
 
+    /* 2b. Out-of-range port from defaults is a configuration error, NOT a
+           silent 5900 fallback: an operator who set a port must never get a
+           different listener than they asked for. */
+    NSUserDefaults *d1b = makeDefaults(@"macvnc.test.startup2", @{
+        MacVNCKeyPort:          @70000,
+        MacVNCKeyPassword:      @"secret12",
+        MacVNCKeyListenMode:    @"localhost",
+        MacVNCKeyListenAddress: @"",
+        MacVNCKeyAllowedClients:@"127.0.0.1",
+        MacVNCKeyViewOnly:      @NO,
+        MacVNCKeyDisplay:       @(-2),
+    });
+    MacVNCStartupConfig *c2b = [MacVNCStartupConfig configWithDefaults:d1b environment:@{}];
+    assert(c2b.error != nil);
+
+    /* 2c. A malformed MACVNC_PORT is an error too (it used to parse as 0 and
+           silently mean "no override"). */
+    MacVNCStartupConfig *c2c = [MacVNCStartupConfig configWithDefaults:d1 environment:@{
+        @"MACVNC_PORT": @"abc",
+    }];
+    assert(c2c.error != nil);
+
     /* 3. Invalid capture FPS => error, cannot fill. */
     MacVNCStartupConfig *c3 = [MacVNCStartupConfig configWithDefaults:d1 environment:@{
         @"MACVNC_CAPTURE_FPS": @"999",

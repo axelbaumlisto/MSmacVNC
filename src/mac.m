@@ -21,6 +21,8 @@
 #include <stdlib.h>
 #include <stdatomic.h>
 #include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <sys/socket.h>
 #include <time.h>
 
 #import "RFBKeySym.h"
@@ -341,6 +343,29 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
       struct in_addr parsedAddress;
       if (inet_pton(AF_INET, listenAddress, &parsedAddress) != 1) {
           rfbErr("Invalid listen address: %s\n", listenAddress);
+          return FALSE;
+      }
+      /* Pre-flight: a syntactically valid address that no longer belongs to
+         any interface (Wi-Fi off, VPN down, DHCP change) would only surface
+         as a generic bind failure AFTER rfbInitServer, phrased like a port
+         collision. Tell the user what actually happened, before we bind. */
+      bool addressIsLocal = false;
+      struct ifaddrs *interfaces = NULL;
+      if (getifaddrs(&interfaces) == 0) {
+          for (struct ifaddrs *ifa = interfaces; ifa; ifa = ifa->ifa_next) {
+              if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_INET &&
+                  ((struct sockaddr_in *)ifa->ifa_addr)->sin_addr.s_addr ==
+                      parsedAddress.s_addr) {
+                  addressIsLocal = true;
+                  break;
+              }
+          }
+          freeifaddrs(interfaces);
+      }
+      if (!addressIsLocal) {
+          rfbErr("Listen address %s is not assigned to any active interface; "
+                 "the selected network may be gone (Wi-Fi off, VPN down). "
+                 "Re-select the interface in Preferences.\n", listenAddress);
           return FALSE;
       }
       rfbScreen->listenInterface = parsedAddress.s_addr;

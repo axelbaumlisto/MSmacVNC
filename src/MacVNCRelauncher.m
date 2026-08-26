@@ -5,6 +5,7 @@
 #import <signal.h>
 #import <fcntl.h>
 #import <unistd.h>
+#import <sys/wait.h>
 
 extern char **environ;
 
@@ -62,6 +63,25 @@ extern char **environ;
     if (rc != 0) {
         NSLog(@"macVNC relaunch failed: %s", strerror(rc));
         return NO;
+    }
+
+    /* posix_spawn returning 0 only means "exec succeeded". The successor can
+       still die at startup (broken entitlement, dyld error) - and we have
+       ALREADY closed the listeners, so a dead child means an unmonitored
+       outage: the server is simply down. Watch it for a moment; a child that
+       survives ~1.5s has passed dyld, codesign and TCC load. Bounded so this
+       never hangs the relaunch path. */
+    for (int i = 0; i < 30; ++i) {
+        int status = 0;
+        pid_t r = waitpid(child, &status, WNOHANG);
+        if (r == child) {
+            NSLog(@"macVNC relaunch failed: successor exited at startup "
+                  "(status %d)", status);
+            return NO;
+        }
+        if (r < 0)
+            break; /* not our child anymore; assume fine */
+        usleep(50000);
     }
     return YES;
 }
