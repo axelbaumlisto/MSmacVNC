@@ -87,9 +87,11 @@ Objective-C glue:
 - **AppDelegate** — status-bar UI, timers, server start/stop, permission flow;
   installs the capture-permission policy into the core.
 - **MacVNCCompositor** — composites raw BGRA pixels into the shared canvas
-  (`macVNCCompositorSubmitFrame(screen, geometry, pixels, stride)`). Taking
-  pixels rather than a `CMSampleBuffer` is what makes the hot path unit-testable
-  without a live capture stream — see `tests/test_compositor_submit.m`.
+  (`macVNCCompositorSubmitFrame(geometry, pixels, stride)`); OWNS the screen
+  pointer (`macVNCCompositorSetScreen`) — detach takes the compositor lock, so
+  returning from it means no in-flight composite can reach the screen.
+  Taking pixels rather than a `CMSampleBuffer` is what makes the hot path
+  unit-testable without a live capture stream — see `tests/test_compositor_submit.m`.
   Takes every client's `sendMutex` with `trylock` only: LibVNCServer holds it
   for the whole encode-and-write, so waiting would let one stalled viewer
   freeze the screen for all clients. A refused frame must be re-submitted, not
@@ -113,7 +115,10 @@ Objective-C glue:
   Accessibility checks and the gate panel.
 - **MacVNCInput** — keyboard/pointer injection; owns the CGEventSource, keymaps
   and input mutexes; geometry is injected via `macVNCInputSetContext`.
-- **MacVNCPowerMgmt** — legacy IOPM dim/sleep control (`undim` is throttled).
+- **MacVNCPowerMgmt** — two session-scoped IOPMAssertions (system sleep +
+  display sleep), created by the capture reconciler when the first client
+  connects and released when the last leaves; `undim` is a throttled activity
+  nudge. Never touches global Energy Saver values.
 - **MacVNCDisplayWake** — one-shot display wake (no persistent assertion).
 - **MacVNCPassword** — password load/store (plaintext in defaults, by request)
   and the hardened `MACVNC_PASSWORD_FILE` reader.
@@ -134,13 +139,16 @@ Objective-C glue:
 
 ## Tests
 
-`ctest` runs 25 targets (`ctest -E client_allowlist`; that one is unreliable on
-some hosts because `lsof` can hang). Every assertion added here is checked by
-mutating the source and confirming the test goes red — a green test proves
-nothing until it has been seen to fail. Test targets get `-UNDEBUG`
-automatically, and the build **fails** if one would run with asserts disabled:
-a hand-maintained list once shipped a test that printed "all assertions passed"
-while checking nothing.
+`ctest` runs 29 targets (the number is enforced: `architecture_doc` compares
+this sentence against CMakeLists.txt's `add_test` count, so a target added or
+commented out fails the suite until this line is updated deliberately). Every
+assertion added here is checked by mutating the source and confirming the test
+goes red — a green test proves nothing until it has been seen to fail. Test
+targets and `macvnc_core_testable` get `-UNDEBUG` automatically, and
+`tests/assert_guard.c` (compiled into each of them) makes the build **fail**
+if NDEBUG survives anywhere: a hand-maintained list once shipped a test that
+printed "all assertions passed" while checking nothing, and the old property
+check verified a flag it had set itself two lines earlier.
 
 `tests/*.py` are end-to-end scripts driven by hand (they need a live server, a
 real client and a granted permission). They are **not** part of `ctest` and
@@ -163,8 +171,12 @@ must not be counted as automated coverage.
   dropping the client lock, because stopping waits (bounded) for in-flight
   ScreenCaptureKit work and holding the client lock across that would stall a
   reconnect.
-- **Lock order:** `compositorMutex` → per-client `sendMutex`
-  (`lockCurrentClients` retains each client so it can't be freed mid-composite).
+- **Lock order:** `serverLifecycleMutex` → `compositorMutex` → per-client
+  `sendMutex`. The first edge exists because `vncServerStopLocked` calls
+  `macVNCCompositorSetScreen(NULL)` while holding the lifecycle mutex, and the
+  detach blocks on the compositor lock — anyone adding a lifecycle acquisition
+  INSIDE the composite path would deadlock the server.
+  `lockCurrentClients` retains each client so it can't be freed mid-composite;
   `clientLifecycleMutex` is never taken while holding the compositor lock.
   The compositor takes every `sendMutex` with `trylock`, and that stands on its
   own argument: LibVNCServer holds a client's `sendMutex` for the whole

@@ -7,40 +7,47 @@
 #include "FirstFrameBudget.h" /* macVNCMonotonicNow() — shared monotonic clock */
 
 /*
- * Keep the Mac awake while a remote session is active.
+ * Keep the machine awake for the duration of a remote SESSION.
  *
  * This used to save kPMMinutesToDim/kPMMinutesToSleep and write zeros over
  * them - GLOBAL Energy Saver settings with no per-process owner. Three ways to
- * lose the saved values, each leaving the machine on "never sleep" forever:
- * a crash, a force-quit, and the app's own Restart (the relauncher spawns the
- * successor before the predecessor finishes its up-to-5s-per-display capture
- * teardown, so the successor's dimmingInit snapshotted the zero its
- * predecessor had written).
+ * lose the saved values, each leaving the machine on "never sleep" forever: a
+ * crash, a force-quit, and the app's own Restart (the relauncher spawns the
+ * successor before the predecessor finishes its capture teardown, so the
+ * successor snapshotted the zero its predecessor had written).
  *
- * An IOPMAssertion fixes all three at once: it is reference-counted inside one
- * process and the kernel drops it when the process dies, whatever the cause.
- * The same API family as MacVNCDisplayWake's user-activity nudge; that module
- * deliberately does NOT hold a persistent assertion, this one does - they do
- * different jobs.
+ * IOPMAssertions fix all three: reference-counted inside one process, dropped
+ * by the kernel when the process dies. Called from reconcileCaptureState() -
+ * created when the first client connects, released when the last leaves - so
+ * an idle listener with "Start at Login" does not pin the Mac awake either.
+ * vncServerStopLocked() releases as an idempotent backstop.
+ *
+ * Two assertions, not one: NoIdleSleep keeps the SYSTEM from sleeping;
+ * PreventUserIdleDisplaySleep keeps the DISPLAY lit. The old code zeroed
+ * kPMMinutesToDim for exactly the second effect, and a passive viewer (no
+ * input, so no undim() nudge) would otherwise watch the screen go dark.
  */
 
 static pthread_mutex_t power_mutex = PTHREAD_MUTEX_INITIALIZER;
 static IOPMAssertionID sleepAssertion = kIOPMNullAssertionID;
+static IOPMAssertionID displayAssertion = kIOPMNullAssertionID;
 static rfbBool initialized = FALSE;
 
-/* Kept for API compatibility; both flags now only decide whether an assertion
-   is created at all. There is no dim-prevention assertion on macOS, so
-   preventDimming is honoured by undim()'s activity nudge alone. */
-static rfbBool preventDimming = FALSE;
+/* preventSleep creates the no-idle-sleep assertion; preventDimming the
+   display one. Both read under power_mutex (the setter writes them there too:
+   an unlocked setter racing the reader used to be benign only by luck). */
+static rfbBool preventDimming = TRUE;
 static rfbBool preventSleep = TRUE;
 
 void macVNCSetPowerPolicy(rfbBool dim, rfbBool sleep)
 {
+    pthread_mutex_lock(&power_mutex);
     preventDimming = dim;
     preventSleep = sleep;
+    pthread_mutex_unlock(&power_mutex);
 }
 
-/* Idempotent: safe to call twice (a restart overlapping a slow predecessor). */
+/* Idempotent: safe to call twice (a reconnecting client, a restart). */
 int
 dimmingInit(void)
 {
@@ -50,42 +57,71 @@ dimmingInit(void)
         return 0;
     }
 
-    if (!preventSleep) {
-        initialized = TRUE;
-        pthread_mutex_unlock(&power_mutex);
-        return 0;
+    IOReturn rc;
+    if (preventSleep) {
+        rc = IOPMAssertionCreateWithName(kIOPMAssertPreventUserIdleSystemSleep,
+                                         kIOPMAssertionLevelOn,
+                                         CFSTR("macVNC remote session"),
+                                         &sleepAssertion);
+        if (rc != kIOReturnSuccess)
+            sleepAssertion = kIOPMNullAssertionID;
+    }
+    if (preventDimming) {
+        rc = IOPMAssertionCreateWithName(kIOPMAssertPreventUserIdleDisplaySleep,
+                                         kIOPMAssertionLevelOn,
+                                         CFSTR("macVNC remote session"),
+                                         &displayAssertion);
+        if (rc != kIOReturnSuccess)
+            displayAssertion = kIOPMNullAssertionID;
     }
 
-    IOPMAssertionID id = kIOPMNullAssertionID;
-    IOReturn rc = IOPMAssertionCreateWithName(kIOPMAssertionTypeNoIdleSleep,
-                                              kIOPMAssertionLevelOn,
-                                              CFSTR("macVNC remote session"),
-                                              &id);
-    if (rc != kIOReturnSuccess) {
-        pthread_mutex_unlock(&power_mutex);
-        return -1;
-    }
+    /* Failure to create an assertion is not fatal - the session still works;
+       the machine may just sleep sooner than configured. Report it so the
+       caller can log, but only when we created nothing we were asked to. */
+    int result = 0;
+    if ((preventSleep && sleepAssertion == kIOPMNullAssertionID) ||
+        (preventDimming && displayAssertion == kIOPMNullAssertionID))
+        result = -1;
 
-    sleepAssertion = id;
     initialized = TRUE;
     pthread_mutex_unlock(&power_mutex);
-    return 0;
+    return result;
 }
+
+#if defined(MACVNC_ENABLE_TEST_HOOKS)
+static _Atomic unsigned gUndimNudgeCount = 0;
+unsigned macVNCUndimNudgeCountForTesting(void) { return atomic_load(&gUndimNudgeCount); }
+void macVNCResetUndimCountForTesting(void) { atomic_store(&gUndimNudgeCount, 0); }
+#define NOTE_UNDIM_NUDGE() atomic_fetch_add(&gUndimNudgeCount, 1)
+#else
+#define NOTE_UNDIM_NUDGE() do {} while (0)
+#endif
 
 int
 undim(void)
 {
     /* Throttle: runs on every keystroke/mouse-move. The activity nudge lights
-       the display and resets the idle timer, which also covers dimming; there
-       is no separate dim aggressiveness to poke any more. */
+       the display and resets the idle timer; with a display assertion held it
+       is mostly redundant, but it also covers the window before a client
+       authenticated and captures started. */
     static const uint64_t kUndimMinIntervalNs = 1000000000ULL; /* 1s */
     static _Atomic uint64_t lastUndimNs = 0;
     uint64_t now = macVNCMonotonicNow();
     uint64_t last = atomic_load_explicit(&lastUndimNs, memory_order_relaxed);
     if (last != 0 && now - last < kUndimMinIntervalNs)
         return 0;
-    atomic_store_explicit(&lastUndimNs, now, memory_order_relaxed);
 
+    pthread_mutex_lock(&power_mutex);
+    if (!initialized) {
+        /* Consume nothing: an uninitialised call must not block the next one
+           (the shipped RELEASE_NOTES once promised exactly this). */
+        pthread_mutex_unlock(&power_mutex);
+        return -1;
+    }
+    pthread_mutex_unlock(&power_mutex);
+
+    atomic_store_explicit(&lastUndimNs, now, memory_order_relaxed);
+    NOTE_UNDIM_NUDGE();
     macVNCWakeDisplays();
     return 0;
 }
@@ -94,10 +130,15 @@ int
 dimmingShutdown(void)
 {
     pthread_mutex_lock(&power_mutex);
-    if (initialized && sleepAssertion != kIOPMNullAssertionID)
+    if (sleepAssertion != kIOPMNullAssertionID)
         IOPMAssertionRelease(sleepAssertion);
+    if (displayAssertion != kIOPMNullAssertionID)
+        IOPMAssertionRelease(displayAssertion);
     sleepAssertion = kIOPMNullAssertionID;
+    displayAssertion = kIOPMNullAssertionID;
     initialized = FALSE;
     pthread_mutex_unlock(&power_mutex);
     return 0;
 }
+
+

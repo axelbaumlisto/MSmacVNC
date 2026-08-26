@@ -40,3 +40,16 @@ NSString *macVNCStartAdviceBody(MacVNCStartAdvice advice)
                 "port in Preferences and start the server again.";
     return nil;
 }
+
+bool
+macVNCShouldActOnCaptureFailure(uint64_t reported, uint64_t current,
+                                uint64_t *lastHandled)
+{
+    if (reported != current)
+        return false;
+    if (lastHandled != NULL && reported == *lastHandled)
+        return false;
+    if (lastHandled != NULL)
+        *lastHandled = reported;
+    return true;
+}
