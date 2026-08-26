@@ -1,5 +1,5 @@
 #import "ScreenCapturer.h"
-#import "ReadinessPolicy.h"
+#import "FirstFrameBudget.h"
 #import "FrameMailbox.h"
 #include <pthread.h>
 #include <unistd.h>
@@ -402,16 +402,16 @@ static void endMailboxActivity(void *context)
             ? UINT64_MAX
             : (uint64_t)scaled;
     }
-    MacVNCReadinessBudget budget = macVNCReadinessBudgetStart(
-        macVNCReadinessNow(), durationNanoseconds);
+    MacVNCFirstFrameBudget budget = macVNCFirstFrameBudgetStart(
+        macVNCMonotonicNow(), durationNanoseconds);
 
     pthread_mutex_lock(&_readinessMutex);
     while (_readinessGeneration == generation && !_firstFrameReady) {
-        uint64_t remaining = macVNCReadinessBudgetRemaining(
-            &budget, macVNCReadinessNow());
+        uint64_t remaining = macVNCFirstFrameBudgetRemaining(
+            &budget, macVNCMonotonicNow());
         if (remaining == 0)
             break;
-        struct timespec relativeWait = macVNCReadinessRelativeWait(remaining);
+        struct timespec relativeWait = macVNCRelativeWaitFromNanoseconds(remaining);
         int result = pthread_cond_timedwait_relative_np(
             &_readinessCondition, &_readinessMutex, &relativeWait);
         if (result != 0 && result != ETIMEDOUT)

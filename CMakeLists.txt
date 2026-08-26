@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.62 LANGUAGES C)
+project(macVNC VERSION 0.3.63 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -56,8 +56,8 @@ set(SOURCE_FILES
     src/CaptureRate.c
     src/FrameMailbox.h
     src/FrameMailbox.c
-    src/ReadinessPolicy.h
-    src/ReadinessPolicy.c
+    src/FirstFrameBudget.h
+    src/FirstFrameBudget.c
     src/NetworkAccess.h
     src/NetworkAccess.c
     src/NetworkCIDR.h
@@ -202,9 +202,9 @@ if(BUILD_TESTING)
     target_link_libraries(test_frame_mailbox Threads::Threads)
     add_test(NAME frame_mailbox COMMAND test_frame_mailbox)
 
-    add_executable(test_readiness_policy tests/test_readiness_policy.c src/ReadinessPolicy.c)
-    target_include_directories(test_readiness_policy PRIVATE src)
-    add_test(NAME readiness_policy COMMAND test_readiness_policy)
+    add_executable(test_first_frame_budget tests/test_first_frame_budget.c src/FirstFrameBudget.c)
+    target_include_directories(test_first_frame_budget PRIVATE src)
+    add_test(NAME first_frame_budget COMMAND test_first_frame_budget)
 
     add_executable(test_network_access tests/test_network_access.c src/NetworkAccess.c)
     target_include_directories(test_network_access PRIVATE src)
@@ -252,7 +252,7 @@ if(BUILD_TESTING)
 
     add_executable(test_capture_session tests/test_capture_session.m
         src/MacVNCCaptureSession.m src/ScreenCapturer.m src/FrameMailbox.c
-        src/ReadinessPolicy.c src/CaptureRate.c)
+        src/FirstFrameBudget.c src/CaptureRate.c)
     target_include_directories(test_capture_session PRIVATE src)
     target_link_libraries(test_capture_session
         ${SCREEN_CAPTURE_KIT} ${CORE_MEDIA} ${CORE_VIDEO}
@@ -267,8 +267,19 @@ if(BUILD_TESTING)
     add_executable(test_defaults tests/test_defaults.m
         src/MacVNCDefaultsKeys.m src/MacVNCListenMode.m)
     target_include_directories(test_defaults PRIVATE src)
+    # The test cross-checks macVNCAllDefaultsKeys() against the header's own
+    # declarations, so it needs the header's path at build time.
+    target_compile_definitions(test_defaults PRIVATE
+        MACVNC_DEFAULTS_KEYS_HEADER="${CMAKE_CURRENT_SOURCE_DIR}/src/MacVNCDefaultsKeys.h")
     target_link_libraries(test_defaults ${FOUNDATION})
     add_test(NAME defaults COMMAND test_defaults)
+
+    # The architecture guard is only worth having if it RUNS. It was a script
+    # nobody invoked, so a document could drift for as long as nobody thought to
+    # check it by hand.
+    add_test(NAME architecture_doc
+             COMMAND ${CMAKE_COMMAND} -E env bash
+                     ${CMAKE_CURRENT_SOURCE_DIR}/packaging/check_architecture.sh)
 
     add_executable(test_status_text tests/test_status_text.m src/MacVNCStatusText.m)
     target_include_directories(test_status_text PRIVATE src)
@@ -307,7 +318,7 @@ if(BUILD_TESTING)
         src/PointerState.c
         src/KeyboardModifierState.c
         src/MacVNCPowerMgmt.m
-        src/ReadinessPolicy.c
+        src/FirstFrameBudget.c
     )
     target_include_directories(test_input_context PRIVATE src)
     target_compile_definitions(test_input_context PRIVATE MACVNC_ENABLE_TEST_HOOKS=1)
@@ -337,7 +348,7 @@ if(BUILD_TESTING)
         src/KeyboardModifierState.c
         src/CaptureRate.c
         src/FrameMailbox.c
-        src/ReadinessPolicy.c
+        src/FirstFrameBudget.c
         src/NetworkAccess.c
         src/NetworkCIDR.c
         src/NetworkInventory.c
