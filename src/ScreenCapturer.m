@@ -134,6 +134,59 @@ static void endMailboxActivity(void *context)
     return self;
 }
 
+/*
+ * Everything from "display found" to "stream started", extracted from
+ * startCapture so each method states one thing: startCapture is the
+ * lifecycle decision (generation, group accounting, discovery), this is the
+ * ScreenCaptureKit plumbing (configuration, filter, output wiring, start).
+ *
+ * Runs on stateQueue; caller has already validated generation and taken one
+ * operationGroup reference, which this method leaves ONLY when the stream is
+ * started and the start-completion has its own reference pending - every
+ * early exit releases the caller's reference.
+ */
+- (void)beginStreamingWithDisplay:(SCDisplay *)display generation:(NSUInteger)generation
+{
+    SCStreamConfiguration *config = [[SCStreamConfiguration alloc] init];
+    config.width = (int)CGDisplayPixelsWide(self.displayID);
+    config.height = (int)CGDisplayPixelsHigh(self.displayID);
+    if (@available(macOS 13.0, *))
+        config.showsCursor = YES;
+    config.minimumFrameInterval = CMTimeMake(1, (int32_t)self.captureFramesPerSecond);
+    config.queueDepth = 2;
+    config.pixelFormat = kCVPixelFormatType_32BGRA;
+
+    SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
+    SCStream *stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:self];
+    [filter release];
+    [config release];
+
+    NSError *addOutputError = nil;
+    [stream addStreamOutput:self
+                       type:SCStreamOutputTypeScreen
+         sampleHandlerQueue:self.sampleHandlerQueue
+                      error:&addOutputError];
+    if (addOutputError) {
+        [stream release];
+        self.errorHandler(addOutputError);
+        dispatch_group_leave(self.operationGroup);
+        return;
+    }
+
+    self.stream = stream;
+    dispatch_group_enter(self.operationGroup);
+    [stream startCaptureWithCompletionHandler:^(NSError * _Nullable startError) {
+        dispatch_async(self.stateQueue, ^{
+            if (startError && self.captureRequested &&
+                self.generation == generation && self.stream == stream)
+                self.errorHandler(startError);
+            dispatch_group_leave(self.operationGroup);
+        });
+    }];
+    [stream release];
+    dispatch_group_leave(self.operationGroup);
+}
+
 - (void)startCapture {
     dispatch_async(self.stateQueue, ^{
         if (self.captureRequested)
@@ -172,45 +225,8 @@ static void endMailboxActivity(void *context)
                     dispatch_group_leave(self.operationGroup);
                     return;
                 }
-                SCDisplay *display = content.displays[displayIndex];
-
-                SCStreamConfiguration *config = [[SCStreamConfiguration alloc] init];
-                config.width = (int)CGDisplayPixelsWide(self.displayID);
-                config.height = (int)CGDisplayPixelsHigh(self.displayID);
-                if (@available(macOS 13.0, *))
-                    config.showsCursor = YES;
-                config.minimumFrameInterval = CMTimeMake(1, (int32_t)self.captureFramesPerSecond);
-                config.queueDepth = 2;
-                config.pixelFormat = kCVPixelFormatType_32BGRA;
-
-                SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
-                SCStream *stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:self];
-                [filter release];
-                [config release];
-                NSError *addOutputError = nil;
-                [stream addStreamOutput:self
-                                   type:SCStreamOutputTypeScreen
-                     sampleHandlerQueue:self.sampleHandlerQueue
-                                  error:&addOutputError];
-                if (addOutputError) {
-                    [stream release];
-                    self.errorHandler(addOutputError);
-                    dispatch_group_leave(self.operationGroup);
-                    return;
-                }
-
-                self.stream = stream;
-                dispatch_group_enter(self.operationGroup);
-                [stream startCaptureWithCompletionHandler:^(NSError * _Nullable startError) {
-                    dispatch_async(self.stateQueue, ^{
-                        if (startError && self.captureRequested &&
-                            self.generation == generation && self.stream == stream)
-                            self.errorHandler(startError);
-                        dispatch_group_leave(self.operationGroup);
-                    });
-                }];
-                [stream release];
-                dispatch_group_leave(self.operationGroup);
+                [self beginStreamingWithDisplay:content.displays[displayIndex]
+                                           generation:generation];
             });
         }];
     });
