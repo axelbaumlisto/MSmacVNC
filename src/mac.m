@@ -95,9 +95,12 @@ static pthread_mutex_t clientLifecycleMutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t captureControlMutex = PTHREAD_MUTEX_INITIALIZER;
 static bool gCapturesRunning = false;
 
+/* Per-client bookkeeping. Only one fact needs remembering: whether this client
+   has been counted towards vncConnectedClients, so a disconnect decrements
+   exactly once. A three-state readiness machine used to live here too; every
+   one of its transitions produced nothing but a log line. */
 typedef struct {
     rfbBool captureCounted;
-    MacVNCReadinessPolicy readiness;
 } MacVNCClientState;
 
 static rfbBool macVNCPasswordCheck(rfbClientPtr client,
@@ -446,41 +449,35 @@ static void reconcileCaptureState(void)
     pthread_mutex_unlock(&captureControlMutex);
 }
 
-static BOOL
+/*
+ * Runs once per client, right after its password is accepted.
+ *
+ * Waits (bounded) for the first frame of every display so the auth OK is not
+ * followed by a black screen. The wait is the point; nothing is remembered
+ * about its outcome, because nothing acted on it.
+ */
+static void
 prepareAuthenticatedClient(rfbClientPtr cl)
 {
-    MacVNCClientState *state = NULL;
-    pthread_mutex_lock(&clientLifecycleMutex);
-    state = cl->clientData;
-    if (!state) {
-        pthread_mutex_unlock(&clientLifecycleMutex);
-        return NO;
-    }
     bool counted = false;
-    if (!state->captureCounted) {
+
+    pthread_mutex_lock(&clientLifecycleMutex);
+    MacVNCClientState *state = cl->clientData;
+    if (state && !state->captureCounted) {
         state->captureCounted = TRUE;
         atomic_fetch_add(&vncConnectedClients, 1);
         counted = true;
     }
-    BOOL alreadyReady = macVNCReadinessIsReady(&state->readiness);
     pthread_mutex_unlock(&clientLifecycleMutex);
 
-    if (counted)
-        reconcileCaptureState();
+    if (!counted)
+        return;
 
-    BOOL allReady = alreadyReady;
-    if (!alreadyReady) {
-        allReady = macVNCCaptureSessionWaitForFirstFrames(
-            INITIAL_READINESS_TIMEOUT_NANOSECONDS) ? YES : NO;
-        BOOL logTimeout = NO;
-        pthread_mutex_lock(&clientLifecycleMutex);
-        if (cl->clientData == state)
-            logTimeout = macVNCReadinessRecordInitialResult(&state->readiness, allReady);
-        pthread_mutex_unlock(&clientLifecycleMutex);
-        if (logTimeout)
-            rfbLog("Initial display readiness timed out; waiting for late frames\n");
-    }
-    return allReady;
+    /* Outside the client lock: reconciling can stop captures, which waits. */
+    reconcileCaptureState();
+
+    if (!macVNCCaptureSessionWaitForFirstFrames(INITIAL_READINESS_TIMEOUT_NANOSECONDS))
+        rfbLog("Initial display readiness timed out; sending frames as they arrive\n");
 }
 
 static rfbBool
@@ -492,28 +489,6 @@ macVNCPasswordCheck(rfbClientPtr client,
         return FALSE;
     prepareAuthenticatedClient(client);
     return TRUE;
-}
-
-static void
-displayHook(rfbClientPtr cl)
-{
-    pthread_mutex_lock(&clientLifecycleMutex);
-    MacVNCClientState *state = cl->clientData;
-    BOOL timedOut = state && state->readiness.state == MACVNC_READINESS_TIMED_OUT;
-    pthread_mutex_unlock(&clientLifecycleMutex);
-    if (!timedOut)
-        return;
-
-    if (!macVNCCaptureSessionAllReady())
-        return;
-
-    BOOL logRecovery = NO;
-    pthread_mutex_lock(&clientLifecycleMutex);
-    if (cl->clientData == state)
-        logRecovery = macVNCReadinessPromoteIfReady(&state->readiness, true);
-    pthread_mutex_unlock(&clientLifecycleMutex);
-    if (logRecovery)
-        rfbLog("All display captures became ready after the initial timeout\n");
 }
 
 static void clientGone(rfbClientPtr cl)
@@ -647,7 +622,6 @@ vncServerStartWithResult(const MacVNCServerConfig *config)
         goto FAILURE;
 
     rfbScreen->newClientHook = newClient;
-    rfbScreen->displayHook = displayHook;
     rfbRunEventLoop(rfbScreen, -1, TRUE);
     atomic_store_explicit(&publishedServerPort, rfbScreen->port, memory_order_release);
     pthread_mutex_unlock(&serverLifecycleMutex);

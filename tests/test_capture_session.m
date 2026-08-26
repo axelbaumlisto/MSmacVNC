@@ -44,7 +44,6 @@ int main(void)
         /* No streams means nothing to wait for - vacuously ready, which is what
            lets a failed run tear down instead of blocking for the timeout. */
         assert(macVNCCaptureSessionWaitForFirstFrames(1000) == true);
-        assert(macVNCCaptureSessionAllReady() == true);
 
         /* A NON-empty session: without this every assertion above also holds
            for a Build that does nothing. Building touches no TCC and starts no

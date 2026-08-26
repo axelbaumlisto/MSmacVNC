@@ -4,15 +4,16 @@
 #include <stdint.h>
 #include <time.h>
 
-typedef enum {
-    MACVNC_READINESS_WAITING = 0,
-    MACVNC_READINESS_TIMED_OUT,
-    MACVNC_READINESS_READY,
-} MacVNCReadinessState;
-
-typedef struct {
-    MacVNCReadinessState state;
-} MacVNCReadinessPolicy;
+/*
+ * The shared deadline for "wait until every display has produced a frame".
+ *
+ * There used to be a three-state machine here as well (WAITING / TIMED_OUT /
+ * READY). Every transition it made produced a log line and nothing else: no
+ * caller ever branched on the state, and the one function that read it threw
+ * its answer away. Keeping it meant displayHook ran on every framebuffer update
+ * of every client, taking the client lock and dispatch_sync-ing onto each
+ * capturer's state queue, to print a sentence.
+ */
 
 typedef struct {
     uint64_t deadlineNanoseconds;
@@ -33,13 +34,3 @@ uint64_t macVNCReadinessBudgetRemaining(const MacVNCReadinessBudget *budget,
 
 /* Converts a remaining monotonic budget to Darwin's relative condition wait. */
 struct timespec macVNCReadinessRelativeWait(uint64_t remainingNanoseconds);
-
-/* Records the initial bounded wait result. Returns true exactly once when a
-   timeout warning should be emitted. */
-bool macVNCReadinessRecordInitialResult(MacVNCReadinessPolicy *policy, bool allReady);
-
-/* Promotes a timed-out client after late frames arrive. Returns true exactly
-   once when a recovery diagnostic should be emitted. */
-bool macVNCReadinessPromoteIfReady(MacVNCReadinessPolicy *policy, bool allReady);
-
-bool macVNCReadinessIsReady(const MacVNCReadinessPolicy *policy);

@@ -21,7 +21,7 @@
  *  - Build and Reset mutate the list. Both run under serverLifecycleMutex, at a
  *    point where no client thread exists yet or all have been joined by
  *    rfbShutdownServer(screen, TRUE).
- *  - Start, StopAndWait, WaitForFirstFrames, AllReady and Count only READ the
+ *  - Start, StopAndWait, WaitForFirstFrames and Count only READ the
  *    list (they message the streams, which are individually thread-safe).
  *    These do run on client threads.
  *
@@ -89,6 +89,3 @@ void macVNCCaptureSessionStopAndWait(void);
  * of monitors. True when all became ready inside the budget.
  */
 bool macVNCCaptureSessionWaitForFirstFrames(uint64_t timeoutNanoseconds);
-
-/* True when every stream has delivered a frame for the current generation. */
-bool macVNCCaptureSessionAllReady(void);

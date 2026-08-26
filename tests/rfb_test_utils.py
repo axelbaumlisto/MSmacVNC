@@ -108,7 +108,7 @@ class RFBClient:
         }
 
     def trigger_capture(self):
-        """Issue a tiny authenticated request to invoke displayHook."""
+        """Issue a tiny authenticated framebuffer request to exercise the send path."""
         self.request_update(False, 0, 0, 1, 1)
         self.receive_update()
 
