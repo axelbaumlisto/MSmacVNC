@@ -5,6 +5,16 @@
 #import <ApplicationServices/ApplicationServices.h>
 #import <CoreGraphics/CoreGraphics.h>
 
+/* The ONE production call site of CGPreflightScreenCaptureAccess(). Overridable
+   only from tests; see the header. */
+static bool macVNCDefaultScreenRecordingProbe(void)
+{
+    return CGPreflightScreenCaptureAccess();
+}
+
+MacVNCPermissionProbeFn macVNCPermissionScreenRecordingProbe =
+    macVNCDefaultScreenRecordingProbe;
+
 NSString *macVNCPermissionDisplayName(MacVNCPermissionKind kind)
 {
     switch (kind) {
@@ -32,9 +42,13 @@ MacVNCPermissionStatus macVNCCheckPermission(MacVNCPermissionKind kind)
                used to let the gate and the UI disagree: the panel could show
                "both permissions are active" while the gate refused to start,
                and Run macVNC did nothing forever. */
-            return CGPreflightScreenCaptureAccess()
-                ? MacVNCPermissionStatusGranted
-                : MacVNCPermissionStatusNotGranted;
+            {
+                bool granted = macVNCPermissionScreenRecordingProbe
+                                   ? macVNCPermissionScreenRecordingProbe()
+                                   : macVNCDefaultScreenRecordingProbe();
+                return granted ? MacVNCPermissionStatusGranted
+                               : MacVNCPermissionStatusNotGranted;
+            }
         case MacVNCPermissionKindAccessibility:
             return AXIsProcessTrusted()
                 ? MacVNCPermissionStatusGranted

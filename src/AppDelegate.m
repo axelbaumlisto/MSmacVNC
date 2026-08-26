@@ -39,6 +39,10 @@ static BOOL macVNCAllowsTestPermissionGateBypass(void)
 /* Serial queue owning every server start/stop (see applicationDidFinishLaunching). */
 @property (nonatomic, strong) dispatch_queue_t lifecycleQueue;
 
+/* The generation whose capture failure we already acted on (see
+   macVNCShouldActOnCaptureFailure). */
+@property (nonatomic, assign) uint64_t handledFailureGeneration;
+
 @end
 
 
@@ -398,7 +402,9 @@ static NSMenuItem *addRow(NSMenu *menu, NSString *title, SEL action,
        delivered the user may already have started a new run — which must not be
        killed by a stale report. */
     uint64_t reportedGeneration = [info[@"generation"] unsignedLongLongValue];
-    if (reportedGeneration != vncServerCurrentGeneration())
+    if (!macVNCShouldActOnCaptureFailure(reportedGeneration,
+                                         vncServerCurrentGeneration(),
+                                         &_handledFailureGeneration))
         return;
 
     /* Stop OFF the main thread: vncServerStop() joins client threads and waits

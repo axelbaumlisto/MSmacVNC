@@ -77,6 +77,61 @@ int main(void)
             abort();
         }
 
+        /* SET equality of NAMES, not just counts: counts stayed equal when a
+           key was renamed in the header and its old name left in the array -
+           the cross-check advertised as drift-proof passed while the renamed
+           key had no default. The array holds VALUES (@"rfbPort"), so the
+           comparison is textual: every declared symbol name must appear in
+           macVNCAllDefaultsKeys()'s own definition inside the .m, and the .m
+           must not reference any MacVNCKey* symbol the header does not declare. */
+        NSMutableSet *declared = [NSMutableSet set];
+        for (NSTextCheckingResult *m in matches)
+            [declared addObject:[header substringWithRange:[m rangeAtIndex:1]]];
+
+        NSString *impl = [NSString stringWithContentsOfFile:@MACVNC_DEFAULTS_KEYS_IMPL
+                                                  encoding:NSUTF8StringEncoding error:NULL];
+        if (impl.length == 0) {
+            fprintf(stderr, "FAIL cannot read the defaults-keys implementation\n");
+            abort();
+        }
+        NSRegularExpression *arrayDecl = [NSRegularExpression
+            regularExpressionWithPattern:@"macVNCAllDefaultsKeys\\(void\\)\\s*\\{\\s*return[^;]+;"
+                                 options:0 error:NULL];
+        NSTextCheckingResult *arrayMatch =
+            [arrayDecl firstMatchInString:impl options:0
+                                    range:NSMakeRange(0, impl.length)];
+        assert(arrayMatch != nil);
+        NSString *arrayBody = [impl substringWithRange:arrayMatch.range];
+
+        for (NSString *symbol in declared) {
+            if ([arrayBody rangeOfString:symbol].location == NSNotFound) {
+                fprintf(stderr, "FAIL %s is declared but missing from "
+                                "macVNCAllDefaultsKeys()\n", symbol.UTF8String);
+                abort();
+            }
+        }
+        NSRegularExpression *usedSyms = [NSRegularExpression
+            regularExpressionWithPattern:@"MacVNCKey\\w+" options:0 error:NULL];
+        NSArray *used = [usedSyms matchesInString:arrayBody options:0
+                                            range:NSMakeRange(0, arrayBody.length)];
+        for (NSTextCheckingResult *u in used) {
+            NSString *sym = [arrayBody substringWithRange:[u rangeAtIndex:0]];
+            if (![declared containsObject:sym]) {
+                fprintf(stderr, "FAIL %s used in the array but not declared\n",
+                        sym.UTF8String);
+                abort();
+            }
+        }
+
+        /* The one key whose absent default was the original bug: its value is
+           a contract (fresh install symmetric with a saved one), not just
+           "present". */
+        if (![[defaults stringForKey:MacVNCKeyAutoAllowedClients]
+                isEqualToString:MacVNCLoopbackIPv4]) {
+            fprintf(stderr, "FAIL autoAllowedClients default is not loopback\n");
+            abort();
+        }
+
         printf("test_defaults: all assertions passed\n");
     }
     return 0;

@@ -34,6 +34,20 @@ typedef enum {
 
 MacVNCStartAdvice macVNCResolveStartAdvice(MacVNCStartOutcome outcome);
 
+/*
+ * Should this capture-failure notification be ACTED on?
+ *
+ * Pure decision for handleScreenCaptureFailure:. Two ways to say no:
+ *  - reported != current: the run that raised it is no longer live;
+ *  - reported == *lastHandled: a notification of this same run was already
+ *    acted on. With one capturer per display, several failures arrive
+ *    back-to-back before the async stop has bumped the generation, and
+ *    without this latch each one stacks another modal alert.
+ */
+bool macVNCShouldActOnCaptureFailure(uint64_t reported,
+                                     uint64_t current,
+                                     uint64_t *lastHandled);
+
 /* Title and body for an advice that has a fixed message. Returns nil for
    advices whose text belongs to the caller (None, Configuration). */
 NSString *_Nullable macVNCStartAdviceTitle(MacVNCStartAdvice advice);

@@ -19,6 +19,13 @@ NSString *macVNCPermissionDisplayName(MacVNCPermissionKind kind);
 /* Non-prompting status read. See the note below on the single reader. */
 MacVNCPermissionStatus macVNCCheckPermission(MacVNCPermissionKind kind);
 
+/* TEST SEAM ONLY: replaces the Screen Recording probe for the duration of a
+ * test. Production code never touches it; the default wraps
+ * CGPreflightScreenCaptureAccess(), keeping exactly ONE call site. Reset to
+ * NULL when done (a stale probe would lie for the whole process). */
+typedef bool (*MacVNCPermissionProbeFn)(void);
+extern MacVNCPermissionProbeFn macVNCPermissionScreenRecordingProbe;
+
 /* Opens the relevant System Settings pane. Does NOT request the permission:
    only the user can grant it, via "+". */
 void macVNCOpenPermissionSettings(MacVNCPermissionKind kind);

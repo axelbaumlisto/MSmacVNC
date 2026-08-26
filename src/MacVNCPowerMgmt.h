@@ -16,15 +16,20 @@
  */
 
 /* Configure prevent-dim / prevent-sleep before dimmingInit().
-   preventSleep creates the no-idle-sleep assertion; preventDimming is covered
-   by undim()'s activity nudge (macOS has no dim aggressiveness assertion). */
+   preventSleep creates the PreventUserIdleSystemSleep assertion;
+   preventDimming creates PreventUserIdleDisplaySleep. */
 void macVNCSetPowerPolicy(rfbBool preventDimming, rfbBool preventSleep);
 
-/* Create the assertion. Idempotent; returns 0 if already active. */
+/* Create the assertions (idempotent). Returns -1 if a requested assertion
+   could not be created; the session still works, the machine may just sleep. */
 int dimmingInit(void);
 
-/* Nudge display activity (throttled); called on every input event. */
+/* Nudge display activity (throttled to 1/s; no-op before dimmingInit). */
 int undim(void);
 
-/* Release the assertion. Safe when nothing was created. */
+/* Release the assertions. Safe when nothing was created; idempotent. */
 int dimmingShutdown(void);
+
+/* Test hooks: how many activity nudges actually fired. */
+unsigned macVNCUndimNudgeCountForTesting(void);
+void macVNCResetUndimCountForTesting(void);

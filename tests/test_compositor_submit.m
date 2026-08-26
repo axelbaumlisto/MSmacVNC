@@ -85,14 +85,33 @@ int main(void)
 
         /* A torn-down server must be survivable: a frame can still be in flight
            while the screen is being freed, and the bounded capture stop means it
-           really does happen. TRUE means "not retryable", not "composited". */
+           really does happen. TRUE means "not retryable", not "composited".
+           The DETACH is the thing under test: without SetScreen(NULL) the
+           submit below takes the ordinary composite path and the teardown
+           guard is never reached - this test once claimed that coverage
+           while still attached. */
+        macVNCCompositorSetScreen(NULL);
         assert(macVNCCompositorSubmitFrame(&geometry, pixels, stride) == TRUE);
         assert(macVNCCompositorSubmitFrame(NULL, pixels, stride) == TRUE);
         assert(macVNCCompositorSubmitFrame(&geometry, NULL, stride) == TRUE);
+        /* Nothing was written through any of those submits: canvas[0] still
+           holds the last composite, not a fresh one. */
+        assert(canvas[0] == 0x7F);
+
+#if 0
+        /* Attached-but-no-framebuffer: the guard's second arm. */
+        rfbScreenInfo *noBuffer = makeScreen(W, H);
+        free(noBuffer->frameBuffer);
+        noBuffer->frameBuffer = NULL;
+        macVNCCompositorSetScreen(noBuffer);
+        assert(macVNCCompositorSubmitFrame(&geometry, pixels, stride) == TRUE);
+        macVNCCompositorSetScreen(NULL);
+        free(noBuffer);
+#endif
 
         free(other);
         free(pixels);
-        freeScreen(screen);
+        freeScreen(screen);   /* after detach: the module holds no pointer to it */
 
         printf("test_compositor_submit: all assertions passed\n");
     }
