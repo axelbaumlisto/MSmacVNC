@@ -22,9 +22,31 @@ static MacVNCStartOutcome alreadyRunning(BOOL granted)
     return o;
 }
 
+static void testCaptureFailureLatch(void)
+{
+    uint64_t last = 0;
+    /* Fresh generation: act, and remember it. */
+    assert(macVNCShouldActOnCaptureFailure(7, 7, &last) == true);
+    assert(last == 7);
+    /* Same generation again (multi-display failure storm, stop still queued):
+       must NOT act a second time - each act stacks a modal alert. */
+    assert(macVNCShouldActOnCaptureFailure(7, 7, &last) == false);
+    assert(last == 7);
+    /* A genuinely new run: act again. */
+    assert(macVNCShouldActOnCaptureFailure(8, 8, &last) == true);
+    assert(last == 8);
+    /* Stale notification from a dead run: never act. */
+    assert(macVNCShouldActOnCaptureFailure(3, 8, &last) == false);
+    assert(last == 8);
+    /* NULL latch: only the staleness rule applies. */
+    assert(macVNCShouldActOnCaptureFailure(8, 8, NULL) == true);
+    assert(macVNCShouldActOnCaptureFailure(7, 8, NULL) == false);
+}
+
 int main(void)
 {
     @autoreleasepool {
+        testCaptureFailureLatch();
         /* Success says nothing. */
         assert(macVNCResolveStartAdvice(outcome(YES, NO,  YES)) == MacVNCStartAdviceNone);
         assert(macVNCResolveStartAdvice(outcome(YES, YES, NO))  == MacVNCStartAdviceNone);

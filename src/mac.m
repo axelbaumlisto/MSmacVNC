@@ -260,14 +260,23 @@ compositeCapturedFrame(const MacVNCDisplayGeometry *geometry,
 {
     if (!pixels || !geometry)
         return true; /* nothing to composite; not a retryable condition */
-    if (width != geometry->input.pixelWidth ||
-        height != geometry->input.pixelHeight) {
+
+    /* Copy BY VALUE before checking and using: `geometry` points into
+       displayLayout, a static the NEXT start memsets and rewrites. The
+       stuck-capturer path deliberately leaves a callback of the old run
+       running across that boundary, so without the snapshot the check can
+       pass against the old dimensions and the composite loop read the new
+       ones - an out-of-bounds source read. */
+    MacVNCDisplayGeometry snapshot = *geometry;
+
+    if (width != snapshot.input.pixelWidth ||
+        height != snapshot.input.pixelHeight) {
         rfbErr("Unexpected display %u frame size %dx%d (expected %dx%d)\n",
-               geometry->input.displayID, width, height,
-               geometry->input.pixelWidth, geometry->input.pixelHeight);
+               snapshot.input.displayID, width, height,
+               snapshot.input.pixelWidth, snapshot.input.pixelHeight);
         return true; /* wrong geometry: retrying cannot help */
     }
-    return macVNCCompositorSubmitFrame(geometry, pixels, stride)
+    return macVNCCompositorSubmitFrame(&snapshot, pixels, stride)
                ? true : false;
 }
 
@@ -429,6 +438,13 @@ static void reconcileCaptureState(void)
     bool wanted = atomic_load(&vncConnectedClients) > 0;
     if (wanted && !gCapturesRunning) {
         if (captureIsAllowed()) {
+            /* Awake-while-watched: the power assertions live as long as a
+               viewer is connected, not as long as the LISTENER runs. With
+               "Start at Login" the server may run for weeks; holding the
+               assertions that whole time would be the pmset bug again with a
+               nicer implementation. */
+            if (dimmingInit() != 0)
+                rfbLog("Power assertion failed; machine may idle-sleep during the session\n");
             macVNCCaptureSessionStart();
 #if defined(MACVNC_ENABLE_TEST_HOOKS)
             atomic_fetch_add(&gCaptureStartCount, 1);
@@ -449,6 +465,7 @@ static void reconcileCaptureState(void)
 #if defined(MACVNC_ENABLE_TEST_HOOKS)
         atomic_fetch_add(&gCaptureStopCount, 1);
 #endif
+        dimmingShutdown();
         macVNCCaptureSessionStopAndWait();
         macVNCInputResetModifiers();
         rfbLog("Last authenticated client disconnected; %lu display captures stopped and modifiers reset\n",
@@ -595,6 +612,9 @@ vncServerStopLocked(void)
         macVNCCompositorSetScreen(NULL);
         rfbScreenCleanup(dying);
     }
+    /* Backstop: normally released when the last client leaves, but a stop
+       with captures never started (permission denied at connect) or a crash
+       path must not leak the assertions either. Idempotent. */
     dimmingShutdown();
     macVNCReleaseDisplayAssertion();
     macVNCInputShutdown();
@@ -631,8 +651,6 @@ vncServerStartWithResult(const MacVNCServerConfig *config)
              config->listenAddress ? config->listenAddress : "");
     snprintf(macVNCAllowedClients, sizeof(macVNCAllowedClients), "%s",
              config->allowedClients ? config->allowedClients : "");
-
-    dimmingInit();
 
     if (!macVNCInputStart())
         goto FAILURE;

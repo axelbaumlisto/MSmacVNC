@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.64 LANGUAGES C)
+project(macVNC VERSION 0.3.65 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -270,7 +270,8 @@ if(BUILD_TESTING)
     # The test cross-checks macVNCAllDefaultsKeys() against the header's own
     # declarations, so it needs the header's path at build time.
     target_compile_definitions(test_defaults PRIVATE
-        MACVNC_DEFAULTS_KEYS_HEADER="${CMAKE_CURRENT_SOURCE_DIR}/src/MacVNCDefaultsKeys.h")
+        MACVNC_DEFAULTS_KEYS_HEADER="${CMAKE_CURRENT_SOURCE_DIR}/src/MacVNCDefaultsKeys.h"
+        MACVNC_DEFAULTS_KEYS_IMPL="${CMAKE_CURRENT_SOURCE_DIR}/src/MacVNCDefaultsKeys.m")
     target_link_libraries(test_defaults ${FOUNDATION})
     add_test(NAME defaults COMMAND test_defaults)
 
@@ -387,30 +388,50 @@ if(BUILD_TESTING)
     add_executable(test_server_generation tests/test_server_generation.c)
     target_link_libraries(test_server_generation macvnc_core_testable)
     add_test(NAME server_generation COMMAND test_server_generation)
+    # Skips visibly (77), never silently green (see the port-probe comment in the test).
+    set_tests_properties(server_generation PROPERTIES SKIP_RETURN_CODE 77)
 
-
-    add_test(NAME client_allowlist
-        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_client_allowlist.py
-                --app $<TARGET_FILE:${PROJECT_NAME}>
+    add_executable(test_power_mgmt
+        tests/test_power_mgmt.m
+        src/MacVNCPowerMgmt.m
+        src/MacVNCDisplayWake.m
+        src/FirstFrameBudget.c
     )
+    target_include_directories(test_power_mgmt PRIVATE src)
+    target_compile_definitions(test_power_mgmt PRIVATE MACVNC_ENABLE_TEST_HOOKS=1)
+    target_link_libraries(test_power_mgmt
+        LibVNCServer::vncserver
+        ${FOUNDATION}
+        "-framework IOKit"
+        "-framework CoreFoundation"
+    )
+    add_test(NAME power_mgmt COMMAND test_power_mgmt)
 
-    # Every C/ObjC test target must keep its asserts. Enumerated automatically:
-    # a hand-maintained list silently shipped a test whose asserts were compiled
-    # out by NDEBUG, so it printed "all assertions passed" while checking nothing.
+
+    # Manual end-to-end script, deliberately NOT a default ctest target
+    # (ARCHITECTURE.md: tests/*.py are driven by hand; lsof can hang). Opt-in
+    # only, so a bare `ctest` stays hermetic.
+    option(MACVNC_ENABLE_E2E "Register python end-to-end scripts in ctest" OFF)
+    if(MACVNC_ENABLE_E2E)
+        add_test(NAME client_allowlist
+            COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_client_allowlist.py
+                    --app $<TARGET_FILE:${PROJECT_NAME}>
+        )
+    endif()
+
+    # Every C/ObjC test target must keep its asserts, and so must the static
+    # core library the test targets LINK - it compiles mac.m/ScreenCapturer.m/
+    # FrameMailbox.c, whose assert()s are invariants, not debug leftovers.
+    # The old second loop "verified" a property the first loop had just set:
+    # it could never fire, and it exempted macvnc_core_testable, so a Release
+    # -DNDEBUG compiled the library's asserts out while the guard stayed green.
+    # The guard is now a source file compiled into every matched target: with
+    # NDEBUG defined the BUILD fails, not the review.
     get_property(_all_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
     foreach(test_target ${_all_targets})
-        if(test_target MATCHES "^test_")
+        if(test_target MATCHES "^test_" OR test_target STREQUAL "macvnc_core_testable")
             target_compile_options(${test_target} PRIVATE -UNDEBUG)
-        endif()
-    endforeach()
-
-    # Fail the build if a test target somehow still has NDEBUG defined.
-    foreach(test_target ${_all_targets})
-        if(test_target MATCHES "^test_")
-            get_target_property(_opts ${test_target} COMPILE_OPTIONS)
-            if(NOT _opts MATCHES "-UNDEBUG")
-                message(FATAL_ERROR "${test_target} would run with asserts disabled")
-            endif()
+            target_sources(${test_target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/assert_guard.c)
         endif()
     endforeach()
 endif()
