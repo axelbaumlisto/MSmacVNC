@@ -422,21 +422,6 @@ static void endMailboxActivity(void *context)
     return ready;
 }
 
-- (BOOL)isCurrentGenerationReady {
-    __block NSUInteger generation = 0;
-    __block BOOL requested = NO;
-    dispatch_sync(self.stateQueue, ^{
-        generation = self.generation;
-        requested = self.captureRequested;
-    });
-    if (!requested)
-        return NO;
-
-    pthread_mutex_lock(&_readinessMutex);
-    BOOL ready = _readinessGeneration == generation && _firstFrameReady;
-    pthread_mutex_unlock(&_readinessMutex);
-    return ready;
-}
 
 /* Waits, bounded, for every already-admitted sample callback to finish. */
 - (BOOL)waitForSampleQueueDrain

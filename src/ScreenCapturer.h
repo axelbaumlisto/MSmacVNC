@@ -23,8 +23,6 @@ NS_ASSUME_NONNULL_BEGIN
  * cheaper than a crash and than the unbounded wait it replaced.
  */
 - (BOOL)isSafeToDeallocate;
-- (BOOL)waitForFirstFrameWithTimeout:(NSTimeInterval)timeout;
-- (BOOL)isCurrentGenerationReady;
 
 @end
 
