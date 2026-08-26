@@ -55,6 +55,7 @@ int main(void)
     @autoreleasepool {
         const int W = 64, H = 32;
         rfbScreenInfo *screen = makeScreen(W, H);
+        macVNCCompositorSetScreen(screen);   /* the compositor owns it from here */
 
         /* A source that is entirely one colour, placed at the origin. */
         const int sw = 16, sh = 8;
@@ -64,7 +65,7 @@ int main(void)
         memset(pixels, 0x7F, stride * sh);
 
         MacVNCDisplayGeometry geometry = makeGeometry(0, 0, sw, sh);
-        assert(macVNCCompositorSubmitFrame(screen, &geometry, pixels, stride) == TRUE);
+        assert(macVNCCompositorSubmitFrame(&geometry, pixels, stride) == TRUE);
 
         /* The pixels landed where the geometry says, and nowhere else. */
         const uint8_t *canvas = (const uint8_t *)screen->frameBuffer;
@@ -78,21 +79,16 @@ int main(void)
         assert(other);
         memset(other, 0x21, stride * sh);
         MacVNCDisplayGeometry offset = makeGeometry(sw, 0, sw, sh);
-        assert(macVNCCompositorSubmitFrame(screen, &offset, other, stride) == TRUE);
+        assert(macVNCCompositorSubmitFrame(&offset, other, stride) == TRUE);
         assert(canvas[0] == 0x7F);                                /* untouched */
         assert(canvas[((size_t)0 * W + sw) * 4] == 0x21);         /* newly painted */
 
         /* A torn-down server must be survivable: a frame can still be in flight
            while the screen is being freed, and the bounded capture stop means it
            really does happen. TRUE means "not retryable", not "composited". */
-        assert(macVNCCompositorSubmitFrame(NULL, &geometry, pixels, stride) == TRUE);
-        rfbScreenInfo *noBuffer = makeScreen(W, H);
-        free(noBuffer->frameBuffer);
-        noBuffer->frameBuffer = NULL;
-        assert(macVNCCompositorSubmitFrame(noBuffer, &geometry, pixels, stride) == TRUE);
-        free(noBuffer);
-        assert(macVNCCompositorSubmitFrame(screen, NULL, pixels, stride) == TRUE);
-        assert(macVNCCompositorSubmitFrame(screen, &geometry, NULL, stride) == TRUE);
+        assert(macVNCCompositorSubmitFrame(&geometry, pixels, stride) == TRUE);
+        assert(macVNCCompositorSubmitFrame(NULL, pixels, stride) == TRUE);
+        assert(macVNCCompositorSubmitFrame(&geometry, NULL, stride) == TRUE);
 
         free(other);
         free(pixels);
