@@ -1,191 +1,103 @@
 #import "MacVNCPowerMgmt.h"
+#import "MacVNCDisplayWake.h"
 
-#import <IOKit/IOKitLib.h>
 #import <IOKit/pwr_mgt/IOPMLib.h>
-#import <IOKit/pwr_mgt/IOPM.h>
 #include <pthread.h>
 #include <stdatomic.h>
-#include <mach/mach_init.h>
-#include <mach/mach_port.h>
 #include "FirstFrameBudget.h" /* macVNCMonotonicNow() — shared monotonic clock */
 
+/*
+ * Keep the Mac awake while a remote session is active.
+ *
+ * This used to save kPMMinutesToDim/kPMMinutesToSleep and write zeros over
+ * them - GLOBAL Energy Saver settings with no per-process owner. Three ways to
+ * lose the saved values, each leaving the machine on "never sleep" forever:
+ * a crash, a force-quit, and the app's own Restart (the relauncher spawns the
+ * successor before the predecessor finishes its up-to-5s-per-display capture
+ * teardown, so the successor's dimmingInit snapshotted the zero its
+ * predecessor had written).
+ *
+ * An IOPMAssertion fixes all three at once: it is reference-counted inside one
+ * process and the kernel drops it when the process dies, whatever the cause.
+ * The same API family as MacVNCDisplayWake's user-activity nudge; that module
+ * deliberately does NOT hold a persistent assertion, this one does - they do
+ * different jobs.
+ */
+
+static pthread_mutex_t power_mutex = PTHREAD_MUTEX_INITIALIZER;
+static IOPMAssertionID sleepAssertion = kIOPMNullAssertionID;
+static rfbBool initialized = FALSE;
+
+/* Kept for API compatibility; both flags now only decide whether an assertion
+   is created at all. There is no dim-prevention assertion on macOS, so
+   preventDimming is honoured by undim()'s activity nudge alone. */
 static rfbBool preventDimming = FALSE;
-static rfbBool preventSleep   = TRUE;
+static rfbBool preventSleep = TRUE;
 
 void macVNCSetPowerPolicy(rfbBool dim, rfbBool sleep)
 {
     preventDimming = dim;
-    preventSleep   = sleep;
+    preventSleep = sleep;
 }
 
-static pthread_mutex_t  dimming_mutex;
-static unsigned long    dim_time;
-static unsigned long    sleep_time;
-static mach_port_t      master_dev_port;
-static io_connect_t     power_mgt;
-static rfbBool          initialized      = FALSE;
-static rfbBool          dim_time_saved   = FALSE;
-static rfbBool          sleep_time_saved = FALSE;
-
-/* Save/restore an IOPM aggressiveness setting, parameterized by key + storage,
-   so dim and sleep share one implementation instead of four copies. */
-static int
-saveAggressiveness(unsigned long key, unsigned long *store, rfbBool *saved)
-{
-    if (IOPMGetAggressiveness(power_mgt, key, store) != kIOReturnSuccess)
-        return -1;
-    *saved = TRUE;
-    return 0;
-}
-
-static int
-restoreAggressiveness(unsigned long key, unsigned long *store, rfbBool *saved)
-{
-    if (!*saved)
-        return -1;
-    if (IOPMSetAggressiveness(power_mgt, key, *store) != kIOReturnSuccess)
-        return -1;
-    *saved = FALSE;
-    *store = 0;
-    return 0;
-}
-
-static int saveDimSettings(void)    { return saveAggressiveness(kPMMinutesToDim, &dim_time, &dim_time_saved); }
-static int restoreDimSettings(void) { return restoreAggressiveness(kPMMinutesToDim, &dim_time, &dim_time_saved); }
-static int saveSleepSettings(void)  { return saveAggressiveness(kPMMinutesToSleep, &sleep_time, &sleep_time_saved); }
-static int restoreSleepSettings(void){ return restoreAggressiveness(kPMMinutesToSleep, &sleep_time, &sleep_time_saved); }
-
-/* Release everything dimmingInit acquired. Safe to call partially-initialised. */
-static void releasePowerResources(void)
-{
-    if (power_mgt) {
-        IOServiceClose(power_mgt);
-        power_mgt = 0;
-    }
-    if (master_dev_port) {
-        mach_port_deallocate(mach_task_self(), master_dev_port);
-        master_dev_port = 0;
-    }
-}
-
+/* Idempotent: safe to call twice (a restart overlapping a slow predecessor). */
 int
 dimmingInit(void)
 {
-    /* Idempotent: a prior run must be torn down before re-initialising, so we
-       never re-init the mutex or leak the IOKit connection across restarts. */
-    if (initialized)
+    pthread_mutex_lock(&power_mutex);
+    if (initialized) {
+        pthread_mutex_unlock(&power_mutex);
         return 0;
-
-    pthread_mutex_init(&dimming_mutex, NULL);
-
-#if __MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_VERSION_12_0
-    if (IOMainPort(bootstrap_port, &master_dev_port) != kIOReturnSuccess)
-#else
-    if (IOMasterPort(bootstrap_port, &master_dev_port) != kIOReturnSuccess)
-#endif
-        goto FAILURE;
-
-    if (!(power_mgt = IOPMFindPowerManagement(master_dev_port)))
-        goto FAILURE;
-
-    if (preventDimming) {
-        if (saveDimSettings() < 0)
-            goto FAILURE;
-        if (IOPMSetAggressiveness(power_mgt, kPMMinutesToDim, 0) != kIOReturnSuccess)
-            goto FAILURE;
     }
 
-    if (preventSleep) {
-        if (saveSleepSettings() < 0)
-            goto FAILURE;
-        if (IOPMSetAggressiveness(power_mgt, kPMMinutesToSleep, 0) != kIOReturnSuccess)
-            goto FAILURE;
+    if (!preventSleep) {
+        initialized = TRUE;
+        pthread_mutex_unlock(&power_mutex);
+        return 0;
     }
 
+    IOPMAssertionID id = kIOPMNullAssertionID;
+    IOReturn rc = IOPMAssertionCreateWithName(kIOPMAssertionTypeNoIdleSleep,
+                                              kIOPMAssertionLevelOn,
+                                              CFSTR("macVNC remote session"),
+                                              &id);
+    if (rc != kIOReturnSuccess) {
+        pthread_mutex_unlock(&power_mutex);
+        return -1;
+    }
+
+    sleepAssertion = id;
     initialized = TRUE;
+    pthread_mutex_unlock(&power_mutex);
     return 0;
-
-FAILURE:
-    /* Roll back everything acquired so a later retry starts clean and no
-       IOKit connection / mach port / mutex leaks. */
-    releasePowerResources();
-    pthread_mutex_destroy(&dimming_mutex);
-    return -1;
 }
 
 int
 undim(void)
 {
-    /* Throttle: undim() runs on every keystroke/mouse-move. Doing 3 IOKit
-       round-trips per input event under the lock is wasteful, so skip if we
-       nudged within the last second. */
+    /* Throttle: runs on every keystroke/mouse-move. The activity nudge lights
+       the display and resets the idle timer, which also covers dimming; there
+       is no separate dim aggressiveness to poke any more. */
     static const uint64_t kUndimMinIntervalNs = 1000000000ULL; /* 1s */
     static _Atomic uint64_t lastUndimNs = 0;
     uint64_t now = macVNCMonotonicNow();
     uint64_t last = atomic_load_explicit(&lastUndimNs, memory_order_relaxed);
     if (last != 0 && now - last < kUndimMinIntervalNs)
         return 0;
-
-    int result = -1;
-
-    pthread_mutex_lock(&dimming_mutex);
-
-    if (!initialized)
-        goto DONE;
-
-    /* Only consume the throttle window once we know we will actually nudge
-       (module initialised); an uninitialised call must not block the next one. */
     atomic_store_explicit(&lastUndimNs, now, memory_order_relaxed);
 
-    if (!preventDimming) {
-        if (saveDimSettings() < 0)
-            goto DONE;
-        if (IOPMSetAggressiveness(power_mgt, kPMMinutesToDim, 0) != kIOReturnSuccess)
-            goto DONE;
-        if (restoreDimSettings() < 0)
-            goto DONE;
-    }
-
-    if (!preventSleep) {
-        if (saveSleepSettings() < 0)
-            goto DONE;
-        if (IOPMSetAggressiveness(power_mgt, kPMMinutesToSleep, 0) != kIOReturnSuccess)
-            goto DONE;
-        if (restoreSleepSettings() < 0)
-            goto DONE;
-    }
-
-    result = 0;
-
- DONE:
-    pthread_mutex_unlock(&dimming_mutex);
-    return result;
+    macVNCWakeDisplays();
+    return 0;
 }
 
 int
 dimmingShutdown(void)
 {
-    int result = -1;
-
-    if (!initialized)
-        return 0;
-
-    pthread_mutex_lock(&dimming_mutex);
-    if (dim_time_saved)
-        if (restoreDimSettings() < 0)
-            goto DONE;
-    if (sleep_time_saved)
-        if (restoreSleepSettings() < 0)
-            goto DONE;
-
-    result = 0;
-
- DONE:
-    /* Release the IOKit connection + mach port acquired in dimmingInit so a
-       later restart does not leak them; then drop the mutex we created. */
-    releasePowerResources();
+    pthread_mutex_lock(&power_mutex);
+    if (initialized && sleepAssertion != kIOPMNullAssertionID)
+        IOPMAssertionRelease(sleepAssertion);
+    sleepAssertion = kIOPMNullAssertionID;
     initialized = FALSE;
-    pthread_mutex_unlock(&dimming_mutex);
-    pthread_mutex_destroy(&dimming_mutex);
-    return result;
+    pthread_mutex_unlock(&power_mutex);
+    return 0;
 }

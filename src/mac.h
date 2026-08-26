@@ -172,6 +172,12 @@ bool macVNCCaptureIsAllowedForTesting(void);
    assert that a refused permission produces NO start, rather than only that the
    gate returned false. */
 unsigned macVNCCaptureStartCountForTesting(void);
+
+/* How many times the reconciler STOPPED captures (last client left). Pins the
+   other half of "captures run iff vncConnectedClients > 0": without a witness
+   for this direction, deleting the stop branch entirely leaves every target
+   green with captures running forever after the last viewer disconnects. */
+unsigned macVNCCaptureStopCountForTesting(void);
 void macVNCResetCaptureStateForTesting(void);
 /* Runs the real start/stop reconciler for the current client count. */
 void macVNCReconcileCaptureForTesting(void);

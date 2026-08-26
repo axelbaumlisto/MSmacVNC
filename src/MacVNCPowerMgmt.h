@@ -3,23 +3,28 @@
 #include <rfb/rfb.h>
 
 /*
- * Legacy IOPM aggressiveness-based screen dimming/sleep control.
+ * Keep the machine awake for the duration of a remote session, via ONE
+ * process-scoped kIOPMAssertionTypeNoIdleSleep assertion.
  *
- * Note: one-shot display wake for remote viewing is handled separately by
- * MacVNCDisplayWake (user-activity nudge, no persistent assertion). This
- * module preserves the original dim/sleep-prevention behavior tied to the
- * server lifecycle.
+ * Deliberately NOT the old save/restore of the global Energy Saver timers:
+ * that had no owner-death cleanup, so a crash or the app's own restart left
+ * the Mac on "never sleep" permanently. Assertions die with the process.
+ *
+ * Display wake on demand is MacVNCDisplayWake's job: it nudges user activity
+ * without holding anything; this module holds exactly one assertion while the
+ * server runs. Neither ever touches a global pmset value.
  */
 
-/* Configure prevent-dim / prevent-sleep before dimmingInit(). Replaces the
- * former mutable extern globals with an explicit setter (config, not state). */
+/* Configure prevent-dim / prevent-sleep before dimmingInit().
+   preventSleep creates the no-idle-sleep assertion; preventDimming is covered
+   by undim()'s activity nudge (macOS has no dim aggressiveness assertion). */
 void macVNCSetPowerPolicy(rfbBool preventDimming, rfbBool preventSleep);
 
-/* Initialise power management and apply the configured prevent-dim/sleep. */
+/* Create the assertion. Idempotent; returns 0 if already active. */
 int dimmingInit(void);
 
-/* Temporarily bump activity to undim/keep awake (called on input events). */
+/* Nudge display activity (throttled); called on every input event. */
 int undim(void);
 
-/* Restore original dim/sleep settings and tear down. */
+/* Release the assertion. Safe when nothing was created. */
 int dimmingShutdown(void);

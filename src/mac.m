@@ -51,6 +51,7 @@ bool (*macVNCCaptureAllowed)(void) = NULL;
 
 #if defined(MACVNC_ENABLE_TEST_HOOKS)
 static _Atomic unsigned gCaptureStartCount = 0;
+static _Atomic unsigned gCaptureStopCount = 0;
 #endif
 
 static bool captureIsAllowed(void)
@@ -266,7 +267,7 @@ compositeCapturedFrame(const MacVNCDisplayGeometry *geometry,
                geometry->input.pixelWidth, geometry->input.pixelHeight);
         return true; /* wrong geometry: retrying cannot help */
     }
-    return macVNCCompositorSubmitFrame(rfbScreen, geometry, pixels, stride)
+    return macVNCCompositorSubmitFrame(geometry, pixels, stride)
                ? true : false;
 }
 
@@ -390,6 +391,10 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
 
   rfbInitServer(rfbScreen);
   rfbServerInitialized = TRUE;
+  /* From here the compositor owns the pointer: capture callbacks may fire at
+     any time, and only its lock can make "detach" wait out an in-flight
+     frame. */
+  macVNCCompositorSetScreen(rfbScreen);
 
   /* rfbInitServer() does not report bind failures through a return value: on a
      port collision (e.g. macOS Screen Sharing already owns 5900, or a second
@@ -441,6 +446,9 @@ static void reconcileCaptureState(void)
         }
     } else if (!wanted && gCapturesRunning) {
         gCapturesRunning = false;
+#if defined(MACVNC_ENABLE_TEST_HOOKS)
+        atomic_fetch_add(&gCaptureStopCount, 1);
+#endif
         macVNCCaptureSessionStopAndWait();
         macVNCInputResetModifiers();
         rfbLog("Last authenticated client disconnected; %lu display captures stopped and modifiers reset\n",
@@ -553,6 +561,14 @@ static void
 vncServerStopLocked(void)
 {
     atomic_store_explicit(&publishedServerPort, -1, memory_order_release);
+    /* A stop ENDS the run's identity, exactly as a start begins one. The
+       capture-failure path stamps vncServerCurrentGeneration() into every
+       notification it raises; with N displays that is N notifications for one
+       run. Only the first must act - but if the generation only moved on
+       START, all N still compare equal to the current run after the first one
+       stopped us, and each stacks another modal alert. Bumping here makes
+       notifications from a stopped run stale on arrival. */
+    atomic_fetch_add(&serverGeneration, 1);
     /* LibVNCServer >=0.9.15 reverted detached client threads. This call stops
        accepting clients and joins every client/listener thread before lifecycle
        objects they can access are released. */
@@ -567,13 +583,16 @@ vncServerStopLocked(void)
     macVNCCaptureSessionReset();
     atomic_store(&vncConnectedClients, 0);
     if (rfbScreen) {
-        /* Publish NULL BEFORE freeing, not after: the capture stop above is
-           bounded (5s, so a prompt cannot hang shutdown), so a late frame can
-           still arrive. macVNCCompositorSubmitFrame() rejects a NULL screen, but
-           between rfbScreenCleanup() and the assignment the global would point
-           at freed memory and pass that guard. */
+        /* Detach the compositor FIRST: SetScreen(NULL) takes the compositor
+           lock, so it blocks until any in-flight composite has finished, and
+           after it returns no callback can reach this screen. (The old order -
+           NULL the global, then free - had a window: a callback that loaded
+           the still-non-NULL pointer and was then descheduled walked into
+           rfbGetClientIterator on freed memory. The stuck-capturer path makes
+           that window real, since its callbacks deliberately keep running.) */
         rfbScreenInfoPtr dying = rfbScreen;
         rfbScreen = NULL;
+        macVNCCompositorSetScreen(NULL);
         rfbScreenCleanup(dying);
     }
     dimmingShutdown();
@@ -772,6 +791,12 @@ macVNCCaptureStartCountForTesting(void)
     return atomic_load(&gCaptureStartCount);
 }
 
+unsigned
+macVNCCaptureStopCountForTesting(void)
+{
+    return atomic_load(&gCaptureStopCount);
+}
+
 /* Drives the real reconciler, so a test exercises the decision the server
    actually makes rather than a re-implementation of it. */
 void
@@ -780,6 +805,7 @@ macVNCResetCaptureStateForTesting(void)
     atomic_store(&vncConnectedClients, 0);
     reconcileCaptureState();
     atomic_store(&gCaptureStartCount, 0);
+    atomic_store(&gCaptureStopCount, 0);
 }
 
 bool
