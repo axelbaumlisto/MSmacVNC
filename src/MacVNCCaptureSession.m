@@ -146,12 +146,3 @@ bool macVNCCaptureSessionWaitForFirstFrames(uint64_t timeoutNanoseconds)
   }
 }
 
-bool macVNCCaptureSessionAllReady(void)
-{
-  @autoreleasepool {
-    for (ScreenCapturer *capturer in gCapturers)
-        if (![capturer isCurrentGenerationReady])
-            return false;
-    return true;
-  }
-}
