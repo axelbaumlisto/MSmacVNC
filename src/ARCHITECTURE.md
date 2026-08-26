@@ -172,10 +172,16 @@ must not be counted as automated coverage.
   ScreenCaptureKit work and holding the client lock across that would stall a
   reconnect.
 - **Lock order:** `serverLifecycleMutex` → `compositorMutex` → per-client
-  `sendMutex`. The first edge exists because `vncServerStopLocked` calls
-  `macVNCCompositorSetScreen(NULL)` while holding the lifecycle mutex, and the
-  detach blocks on the compositor lock — anyone adding a lifecycle acquisition
-  INSIDE the composite path would deadlock the server.
+  `sendMutex` → per-client `updateMutex`. The first edge exists because
+  `vncServerStopLocked` calls `macVNCCompositorSetScreen(NULL)` while holding
+  the lifecycle mutex, and the detach blocks on the compositor lock — anyone
+  adding a lifecycle acquisition INSIDE the composite path would deadlock the
+  server. The last edge is LibVNCServer's own order, verified in the 0.9.15
+  sources: the update thread takes `sendMutex` (main.c:507) and then
+  `updateMutex` (rfbserver.c:3234) inside `rfbSendFramebufferUpdate`, while
+  `rfbMarkRectAsModified` — which our composite path calls — takes only
+  `updateMutex` (main.c:419). Both sides therefore order sendMutex above
+  updateMutex; no ABBA edge exists.
   `lockCurrentClients` retains each client so it can't be freed mid-composite;
   `clientLifecycleMutex` is never taken while holding the compositor lock.
   The compositor takes every `sendMutex` with `trylock`, and that stands on its
@@ -192,9 +198,10 @@ must not be counted as automated coverage.
   lock with `trylock` and returns the safe answer when it is busy. Blocking
   would freeze the menu bar behind a stop that is waiting on capture.
 - **Teardown ordering** (`vncServerStopLocked`): `rfbShutdownServer(TRUE)` joins
-  every client thread **before** capturers stop and before `macVNCInputShutdown`
-  clears the injected context — so input/compositing callbacks can never touch
-  freed objects.
+  every client thread AND the listener thread (verified in the 0.9.15 sources,
+  main.c:1200-1250: per-client `pthread_join` at :1218, listener join at :1245)
+  **before** capturers stop and before `macVNCInputShutdown` clears the injected
+  context — so input/compositing callbacks can never touch freed objects.
 - **ScreenCapturer quiescence:** a `dispatch_group` is entered for every async
   unit and drained on stop/dealloc; a generation counter rejects stale
   callbacks. Do not "simplify" this without a concurrency argument.
