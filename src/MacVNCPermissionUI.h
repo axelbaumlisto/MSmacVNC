@@ -24,7 +24,7 @@ NS_ASSUME_NONNULL_BEGIN
  */
 
 typedef struct {
-    BOOL screenActive;        /* capture proven to work in THIS process */
+    BOOL screenActive;        /* CGPreflightScreenCaptureAccess() in THIS process */
     BOOL accessibilityActive; /* AXIsProcessTrusted() in THIS process    */
     BOOL serverRunning;       /* vncServerGetPort() > 0                  */
     /* Whether the bundle lives in /Applications. The "+" instruction says to

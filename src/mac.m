@@ -29,7 +29,7 @@
 #import "MacVNCCompositor.h"
 #import "MacVNCCaptureSession.h"
 #import "MacVNCInput.h"
-#import "ReadinessPolicy.h"
+#import "FirstFrameBudget.h"
 #import "CaptureRate.h"
 #import "NetworkAccess.h"
 #import "NetworkPolicyResolver.h"
@@ -727,16 +727,6 @@ vncServerCopyActiveBindAddress(char *bindAddress, size_t size)
     return TRUE;
 }
 
-MacVNCClientAccessMode
-vncServerActiveAccessMode(void)
-{
-    /* Same main-thread rule as above; fail-closed is the safe fallback. */
-    if (pthread_mutex_trylock(&serverLifecycleMutex) != 0)
-        return MACVNC_CLIENT_ACCESS_FAIL_CLOSED;
-    MacVNCClientAccessMode mode = macVNCClientAccessMode;
-    pthread_mutex_unlock(&serverLifecycleMutex);
-    return mode;
-}
 
 uint64_t
 vncServerCurrentGeneration(void)

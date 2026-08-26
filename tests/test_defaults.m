@@ -35,19 +35,46 @@ int main(void)
            refuses to run without one, so this must not be a made-up value. */
         assert([[defaults stringForKey:MacVNCKeyPassword] isEqualToString:@""]);
 
-        /* Every declared key must have a fallback. Checked as a set so adding
-           a key without a default fails here rather than in the field. */
+        /* Every key the app reads must have a registered fallback.
+           The list comes from macVNCAllDefaultsKeys(), not from a copy kept in
+           this file: the copy had already drifted - it omitted
+           MacVNCKeyAutoAllowedClients, which was the one key genuinely missing
+           a default, so the completeness check could not see the bug it existed
+           to catch. */
         NSDictionary *registered =
             [defaults volatileDomainForName:NSRegistrationDomain];
-        NSArray *required = @[MacVNCKeyPort, MacVNCKeyPassword, MacVNCKeyViewOnly,
-                              MacVNCKeyDisplay, MacVNCKeyListenMode,
-                              MacVNCKeyListenAddress, MacVNCKeyAllowedClients,
-                              MacVNCKeyAllowAllConfirmed];
-        for (NSString *key in required) {
+        NSArray<NSString *> *allKeys = macVNCAllDefaultsKeys();
+
+        for (NSString *key in allKeys) {
             if (registered[key] == nil) {
                 fprintf(stderr, "FAIL no registered default for %s\n", key.UTF8String);
                 abort();
             }
+        }
+
+        /* And macVNCAllDefaultsKeys() must itself stay complete: cross-check it
+           against the DECLARATIONS in the header, so adding an extern without
+           adding it to the list fails here. Reading the header keeps this honest
+           - deriving both sides from the same array would prove nothing. */
+        NSString *header = [NSString stringWithContentsOfFile:@MACVNC_DEFAULTS_KEYS_HEADER
+                                                    encoding:NSUTF8StringEncoding
+                                                       error:NULL];
+        if (header.length == 0) {
+            fprintf(stderr, "FAIL cannot read the defaults-keys header\n");
+            abort();
+        }
+        NSRegularExpression *decl = [NSRegularExpression
+            regularExpressionWithPattern:@"^extern NSString \\* const (MacVNCKey\\w+);"
+                                 options:NSRegularExpressionAnchorsMatchLines
+                                   error:NULL];
+        NSArray *matches = [decl matchesInString:header options:0
+                                           range:NSMakeRange(0, header.length)];
+        /* A regex that matched nothing would make the loop below vacuous. */
+        if (matches.count != allKeys.count) {
+            fprintf(stderr, "FAIL header declares %lu MacVNCKey* symbols but "
+                            "macVNCAllDefaultsKeys() returns %lu\n",
+                    (unsigned long)matches.count, (unsigned long)allKeys.count);
+            abort();
         }
 
         printf("test_defaults: all assertions passed\n");

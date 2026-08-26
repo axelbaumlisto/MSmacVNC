@@ -3,7 +3,7 @@
 #include <ScreenCaptureKit/ScreenCaptureKit.h>
 
 #import "ScreenCapturer.h"
-#import "ReadinessPolicy.h"
+#import "FirstFrameBudget.h"
 
 /* Capturers for the current run; nil between runs. */
 static NSMutableArray<ScreenCapturer *> *gCapturers;
@@ -130,12 +130,12 @@ bool macVNCCaptureSessionWaitForFirstFrames(uint64_t timeoutNanoseconds)
   @autoreleasepool {
     /* One budget for the whole set: a per-display timeout would make a
        two-monitor Mac keep the client waiting twice as long. */
-    MacVNCReadinessBudget budget =
-        macVNCReadinessBudgetStart(macVNCReadinessNow(), timeoutNanoseconds);
+    MacVNCFirstFrameBudget budget =
+        macVNCFirstFrameBudgetStart(macVNCMonotonicNow(), timeoutNanoseconds);
 
     for (ScreenCapturer *capturer in gCapturers) {
         uint64_t remaining =
-            macVNCReadinessBudgetRemaining(&budget, macVNCReadinessNow());
+            macVNCFirstFrameBudgetRemaining(&budget, macVNCMonotonicNow());
         if (remaining == 0)
             return false;
         if (![capturer waitForFirstFrameWithTimeout:

@@ -448,8 +448,13 @@ static NSMenuItem *addRow(NSMenu *menu, NSString *title, SEL action,
             outcome.alreadyRunning        =
                 startResult == MacVNCServerStartAlreadyRunning;
             outcome.hasConfigurationError = configurationError != nil;
+            /* Ask the sampler, which asks the provider: passing serverRunning=NO
+               by hand fed the resolver a value already known to be wrong on the
+               "already running" path. Only the permission answer is read here,
+               but a resolver input that lies about one field invites the next
+               caller to trust another. */
             outcome.permissionsGranted    =
-                macVNCResolvePermissionUI(macVNCSamplePermissionUIInput(NO))
+                macVNCResolvePermissionUI(macVNCSamplePermissionUI())
                     .shouldShowPermissionRows ? NO : YES;
 
             switch (macVNCResolveStartAdvice(outcome)) {
@@ -484,6 +489,8 @@ static NSMenuItem *addRow(NSMenu *menu, NSString *title, SEL action,
     /* ONE snapshot for the whole render: the status line used to sample TCC
        separately from the permission rows — four reads, two snapshots, one
        frame — which is how a line could contradict the rows beneath it. */
+    /* `port` was just read; reuse it rather than making the provider read the
+       server again mid-render, which could observe a different state. */
     MacVNCPermissionUIInput input = macVNCSamplePermissionUIInput(port > 0);
     MacVNCPermissionUIState *ui = macVNCResolvePermissionUI(input);
 

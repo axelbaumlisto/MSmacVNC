@@ -1,28 +1,28 @@
-#include "ReadinessPolicy.h"
+#include "FirstFrameBudget.h"
 
 #include <assert.h>
 #include <stdint.h>
 #include <time.h>
 
 uint64_t
-macVNCReadinessNow(void)
+macVNCMonotonicNow(void)
 {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     return (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
 }
 
-MacVNCReadinessBudget
-macVNCReadinessBudgetStart(uint64_t nowNanoseconds, uint64_t totalNanoseconds)
+MacVNCFirstFrameBudget
+macVNCFirstFrameBudgetStart(uint64_t nowNanoseconds, uint64_t totalNanoseconds)
 {
     uint64_t deadline = UINT64_MAX - nowNanoseconds < totalNanoseconds
         ? UINT64_MAX
         : nowNanoseconds + totalNanoseconds;
-    return (MacVNCReadinessBudget){.deadlineNanoseconds = deadline};
+    return (MacVNCFirstFrameBudget){.deadlineNanoseconds = deadline};
 }
 
 uint64_t
-macVNCReadinessBudgetRemaining(const MacVNCReadinessBudget *budget,
+macVNCFirstFrameBudgetRemaining(const MacVNCFirstFrameBudget *budget,
                                 uint64_t nowNanoseconds)
 {
     if (!budget || nowNanoseconds >= budget->deadlineNanoseconds)
@@ -31,7 +31,7 @@ macVNCReadinessBudgetRemaining(const MacVNCReadinessBudget *budget,
 }
 
 struct timespec
-macVNCReadinessRelativeWait(uint64_t remainingNanoseconds)
+macVNCRelativeWaitFromNanoseconds(uint64_t remainingNanoseconds)
 {
     return (struct timespec){
         .tv_sec = (time_t)(remainingNanoseconds / 1000000000ULL),

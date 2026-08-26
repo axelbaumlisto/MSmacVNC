@@ -38,7 +38,7 @@ modules**, and keep the Objective-C layer as thin glue to macOS frameworks
                  │ MacVNCPermissionUI · MacVNCStartFailure       │
                  │ MacVNCAllowlistPlan                           │
                  │ NetworkAccess · NetworkCIDR · NetworkInventory │
-                 │ NetworkPolicyResolver · ReadinessPolicy        │
+                 │ NetworkPolicyResolver · FirstFrameBudget       │
                  │ FrameMailbox · PointerState                    │
                  │ KeyboardModifierState · CaptureRate · RFBKeySym│
                  └───────────────────────────────────────────────┘
@@ -64,8 +64,9 @@ Pure logic, each with a unit test wired into `ctest` (`.c` for C modules,
   allowlist matching, interface enumeration.
 - **NetworkPolicyResolver** — pure decision `defaults/env → {bind, allowlist,
   access mode}`; fail-closed by default.
-- **ReadinessPolicy** — first-frame timeout/promotion state machine, plus
-  `macVNCReadinessNow()`, the one shared monotonic clock.
+- **FirstFrameBudget** — ONE deadline for "every display has produced its first
+  frame", shared across displays so a two-monitor Mac does not double a client's
+  wait, plus `macVNCMonotonicNow()`, the one shared monotonic clock.
 - **FrameMailbox** — thread-safe single-slot latest-frame handoff with
   injected release/activity callbacks.
 - **PointerState / KeyboardModifierState** — input resolution state machines.
@@ -175,7 +176,7 @@ must not be counted as automated coverage.
   NULL rather than a freed pointer.
 - **Main-thread rule:** every server query the menu timer makes
   (`vncServerCopyActiveBindAddress`, `vncServerActivePolicyAllowsEveryone`,
-  `vncServerActiveAccessMode`, `vncServerCloseListeners`) takes the lifecycle
+  `vncServerCloseListeners`) takes the lifecycle
   lock with `trylock` and returns the safe answer when it is busy. Blocking
   would freeze the menu bar behind a stop that is waiting on capture.
 - **Teardown ordering** (`vncServerStopLocked`): `rfbShutdownServer(TRUE)` joins

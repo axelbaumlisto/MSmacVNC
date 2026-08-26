@@ -20,9 +20,7 @@ MacVNCPermissionStatus macVNCCheckPermission(MacVNCPermissionKind kind)
 {
     switch (kind) {
         case MacVNCPermissionKindScreenRecording:
-            /* A frame that actually arrived is proof; otherwise ask TCC.
-
-               CGPreflightScreenCaptureAccess() is trustworthy in the context
+            /* CGPreflightScreenCaptureAccess() is trustworthy in the context
                that matters — a GUI-launched app — and it never prompts, verified
                in the not-determined state. Earlier readings that claimed it
                "always answers NO" were taken from shell-launched runs, where TCC

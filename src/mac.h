@@ -153,8 +153,6 @@ int vncServerGetPort(void);
  */
 rfbBool vncServerCopyActiveBindAddress(char *bindAddress, size_t size);
 
-/* Client access mode of the RUNNING server. Only valid when the server runs. */
-MacVNCClientAccessMode vncServerActiveAccessMode(void);
 
 /*
  * TRUE when the RUNNING server's effective policy admits every IPv4 client —

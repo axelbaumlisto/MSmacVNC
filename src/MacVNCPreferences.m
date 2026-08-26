@@ -46,9 +46,12 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
     NSArray<NSString *> *autoAdded = macVNCTrimmedNonEmptyLines(previouslyAutoAdded ?: @"");
     NSMutableArray<NSString *> *manualLines = [NSMutableArray array];
     for (NSString *trimmed in macVNCTrimmedNonEmptyLines(currentAllowed)) {
-        BOOL isSafeLocalhostDefault = [trimmed isEqualToString:MacVNCLoopbackIPv4] ||
-                                      [trimmed isEqualToString:[MacVNCLoopbackIPv4 stringByAppendingString:@"/32"]];
-        if (![autoAdded containsObject:trimmed] && !isSafeLocalhostDefault)
+        /* Anything WE added is recorded in autoAllowedClients - including on a
+           fresh install, which now registers the loopback entry as a default.
+           There used to be an extra "but 127.0.0.1 is also fine" case here; it
+           existed only because that default was missing, and it silently hid a
+           loopback entry the user had typed deliberately. */
+        if (![autoAdded containsObject:trimmed])
             [manualLines addObject:trimmed];
     }
     return [manualLines componentsJoinedByString:@"\n"];
