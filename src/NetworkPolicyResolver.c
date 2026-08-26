@@ -49,7 +49,7 @@ macVNCResolveNetworkPolicy(const MacVNCPolicyInput *input,
         return false;
     }
 
-    const char *bind = "";
+    const char *bind;
     if (strcmp(mode, MACVNC_LISTEN_MODE_ALL) == 0) {
         bind = "";
     } else if (strcmp(mode, MACVNC_LISTEN_MODE_LOCALHOST) == 0) {
@@ -75,6 +75,13 @@ macVNCResolveNetworkPolicy(const MacVNCPolicyInput *input,
             setError(out, "MACVNC_LISTEN is not IPv4");
             return false;
         }
+        /* Log WHAT changed, not just THAT something did: a loopback-to-
+           0.0.0.0 override is a real exposure-surface change, and a generic
+           "environment override(s)" line left the operator unable to tell
+           afterwards which field had been rewritten. */
+        fprintf(stderr, "macVNC: MACVNC_LISTEN override active: binding %s "
+                        "(GUI listen mode was %s)\n",
+                env->listenAddress, input->listenMode);
         bind = env->listenAddress;
         out->envOverrideActive = true;
     }
@@ -86,8 +93,11 @@ macVNCResolveNetworkPolicy(const MacVNCPolicyInput *input,
     bool envAllowedPresent = env && env->hasAllowedClients;
     if (envAllowedPresent) {
         out->envOverrideActive = true;
-        if (!isEmpty(env->allowedClients))
+        if (!isEmpty(env->allowedClients)) {
+            fprintf(stderr, "macVNC: MACVNC_ALLOWED_CLIENTS override active: "
+                            "%s\n", env->allowedClients);
             allow = env->allowedClients;
+        }
         /* Empty env allowlist is ignored so it cannot clear GUI policy. */
     }
 
