@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.68 LANGUAGES C)
+project(macVNC VERSION 0.3.69 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -36,6 +36,8 @@ find_library(APPLICATION_SERVICES   ApplicationServices REQUIRED)
 set(SOURCE_FILES
     src/mac.h
     src/mac.m
+    src/MacVNCTLS.h
+    src/MacVNCTLS.c
     src/RFBKeySym.h
     src/RFBKeySym.c
     src/DisplayLayout.h
@@ -218,6 +220,11 @@ if(BUILD_TESTING)
     target_include_directories(test_network_inventory PRIVATE src)
     add_test(NAME network_inventory COMMAND test_network_inventory)
 
+    add_executable(test_vencrypt_negotiation tests/test_vencrypt_negotiation.c src/MacVNCTLS.c)
+    target_include_directories(test_vencrypt_negotiation PRIVATE src)
+    target_link_libraries(test_vencrypt_negotiation LibVNCServer::vncserver)
+    add_test(NAME vencrypt_negotiation COMMAND test_vencrypt_negotiation)
+
     add_executable(test_network_policy_resolver tests/test_network_policy_resolver.c src/NetworkPolicyResolver.c src/NetworkAccess.c)
     target_include_directories(test_network_policy_resolver PRIVATE src)
     add_test(NAME network_policy_resolver COMMAND test_network_policy_resolver)
@@ -318,6 +325,7 @@ if(BUILD_TESTING)
         src/DisplayLayout.c
         src/PointerState.c
         src/KeyboardModifierState.c
+        src/MacVNCTLS.c
         src/MacVNCPowerMgmt.m
         src/MacVNCDisplayWake.m
         src/FirstFrameBudget.c
@@ -356,6 +364,7 @@ if(BUILD_TESTING)
         src/NetworkInventory.c
         src/NetworkPolicyResolver.c
         src/MacVNCDisplayWake.m
+        src/MacVNCTLS.c
         src/MacVNCPowerMgmt.m
         src/MacVNCInput.m
         src/ScreenCapturer.m
@@ -393,6 +402,7 @@ if(BUILD_TESTING)
 
     add_executable(test_power_mgmt
         tests/test_power_mgmt.m
+        src/MacVNCTLS.c
         src/MacVNCPowerMgmt.m
         src/MacVNCDisplayWake.m
         src/FirstFrameBudget.c

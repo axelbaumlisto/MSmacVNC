@@ -22,6 +22,13 @@
 #include <stdatomic.h>
 #include <arpa/inet.h>
 #include <ifaddrs.h>
+#include <libgen.h>
+#import "MacVNCTLS.h"
+
+/* Mirror of the private constants in MacVNCTLS.c - kept tiny on purpose. */
+#define MACVNC_VENCRYPT_MAJOR 0
+#define MACVNC_VENCRYPT_MINOR 2
+#define MACVNC_SUBTYPE_TLSVNC 258u
 #include <sys/socket.h>
 #include <time.h>
 
@@ -109,6 +116,7 @@ typedef struct {
 static rfbBool macVNCPasswordCheck(rfbClientPtr client,
                                    const char *encryptedPassword,
                                    int length);
+void macVNCTLSHandleVeNCrypt(rfbClientPtr cl);
 
 #define INITIAL_READINESS_TIMEOUT_NANOSECONDS (3ULL * NSEC_PER_SEC)
 
@@ -225,6 +233,16 @@ installPassword(const char *password)
   }
   rfbScreen->authPasswdData = gPasswdList;
   rfbScreen->passwordCheck = macVNCPasswordCheck;
+
+  /* VeNCrypt TLSVnc (19/258): encrypted channel, password auth inside it.
+     Registered IN ADDITION to classic type 2 so older clients keep working;
+     viewers that care about encryption pick 19 and stop warning. */
+  {
+      static rfbSecurityHandler veNCryptHandler;
+      veNCryptHandler.type = 19; /* rfbVeNCrypt */
+      veNCryptHandler.handler = macVNCTLSHandleVeNCrypt;
+      rfbRegisterSecurityHandler(&veNCryptHandler);
+  }
   return TRUE;
 }
 
@@ -563,6 +581,141 @@ static void clientGone(rfbClientPtr cl)
 
     reconcileCaptureState();
     rfbLog("Client %s disconnected (%d authenticated remaining)\n", cl->host, remaining);
+}
+
+/* Classic VNC auth INSIDE the TLS channel for the VeNCrypt security type:
+   send 16 random bytes, read 16 back, verify against our password list,
+   report SecurityResult. Reuses the SAME store and check as type-2 auth -
+   one password source, two transports. Runs on the client thread. */
+bool
+macVNCTLSRunVNCAuthInsideTLS(rfbClientPtr client)
+{
+    rfbRandomBytes(client->authChallenge);
+    if (rfbWriteExact(client, (char *)client->authChallenge,
+                      CHALLENGESIZE) < 0)
+        return false;
+
+    char response[CHALLENGESIZE];
+    if (rfbReadExact(client, response, CHALLENGESIZE) <= 0)
+        return false;
+
+    bool ok = macVNCPasswordCheck(client, response, CHALLENGESIZE) ? true : false;
+
+    uint32_t result = Swap32IfLE(ok ? 0 : 1); /* 0=OK 1=fail per RFB */
+    if (rfbWriteExact(client, (char *)&result, 4) < 0)
+        return false;
+    if (!ok)
+        rfbErr("macVNC TLS: password check failed\n");
+    return ok;
+}
+
+/* ---------- VeNCrypt TLSVnc security handler (type 19 -> subtype 258) ----------
+ * Wire order per VeNCrypt 0.2 after the client picks type 19:
+ *   server: u8 major(0) u8 minor(2)
+ *   client: echo
+ *   server: u32 count, u32[] subtypes   (we offer exactly 258 = TLSVnc)
+ *   client: u32 chosen
+ *   ...TLS handshake (self-signed cert; transport trust comes from Tailscale
+ *      + allowlist, the cert exists so the channel CAN be encrypted)...
+ *   classic VNC password auth INSIDE the encrypted channel.
+ * sockets.c routes all later I/O through SSL once cl->sslctx is set. */
+void macVNCTLSHandleVeNCrypt(rfbClientPtr cl)
+{
+    char certPath[PATH_MAX], keyPath[PATH_MAX];
+    if (!macVNCTLSEnsureCertificate(certPath, sizeof(certPath),
+                                    keyPath, sizeof(keyPath))) {
+        rfbErr("macVNC TLS: cannot obtain self-signed certificate\n");
+        uint32_t fail = Swap32IfLE(0xFFFFFFFFu);
+        rfbWriteExact(cl, (char *)&fail, 4);
+        rfbCloseClient(cl);
+        return;
+    }
+    cl->screen->sslcertfile = strdup(certPath);
+    cl->screen->sslkeyfile  = strdup(keyPath);
+
+    /* OpenSSL 4 defaults may exclude our self-signed-RSA setup ("library has
+       no ciphers" at handshake). Point the TLS library at an explicit config
+       BEFORE SSL_CTX creation; rfbssl_init runs right after this handler. */
+    static char confPath[PATH_MAX];
+    snprintf(confPath, sizeof(confPath), "%s/openssl-macvnc.cnf",
+             dirname(certPath));
+    FILE *f = fopen(confPath, "w");
+    if (f) {
+        fprintf(f,
+            "openssl_conf = openssl_init\n"
+            "\n"
+            "[openssl_init]\n"
+            "ssl_conf = ssl_sect\n"
+            "\n"
+            "[ssl_sect]\n"
+            "system_default = system_default_sect\n"
+            "\n"
+            "[system_default_sect]\n"
+            "CipherString = DEFAULT@SECLEVEL=0\n");
+        fclose(f);
+        setenv("OPENSSL_CONF", confPath, 1);
+    }
+
+    uint8_t ver[2] = { MACVNC_VENCRYPT_MAJOR, MACVNC_VENCRYPT_MINOR };
+    if (rfbWriteExact(cl, (char *)ver, 2) < 0) { rfbCloseClient(cl); return; }
+    uint8_t vReply[2];
+    if (rfbReadExact(cl, (char *)vReply, 2) < 0) { rfbCloseClient(cl); return; }
+
+    uint32_t count = Swap32IfLE(1);
+    uint32_t sub   = Swap32IfLE(MACVNC_SUBTYPE_TLSVNC);
+    if (rfbWriteExact(cl, (char *)&count, 4) < 0 ||
+        rfbWriteExact(cl, (char *)&sub, 4) < 0) { rfbCloseClient(cl); return; }
+
+    uint32_t chosenRaw;
+    if (rfbReadExact(cl, (char *)&chosenRaw, 4) < 0) { rfbCloseClient(cl); return; }
+    if (!macVNCTLSValidateClientVersions(vReply[0], vReply[1],
+                                         Swap32IfLE(chosenRaw))) {
+        rfbErr("macVNC TLS: client picked version %d.%d subtype %u - refused\n",
+               vReply[0], vReply[1], Swap32IfLE(chosenRaw));
+        uint32_t fail = Swap32IfLE(0xFFFFFFFFu);
+        rfbWriteExact(cl, (char *)&fail, 4);
+        rfbCloseClient(cl);
+        return;
+    }
+    uint32_t ok = Swap32IfLE(1); /* VeNCrypt SecurityResult */
+    if (rfbWriteExact(cl, (char *)&ok, 4) < 0) { rfbCloseClient(cl); return; }
+
+    /* Exported by the dylib; header is internal to libvncserver. After a
+       successful init sockets.c transparently SSL-wraps this client's I/O. */
+    extern int rfbssl_init(rfbClientPtr cl);
+    if (rfbssl_init(cl) < 0) {
+        rfbErr("macVNC TLS: handshake failed\n");
+        rfbCloseClient(cl);
+        return;
+    }
+    rfbLog("macVNC: client %s upgraded to encrypted (VeNCrypt TLSVnc)\n",
+           cl->host ? cl->host : "?");
+
+    /* BEFORE auth: prepareAuthenticatedClient (inside the password check)
+       can block up to 3s waiting for first frames; the client's ClientInit
+       may arrive during that wait and must land in the right state. The
+       stock flow transitions before auth completes for the same reason. */
+    cl->state = RFB_INITIALISATION;
+
+    /* Classic VNC auth INSIDE the encrypted channel. */
+    rfbRandomBytes(cl->authChallenge);
+    bool authed = false;
+    if (rfbWriteExact(cl, (char *)cl->authChallenge, CHALLENGESIZE) >= 0) {
+        char response[CHALLENGESIZE];
+        if (rfbReadExact(cl, response, CHALLENGESIZE) > 0) {
+            authed = macVNCPasswordCheck(cl, response, CHALLENGESIZE) ? true : false;
+        }
+    }
+    uint32_t result = Swap32IfLE(authed ? 0 : 1);
+    rfbWriteExact(cl, (char *)&result, 4);
+    if (!authed) {
+        rfbErr("macVNC TLS: password check failed\n");
+        rfbCloseClient(cl);
+        return;
+    }
+    /* Authed over the encrypted channel: ClientInit has likely already
+       arrived during the first-frame wait and been buffered/processed in
+       RFB_INITIALISATION state. */
 }
 
 static enum rfbNewClientAction newClient(rfbClientPtr cl)
