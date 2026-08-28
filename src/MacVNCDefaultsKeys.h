@@ -21,6 +21,9 @@ extern NSString * const MacVNCKeyCaptureFPS;
 /* How pixels are encoded: "viewer", "lossless", or a quality level "0".."7".
  * See MacVNCImageProfile.h for the measurements behind the ladder. */
 extern NSString * const MacVNCKeyImageProfile;
+/* "optional" or "required": whether a viewer may connect without TLS.
+ * See MacVNCEncryptionPolicy.h for why refusing is the only reliable lever. */
+extern NSString * const MacVNCKeyEncryption;
 
 extern NSString * const MacVNCBundleID;
 

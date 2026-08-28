@@ -1,6 +1,7 @@
 #import "MacVNCStartupConfig.h"
 
 #include "CaptureRate.h"
+#include "MacVNCEncryptionPolicy.h"
 #include "MacVNCImageProfile.h"
 #import "MacVNCDefaultsKeys.h"
 
@@ -135,6 +136,43 @@ int main(void)
     assert(sc3d.captureFramesPerSecond == 45);
     assert(sc3d.imageProfile.kind == MacVNCImageProfileJPEG);
     assert(sc3d.imageProfile.qualityLevel == 2);
+
+    /* 3f. Encryption follows the same source contracts: stored value honoured,
+           environment override wins, invalid environment value is an error. */
+    NSUserDefaults *d3f = makeDefaults(@"macvnc.test.startup3f", @{
+        MacVNCKeyPort:          @5913,
+        MacVNCKeyPassword:      @"secret",
+        MacVNCKeyListenMode:    @"localhost",
+        MacVNCKeyAllowedClients: @"127.0.0.1/32",
+        MacVNCKeyEncryption:    @"required",
+    });
+    MacVNCServerConfig sc3f;
+    assert([[MacVNCStartupConfig configWithDefaults:d3f environment:@{}]
+               fillServerConfig:&sc3f]);
+    assert(sc3f.encryptionPolicy == MacVNCEncryptionRequired);
+
+    MacVNCServerConfig sc3g;
+    assert([[MacVNCStartupConfig configWithDefaults:d3f environment:@{
+                @"MACVNC_ENCRYPTION": @"optional" }] fillServerConfig:&sc3g]);
+    assert(sc3g.encryptionPolicy == MacVNCEncryptionOptional);
+
+    assert([MacVNCStartupConfig configWithDefaults:d3f environment:@{
+               @"MACVNC_ENCRYPTION": @"yes" }].error != nil);
+
+    /* A hand-edited stored value falls back rather than locking anyone out. */
+    NSUserDefaults *d3h = makeDefaults(@"macvnc.test.startup3h", @{
+        MacVNCKeyPort:          @5914,
+        MacVNCKeyPassword:      @"secret",
+        MacVNCKeyListenMode:    @"localhost",
+        MacVNCKeyAllowedClients: @"127.0.0.1/32",
+        MacVNCKeyEncryption:    @"REQUIRED",
+    });
+    MacVNCServerConfig sc3h;
+    MacVNCStartupConfig *c3h = [MacVNCStartupConfig configWithDefaults:d3h
+                                                          environment:@{}];
+    assert(c3h.error == nil);
+    assert([c3h fillServerConfig:&sc3h]);
+    assert(sc3h.encryptionPolicy == MacVNCEncryptionOptional);
 
     /* 3e. An invalid environment profile is an ERROR, unlike a stored one. */
     MacVNCStartupConfig *c3e = [MacVNCStartupConfig configWithDefaults:d3c

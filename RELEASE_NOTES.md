@@ -1,3 +1,34 @@
+# macVNC 0.3.78
+
+## You can now require encryption
+
+macVNC has always offered encrypted connections (VeNCrypt/TLS) alongside the
+classic VNC login — but the **viewer** picks which to use, and in practice every
+viewer picks the unencrypted one. Reordering does not fix it: LibVNCServer
+builds its list of security types head-first and adds its own classic handler on
+the first connection, i.e. after ours, so plain is always listed first. Refusing
+it is the only reliable lever, and that is now a setting.
+
+**Preferences → Encryption**
+
+| Setting | Effect |
+|---|---|
+| **Allow unencrypted connections (default)** | Both paths accepted; the viewer decides. |
+| Require encryption (TLS) | Viewers that will not use TLS are refused. |
+
+The default stays compatible on purpose: shipping "required" would lock out
+every viewer without TLS support on an upgrade, which is a worse failure than an
+unencrypted session on a network you already trust. If macVNC is only reachable
+over a VPN such as Tailscale, the transport is already encrypted and this is a
+second layer.
+
+A refused viewer sees what looks like a wrong password — a probe learns nothing
+about the policy — while the log says exactly what happened, because locking
+yourself out is the other way this can go wrong.
+
+Measured cost, same 57.5 MB frame: **0.13 s of server CPU unencrypted versus
+0.35 s with TLS**, about 3x. Worth knowing before requiring it.
+
 # macVNC 0.3.77
 
 ## The remote screen is now three times faster, for half the CPU

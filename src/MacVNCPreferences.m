@@ -1,6 +1,7 @@
 #import "MacVNCPreferences.h"
 
 #include "CaptureRate.h"
+#include "MacVNCEncryptionPolicy.h"
 #include "MacVNCImageProfile.h"
 #import "MacVNCDefaultsKeys.h"
 #import "MacVNCPassword.h"
@@ -19,21 +20,22 @@ static const NSInteger kListenTagRowBase   = 1000; /* + interface row index */
    give a label column and a control column so the magic NSMakeRect numbers read
    as intent, not arbitrary constants. */
 static const CGFloat kFormWidth   = 520;
-static const CGFloat kFormHeight  = 272;
+static const CGFloat kFormHeight  = 298;
 static const CGFloat kColLabelX   = 0;
 static const CGFloat kColCtrlX    = 160;
 static const CGFloat kRowHeight   = 22;
-static const CGFloat kRowPort     = 242;
-static const CGFloat kRowListen   = 206;
-static const CGFloat kRowCustom   = 176;
-static const CGFloat kRowAllowed  = 146;
-static const CGFloat kRowManual   = 112;
-static const CGFloat kRowScroll   = 78;
-static const CGFloat kRowHint     = 54;
+static const CGFloat kRowPort     = 268;
+static const CGFloat kRowListen   = 232;
+static const CGFloat kRowCustom   = 202;
+static const CGFloat kRowAllowed  = 172;
+static const CGFloat kRowManual   = 138;
+static const CGFloat kRowScroll   = 104;
+static const CGFloat kRowHint     = 80;
 /* Performance rows sit below the network block: they are the settings people
    revisit, and they must not push the allowlist off the top of the sheet. */
-static const CGFloat kRowFrameRate = 28;
-static const CGFloat kRowQuality   = 2;
+static const CGFloat kRowFrameRate = 54;
+static const CGFloat kRowQuality   = 28;
+static const CGFloat kRowEncrypt   = 2;
 
 static const NSInteger kCustomAddressLabelTag = 9101;
 static const NSInteger kCustomAddressFieldTag = 9102;
@@ -88,6 +90,7 @@ typedef struct {
     __unsafe_unretained NSArray<NSDictionary *> *networkRows;
     int captureFPS;
     __unsafe_unretained NSString *imageProfileName;
+    __unsafe_unretained NSString *encryptionName;
 } MacVNCPreferencesValues;
 
 @interface MacVNCPreferencesForm : NSObject
@@ -99,6 +102,7 @@ typedef struct {
 @property (nonatomic, retain) NSTextView *allowedText;
 @property (nonatomic, retain) NSPopUpButton *frameRatePopup;
 @property (nonatomic, retain) NSPopUpButton *imageQualityPopup;
+@property (nonatomic, retain) NSPopUpButton *encryptionPopup;
 @end
 
 @implementation MacVNCPreferencesForm
@@ -112,6 +116,7 @@ typedef struct {
     [_allowedText release];
     [_frameRatePopup release];
     [_imageQualityPopup release];
+    [_encryptionPopup release];
     [super dealloc];
 }
 @end
@@ -310,8 +315,28 @@ typedef struct {
     }
     [qualityPopup selectItemWithTag:selectedQuality];
 
+    /* Encryption is a SERVER policy, not a per-viewer preference: the client
+       picks the security type, and it always picks the unencrypted one, so
+       refusing is the only reliable lever. */
+    NSTextField *encryptLabel = [NSTextField labelWithString:@"Encryption:"];
+    encryptLabel.frame = NSMakeRect(kColLabelX, kRowEncrypt + 2, 150, kRowHeight);
+    encryptLabel.toolTip = @"macVNC always offers TLS, but the viewer chooses, and "
+                            "most viewers choose the unencrypted path. Requiring "
+                            "encryption refuses viewers that will not use TLS.";
+    NSPopUpButton *encryptPopup = [[[NSPopUpButton alloc]
+        initWithFrame:NSMakeRect(kColCtrlX, kRowEncrypt, 360, 26) pullsDown:NO] autorelease];
+    NSInteger selectedEncryption = 0;
+    for (size_t i = 0; i < macVNCEncryptionLadderCount(); ++i) {
+        [encryptPopup addItemWithTitle:@(macVNCEncryptionLadderTitle(i))];
+        encryptPopup.lastItem.tag = (NSInteger)i;
+        if (!strcmp(macVNCEncryptionLadderName(i), values.encryptionName.UTF8String))
+            selectedEncryption = (NSInteger)i;
+    }
+    [encryptPopup selectItemWithTag:selectedEncryption];
+
     [form addSubview:rateLabel]; [form addSubview:ratePopup];
     [form addSubview:qualityLabel]; [form addSubview:qualityPopup];
+    [form addSubview:encryptLabel]; [form addSubview:encryptPopup];
 
     [form addSubview:portLabel]; [form addSubview:portField];
     [form addSubview:pwdLabel]; [form addSubview:pwdField];
@@ -331,6 +356,7 @@ typedef struct {
     result.allowedText = allowedText;
     result.frameRatePopup = ratePopup;
     result.imageQualityPopup = qualityPopup;
+    result.encryptionPopup = encryptPopup;
     return result;
 }
 
@@ -407,7 +433,8 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
                                      MacVNCAllowlistPlan *plan,
                                      BOOL allowAllConfirmed,
                                      int captureFPS,
-                                     NSString *imageProfileName)
+                                     NSString *imageProfileName,
+                                     NSString *encryptionName)
 {
     /* Plaintext in defaults, by explicit request; also clears any older
        Keychain copy. */
@@ -431,6 +458,9 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
     MacVNCImageProfile parsedProfile;
     if (macVNCParseImageProfile(imageProfileName.UTF8String, &parsedProfile))
         [defaults setObject:imageProfileName forKey:MacVNCKeyImageProfile];
+    MacVNCEncryptionPolicy parsedEncryption;
+    if (macVNCParseEncryptionPolicy(encryptionName.UTF8String, &parsedEncryption))
+        [defaults setObject:encryptionName forKey:MacVNCKeyEncryption];
 
     [defaults synchronize];
 }
@@ -448,6 +478,8 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
         captureFPS = MACVNC_CAPTURE_FPS_DEFAULT;
     NSString *imageProfileName = [defaults stringForKey:MacVNCKeyImageProfile]
                                  ?: @(MACVNC_IMAGE_PROFILE_DEFAULT_NAME);
+    NSString *encryptionName = [defaults stringForKey:MacVNCKeyEncryption]
+                               ?: @(MACVNC_ENCRYPTION_DEFAULT_NAME);
     NSArray<NSDictionary *> *networkRows = macVNCActiveNetworkRows();
     NSString *manualAllowed = macVNCManualAllowedText(
         currentAllowed, [defaults stringForKey:MacVNCKeyAutoAllowedClients]);
@@ -461,6 +493,7 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
         .networkRows = networkRows,
         .captureFPS = captureFPS,
         .imageProfileName = imageProfileName,
+        .encryptionName = encryptionName,
     };
     MacVNCPreferencesForm *form = [self buildFormWithValues:values];
 
@@ -483,6 +516,11 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
         macVNCImageProfileLadderName((size_t)form.imageQualityPopup.selectedItem.tag);
     NSString *newImageProfile = ladderName ? @(ladderName)
                                            : @(MACVNC_IMAGE_PROFILE_DEFAULT_NAME);
+    const char *encryptionLadderName =
+        macVNCEncryptionLadderName((size_t)form.encryptionPopup.selectedItem.tag);
+    NSString *newEncryption = encryptionLadderName
+                                  ? @(encryptionLadderName)
+                                  : @(MACVNC_ENCRYPTION_DEFAULT_NAME);
 
     NSString *newMode = nil, *newAddress = nil, *autoCIDR = nil;
     macVNCDecodeListenSelection(form.listenPopup.selectedItem.tag,
@@ -553,7 +591,7 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
 
     macVNCPersistPreferences(defaults, newPort, form.pwdField.stringValue,
                              newMode, newAddress, plan, newAllowAll,
-                             newCaptureFPS, newImageProfile);
+                             newCaptureFPS, newImageProfile, newEncryption);
 }
 
 @end
