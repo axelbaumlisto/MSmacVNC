@@ -6,8 +6,58 @@
 #import "ScreenCapturer.h"
 #import "FirstFrameBudget.h"
 
+#include <stdatomic.h>
+#include <pthread.h>
+
 /* Capturers for the current run; nil between runs. */
 static NSMutableArray<ScreenCapturer *> *gCapturers;
+
+/*
+ * Guards gCapturers for Build, Reset and SetSelfExcluded - and for NOTHING
+ * else. The client-thread readers (Start, StopAndWait, WaitForFirstFrames,
+ * Count) stay lock-free on the argument the header makes: they are joined
+ * before a writer runs. SetSelfExcluded is not, because the curtain calls it
+ * from the MAIN thread, which rfbShutdownServer never joins, so "lift the
+ * curtain" can overlap "stop the server" - and [gCapturers copy] racing
+ * [gCapturers release] is a retain of freed memory.
+ *
+ * A leaf lock: taken after serverLifecycleMutex, never held while messaging a
+ * capturer, and never held across -[ScreenCapturer dealloc], which can wait
+ * (bounded) for a sample queue to drain.
+ */
+static pthread_mutex_t gCapturersMutex = PTHREAD_MUTEX_INITIALIZER;
+
+/*
+ * Moves the list out of the global under the lock and hands ownership to the
+ * caller, which releases it OUTSIDE the lock. Splitting it this way is what
+ * keeps the critical section down to a pointer swap: releasing inside would
+ * block the main thread's curtain request behind a capturer's bounded drain.
+ */
+static NSMutableArray<ScreenCapturer *> *detachCapturers(void)
+{
+    pthread_mutex_lock(&gCapturersMutex);
+    NSMutableArray<ScreenCapturer *> *detached = gCapturers;   /* +1 moves out */
+    gCapturers = nil;
+    pthread_mutex_unlock(&gCapturersMutex);
+    return detached;
+}
+
+static void installCapturers(NSMutableArray<ScreenCapturer *> *capturers)
+{
+    pthread_mutex_lock(&gCapturersMutex);
+    gCapturers = [capturers retain];
+    pthread_mutex_unlock(&gCapturersMutex);
+}
+
+/* A snapshot that keeps every stream alive for as long as the caller holds it,
+   so a Reset running concurrently cannot free a capturer mid-request. */
+static NSArray<ScreenCapturer *> *copyCapturers(void)
+{
+    pthread_mutex_lock(&gCapturersMutex);
+    NSArray<ScreenCapturer *> *snapshot = [gCapturers copy];   /* +1 */
+    pthread_mutex_unlock(&gCapturersMutex);
+    return snapshot;
+}
 
 /*
  * Upper bound on dirty rectangles taken from one frame. Past this many, the
@@ -68,18 +118,20 @@ extractDirtyRects(CMSampleBufferRef sampleBuffer,
 void macVNCCaptureSessionReset(void)
 {
   @autoreleasepool {
+    /* Unpublish first, under the lock; everything after this point works on a
+       list nobody else can reach. */
+    NSMutableArray<ScreenCapturer *> *detached = detachCapturers();
     /* A capturer whose work never quiesced is dropped from the set but NOT
        released: freeing its queues would be a use-after-free from the callback
        still running inside it. Leaking one on an already-degraded shutdown is
        cheaper than a crash. See -[ScreenCapturer isSafeToDeallocate]. */
-    for (ScreenCapturer *capturer in gCapturers) {
+    for (ScreenCapturer *capturer in detached) {
         if (![capturer isSafeToDeallocate]) {
             [capturer retain];  /* ownership moves to the deliberate leak */
             NSLog(@"macVNC: leaking a capturer with stuck capture work");
         }
     }
-    [gCapturers release];
-    gCapturers = nil;
+    [detached release];
   }
 }
 
@@ -167,7 +219,7 @@ bool macVNCCaptureSessionBuild(const MacVNCDisplayLayout *layout,
         [capturer release];
     }
 
-    gCapturers = [built retain];
+    installCapturers(built);
     return true;
   }
 }
@@ -197,6 +249,97 @@ void macVNCCaptureSessionStopAndWait(void)
     for (ScreenCapturer *capturer in gCapturers)
         [capturer stopCaptureAndWait];
     }
+}
+
+/*
+ * One exclusion request fanned out over every stream.
+ *
+ * It exists because the answer is "did they ALL confirm", and because the
+ * request must survive its own callers: it is retained by each per-stream
+ * completion block and by the group's notify block, and freed when the last of
+ * them is destroyed. A ScreenCaptureKit completion that never fires therefore
+ * leaks this one small object rather than freeing it under a callback that may
+ * still run - the same trade the capturer itself makes for stuck work.
+ */
+@interface MacVNCCaptureExclusionRequest : NSObject
+@end
+
+@implementation MacVNCCaptureExclusionRequest {
+    MacVNCCaptureExclusionCompletion _completion;
+    void *_context;
+    _Atomic bool _anyFailed;
+}
+
+- (instancetype)initWithCompletion:(MacVNCCaptureExclusionCompletion)completion
+                           context:(void *)context
+{
+    if ((self = [super init])) {
+        _completion = completion;
+        _context = context;
+        atomic_init(&_anyFailed, false);
+    }
+    return self;
+}
+
+- (void)noteStreamFailed
+{
+    atomic_store(&_anyFailed, true);
+}
+
+/*
+ * Called from the group's notify block and from nowhere else, which is what
+ * makes "exactly one answer per request" true - dispatch_group_notify fires its
+ * block once. There is deliberately no once-only guard here: it would be code
+ * no test could reach, and this module owns no timeout that could race the
+ * notify. Anyone adding a SECOND way to resolve a request (a deadline here, a
+ * cancel path) must add that guard back with a test that fires both.
+ */
+- (void)reportCompletion
+{
+    if (_completion)
+        _completion(_context, !atomic_load(&_anyFailed));
+}
+
+@end
+
+void macVNCCaptureSessionSetSelfExcluded(bool excluded,
+                                         MacVNCCaptureExclusionCompletion completion,
+                                         void *context)
+{
+  @autoreleasepool {
+    /* Snapshot under the lock, then work on it unlocked: the copy retains every
+       stream, so a concurrent Reset can free the LIST without freeing anything
+       this request is about to message. */
+    NSArray<ScreenCapturer *> *capturers = [copyCapturers() autorelease];
+    if (capturers.count == 0) {
+        /* No live stream is a FAILURE for this request, not a vacuous success:
+           see the header. Still on the main queue, like every other outcome. */
+        if (completion)
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(context, false);
+            });
+        return;
+    }
+
+    MacVNCCaptureExclusionRequest *request =
+        [[MacVNCCaptureExclusionRequest alloc] initWithCompletion:completion
+                                                         context:context];
+    dispatch_group_t group = dispatch_group_create();
+    for (ScreenCapturer *capturer in capturers) {
+        dispatch_group_enter(group);
+        [capturer setExcludesOwnApplication:(excluded ? YES : NO)
+                          completionHandler:^(BOOL streamSucceeded) {
+            if (!streamSucceeded)
+                [request noteStreamFailed];
+            dispatch_group_leave(group);
+        }];
+    }
+    dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+        [request reportCompletion];
+    });
+    dispatch_release(group);
+    [request release];   /* the blocks above hold their own references */
+  }
 }
 
 bool macVNCCaptureSessionWaitForFirstFrames(uint64_t timeoutNanoseconds)

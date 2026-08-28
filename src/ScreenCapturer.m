@@ -29,6 +29,11 @@ static const void * const kMacVNCStateQueueKey = &kMacVNCStateQueueKey;
 
 @property (nonatomic, assign) CGDirectDisplayID displayID;
 @property (nonatomic, strong) SCStream *stream;
+/* Captured from the discovery this stream already does at start, so a later
+   content-filter swap needs no SCShareableContent round trip of its own.
+   Both are read and written on stateQueue only. */
+@property (nonatomic, strong) SCDisplay *captureDisplay;
+@property (nonatomic, strong) SCRunningApplication *ownApplication;
 @property (nonatomic, strong) dispatch_queue_t stateQueue;
 @property (nonatomic, strong) dispatch_queue_t frameQueue;
 @property (nonatomic, strong) dispatch_queue_t sampleHandlerQueue;
@@ -160,6 +165,7 @@ static void endMailboxActivity(void *context)
     config.queueDepth = 2;
     config.pixelFormat = kCVPixelFormatType_32BGRA;
 
+    self.captureDisplay = display;
     SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
     SCStream *stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:self];
     [filter release];
@@ -230,6 +236,21 @@ static void endMailboxActivity(void *context)
                     dispatch_group_leave(self.operationGroup);
                     return;
                 }
+                /* Our own SCRunningApplication, taken from the list this call
+                   already returned: it is the only way to name ourselves to
+                   -initWithDisplay:excludingApplications:, and taking it here
+                   keeps a later curtain raise free of a second round trip.
+                   Absent (we own no window yet) means an exclusion request
+                   refuses rather than guesses. */
+                pid_t ownProcessID = getpid();
+                NSUInteger applicationIndex = [content.applications indexOfObjectPassingTest:^BOOL(
+                    SCRunningApplication *_Nonnull application, NSUInteger idx, BOOL *_Nonnull stop) {
+                    return application.processID == ownProcessID;
+                }];
+                self.ownApplication = applicationIndex == NSNotFound
+                    ? nil
+                    : content.applications[applicationIndex];
+
                 [self beginStreamingWithDisplay:content.displays[displayIndex]
                                            generation:generation];
             });
@@ -250,6 +271,8 @@ static void endMailboxActivity(void *context)
         pthread_mutex_unlock(&self->_readinessMutex);
         stream = [self.stream retain];
         self.stream = nil;
+        self.captureDisplay = nil;
+        self.ownApplication = nil;
         /* Keep the group nonzero from invalidation through definitive stream
            stop and the owned callback queue drain. */
         if (stream)
@@ -284,6 +307,51 @@ static void endMailboxActivity(void *context)
         atomic_store(&_stuckWork, true);
     }
     [stream release];
+}
+
+- (void)setExcludesOwnApplication:(BOOL)excluded
+                completionHandler:(void (^)(BOOL success))completionHandler
+{
+    /* stateQueue owns stream/display/application, so the decision is made where
+       a concurrent stop cannot half-apply it. */
+    dispatch_async(self.stateQueue, ^{
+      @autoreleasepool {
+        SCStream *stream = self.stream;
+        SCDisplay *display = self.captureDisplay;
+        SCRunningApplication *application = self.ownApplication;
+        if (!stream || !display || (excluded && !application)) {
+            NSLog(@"macVNC: cannot %s own windows for display %u "
+                  @"(stream %s, display %s, application %s)",
+                  excluded ? "exclude" : "restore", self.displayID,
+                  stream ? "yes" : "no", display ? "yes" : "no",
+                  application ? "yes" : "no");
+            if (completionHandler)
+                completionHandler(NO);
+            return;
+        }
+
+        /* By application, never by window: a window-based filter would have to
+           enumerate a window that is on screen, forcing the curtain to be shown
+           before the stream stops carrying it. */
+        SCContentFilter *filter = excluded
+            ? [[SCContentFilter alloc] initWithDisplay:display
+                                 excludingApplications:@[ application ]
+                                      exceptingWindows:@[]]
+            : [[SCContentFilter alloc] initWithDisplay:display
+                                      excludingWindows:@[]];
+        /* Swap on the RUNNING stream - never a stop/start. */
+        [stream updateContentFilter:filter completionHandler:^(NSError *error) {
+          @autoreleasepool {
+            if (error)
+                NSLog(@"macVNC: content filter update failed for display %u: %@",
+                      self.displayID, error.description);
+            if (completionHandler)
+                completionHandler(error == nil);
+          }
+        }];
+        [filter release];
+      }
+    });
 }
 
 /*
@@ -491,6 +559,8 @@ static void endMailboxActivity(void *context)
         macVNCFrameMailboxDestroy(&_frameMailbox);
     pthread_cond_destroy(&_readinessCondition);
     pthread_mutex_destroy(&_readinessMutex);
+    [_captureDisplay release];
+    [_ownApplication release];
     [_stream release];
     [_frameHandler release];
     [_errorHandler release];
