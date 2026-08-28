@@ -1,7 +1,7 @@
 #import <Foundation/Foundation.h>
-#import <CoreGraphics/CoreGraphics.h>
 #import <CoreMedia/CoreMedia.h>
 #import "MacVNCCaptureSession.h"
+#import "TestDisplayLayout.h"
 #import "DisplayLayout.h"
 #import "FirstFrameBudget.h"
 
@@ -41,17 +41,11 @@ int main(void)
     @autoreleasepool {
         macVNCCaptureSessionReset();
 
-        CGDirectDisplayID ids[8]; CGDisplayCount n = 0;
-        assert(CGGetActiveDisplayList(8, ids, &n) == kCGErrorSuccess);
-        assert(n > 0);
-
-        MacVNCDisplayInput in = { .displayID = ids[0] };
-        in.logicalWidth = (double)CGDisplayPixelsWide(ids[0]);
-        in.logicalHeight = (double)CGDisplayPixelsHigh(ids[0]);
-        in.pixelWidth = (int)CGDisplayPixelsWide(ids[0]);
-        in.pixelHeight = (int)CGDisplayPixelsHigh(ids[0]);
         MacVNCDisplayLayout layout;
-        assert(macVNCBuildDisplayLayout(&in, 1, &layout));
+        if (!testBuildSingleDisplayLayout(&layout)) {
+            puts("test_capture_restart: SKIP (no usable display)");
+            return 77;
+        }
         assert(macVNCCaptureSessionBuild(&layout, 5, acceptFrame, noteFailure));
 
         /* Round 1: start, expect frames. */

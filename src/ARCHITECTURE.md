@@ -96,6 +96,11 @@ Objective-C glue:
   for the whole encode-and-write, so waiting would let one stalled viewer
   freeze the screen for all clients. A refused frame must be re-submitted, not
   dropped.
+- **MacVNCSweepSchedule** — decides when a display must be composited in full
+  regardless of the dirty hint (`macVNCSweepScheduleDueAt`). Pure, so the
+  safety net under the hint is tested directly: first frame always sweeps, the
+  deadline is inclusive, a display that went quiet owes ONE sweep rather than
+  a burst, and a missing schedule fails safe by sweeping.
 - **MacVNCCaptureSession** — owns ScreenCaptureKit. Builds one stream per
   display from a `MacVNCDisplayLayout`, unwraps each `CMSampleBuffer` to plain
   BGRA pixels, reads the frame's dirty-rectangle metadata into a
@@ -129,7 +134,10 @@ back to `macVNCCompositeDisplayFrame`, the full sweep.
    sweep.
 4. **Every display is swept in full every 5 seconds regardless.** If a hint
    ever under-reports, the next sweep repairs the region rather than leaving a
-   permanent hole.
+   permanent hole. That schedule is `MacVNCSweepSchedule`, a pure module rather
+   than a timestamp inside the capture callback: it is the rule that makes
+   trusting a hint safe, so it is worth being able to test it without a live
+   capture stream.
 
 Verified empirically, not just by construction: a temporary audit ran a FULL
 sweep immediately after each hinted composite over the same pixels and counted
@@ -174,7 +182,7 @@ pixels rather than points.
 
 ## Tests
 
-`ctest` runs 32 targets (the number is enforced: `architecture_doc` compares
+`ctest` runs 33 targets (the number is enforced: `architecture_doc` compares
 this sentence against CMakeLists.txt's `add_test` count, so a target added or
 commented out fails the suite until this line is updated deliberately). Every
 assertion added here is checked by mutating the source and confirming the test

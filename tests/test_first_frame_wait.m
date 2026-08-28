@@ -16,7 +16,6 @@
  * time, not on the outcome.
  */
 
-#import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
 
 #include <assert.h>
@@ -24,8 +23,8 @@
 #include <stdatomic.h>
 #include <stdio.h>
 
-#import "DisplayLayout.h"
 #import "MacVNCCaptureSession.h"
+#import "TestDisplayLayout.h"
 
 static bool
 acceptFrame(const MacVNCDisplayGeometry *geometry, const uint8_t *pixels,
@@ -58,23 +57,9 @@ main(void)
     @autoreleasepool {
         macVNCCaptureSessionReset();
 
-        CGDirectDisplayID ids[8];
-        CGDisplayCount displayCount = 0;
-        if (CGGetActiveDisplayList(8, ids, &displayCount) != kCGErrorSuccess ||
-            displayCount == 0) {
-            puts("test_first_frame_wait: SKIP (no displays)");
-            return 77;
-        }
-
-        MacVNCDisplayInput input = { .displayID = ids[0] };
-        input.logicalWidth = (double)CGDisplayPixelsWide(ids[0]);
-        input.logicalHeight = (double)CGDisplayPixelsHigh(ids[0]);
-        input.pixelWidth = (int)CGDisplayPixelsWide(ids[0]);
-        input.pixelHeight = (int)CGDisplayPixelsHigh(ids[0]);
-
         MacVNCDisplayLayout layout;
-        if (!macVNCBuildDisplayLayout(&input, 1, &layout)) {
-            puts("test_first_frame_wait: SKIP (no usable display layout)");
+        if (!testBuildSingleDisplayLayout(&layout)) {
+            puts("test_first_frame_wait: SKIP (no usable display)");
             return 77;
         }
 
