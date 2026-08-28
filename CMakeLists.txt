@@ -53,6 +53,8 @@ set(SOURCE_FILES
     src/MacVNCEncryptionPolicy.c
     src/MacVNCImageProfile.c
     src/MacVNCSweepSchedule.c
+    src/MacVNCCurtainPolicy.h
+    src/MacVNCCurtainPolicy.c
     src/PointerState.h
     src/PointerState.c
     src/KeyboardModifierState.h
@@ -225,6 +227,11 @@ if(BUILD_TESTING)
     src/MacVNCSweepSchedule.c)
     target_include_directories(test_sweep_schedule PRIVATE src)
     add_test(NAME sweep_schedule COMMAND test_sweep_schedule)
+
+    add_executable(test_curtain_policy tests/test_curtain_policy.c
+                   src/MacVNCCurtainPolicy.c)
+    target_include_directories(test_curtain_policy PRIVATE src)
+    add_test(NAME curtain_policy COMMAND test_curtain_policy)
 
     add_executable(test_compositor tests/test_compositor.c src/CompositeFramebuffer.c)
     target_include_directories(test_compositor PRIVATE src)
