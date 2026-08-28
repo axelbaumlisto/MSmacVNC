@@ -89,21 +89,39 @@ int main(void)
            leaving must STOP them. Without this witness, deleting the stop
            branch wholesale leaves every target green while captures (and the
            macOS capture indicator) run forever with nobody watching. */
+        /* The last client leaving does NOT stop captures immediately anymore:
+           they stay warm for a keep-warm window (quick reconnects must not pay
+           the SCK warm-up - the two-device checkerboard incident). Set a tiny
+           window and wait for the delayed stop. */
         atomic_store(&vncConnectedClients, 0);
         macVNCReconcileCaptureForTesting();
-        assert(macVNCCaptureStopCountForTesting() == 1);
+        assert(macVNCCaptureStopCountForTesting() == 0); /* not yet: warm */
 
-        /* Idempotent in both directions: a reconcile with nobody connected
-           must not stop again, one with a client must not start again. */
+        /* Reconnect INSIDE the window must cancel the stop entirely: captures
+           keep running - no new start (they never stopped), no stop fired. */
+        atomic_store(&vncConnectedClients, 1);
         macVNCReconcileCaptureForTesting();
+        assert(macVNCCaptureStartCountForTesting() == 1); /* warm reuse */
+        assert(macVNCCaptureStopCountForTesting() == 0);
+
+        /* Second disconnect: schedule stop with a 200ms window and wait it out. */
+        macVNCSetCaptureKeepWarmForTesting(200ULL * 1000 * 1000);
+        atomic_store(&vncConnectedClients, 0);
+        macVNCReconcileCaptureForTesting();
+        for (int i = 0; i < 40 && macVNCCaptureStopCountForTesting() == 0; ++i)
+            usleep(50000); /* up to 2s */
         assert(macVNCCaptureStopCountForTesting() == 1);
 
+        /* After the warm stop, a new client starts captures again. */
         atomic_store(&vncConnectedClients, 1);
         macVNCReconcileCaptureForTesting();
         assert(macVNCCaptureStartCountForTesting() == 2);
 
+        macVNCSetCaptureKeepWarmForTesting(200ULL * 1000 * 1000);
         atomic_store(&vncConnectedClients, 0);
         macVNCReconcileCaptureForTesting();
+        for (int i = 0; i < 40 && macVNCCaptureStopCountForTesting() == 1; ++i)
+            usleep(50000);
         assert(macVNCCaptureStopCountForTesting() == 2);
         macVNCCaptureAllowed = NULL;
 

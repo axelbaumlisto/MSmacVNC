@@ -178,6 +178,8 @@ unsigned macVNCCaptureStartCountForTesting(void);
    for this direction, deleting the stop branch entirely leaves every target
    green with captures running forever after the last viewer disconnects. */
 unsigned macVNCCaptureStopCountForTesting(void);
+/* Override the keep-warm window (nanoseconds) for tests. */
+void macVNCSetCaptureKeepWarmForTesting(uint64_t ns);
 void macVNCResetCaptureStateForTesting(void);
 /* Runs the real start/stop reconciler for the current client count. */
 void macVNCReconcileCaptureForTesting(void);

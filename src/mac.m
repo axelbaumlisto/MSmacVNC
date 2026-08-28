@@ -105,6 +105,28 @@ static pthread_mutex_t clientLifecycleMutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t captureControlMutex = PTHREAD_MUTEX_INITIALIZER;
 static bool gCapturesRunning = false;
 
+/* Keep-warm window: after the last viewer leaves, captures are kept alive for
+   this long so a quick reconnect (unlock, second device, app switch) does not
+   pay the ScreenCaptureKit warm-up again - which showed up as the server
+   sending its placeholder checkerboard for seconds. The privacy indicator
+   stays lit during the window BY DESIGN; the hard stop still happens. */
+#define MACVNC_CAPTURE_KEEP_WARM_NANOSECONDS (30ULL * NSEC_PER_SEC)
+static _Atomic uint64_t gCaptureWarmDeadlineNs = 0; /* 0 = no pending stop */
+#if defined(MACVNC_ENABLE_TEST_HOOKS)
+static _Atomic uint64_t gCaptureKeepWarmOverrideNs = 0;
+void macVNCSetCaptureKeepWarmForTesting(uint64_t ns)
+{ atomic_store(&gCaptureKeepWarmOverrideNs, ns); }
+#endif
+static dispatch_queue_t gCaptureStopQueue;
+static void macVNCEnsureStopQueue(void)
+{
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        gCaptureStopQueue = dispatch_queue_create(
+            "net.christianbeier.macVNC.captureStop", DISPATCH_QUEUE_SERIAL);
+    });
+}
+
 /* Per-client bookkeeping. Only one fact needs remembering: whether this client
    has been counted towards vncConnectedClients, so a disconnect decrements
    exactly once. A three-state readiness machine used to live here too; every
@@ -480,6 +502,7 @@ static void reconcileCaptureState(void)
     pthread_mutex_lock(&captureControlMutex);
     bool wanted = atomic_load(&vncConnectedClients) > 0;
     if (wanted && !gCapturesRunning) {
+        atomic_store(&gCaptureWarmDeadlineNs, 0); /* reconnect beats the timer */
         if (captureIsAllowed()) {
             /* Awake-while-watched: the power assertions live as long as a
                viewer is connected, not as long as the LISTENER runs. With
@@ -504,15 +527,50 @@ static void reconcileCaptureState(void)
                 macVNCScreenCaptureFailureHandler(true, vncServerCurrentGeneration());
         }
     } else if (!wanted && gCapturesRunning) {
-        gCapturesRunning = false;
+        /* Keep warm: schedule the real stop 30s out. The decision here stays
+           instant and lock-consistent; the stop itself runs OFF the control
+           mutex (it waits seconds for in-flight SCK work). */
+        macVNCEnsureStopQueue();
 #if defined(MACVNC_ENABLE_TEST_HOOKS)
-        atomic_fetch_add(&gCaptureStopCount, 1);
+        uint64_t warm = atomic_load(&gCaptureKeepWarmOverrideNs);
+#else
+        uint64_t warm = MACVNC_CAPTURE_KEEP_WARM_NANOSECONDS;
 #endif
-        dimmingShutdown();
-        macVNCCaptureSessionStopAndWait();
-        macVNCInputResetModifiers();
-        rfbLog("Last authenticated client disconnected; %lu display captures stopped and modifiers reset\n",
-               (unsigned long)macVNCCaptureSessionCount());
+        uint64_t deadline = macVNCMonotonicNow() + warm;
+        atomic_store(&gCaptureWarmDeadlineNs, deadline);
+        __block dispatch_source_t timer = dispatch_source_create(
+            DISPATCH_SOURCE_TYPE_TIMER, 0, 0, gCaptureStopQueue);
+        dispatch_source_set_timer(timer,
+            dispatch_time(DISPATCH_TIME_NOW, (int64_t)warm),
+            DISPATCH_TIME_FOREVER, 0);
+        dispatch_source_set_event_handler(timer, ^{
+            dispatch_source_cancel(timer); /* one-shot */
+            dispatch_release(timer); /* cancel stops the runtime retain */
+            pthread_mutex_lock(&captureControlMutex);
+            bool due = atomic_load(&gCaptureWarmDeadlineNs) != 0 &&
+                       macVNCMonotonicNow() >=
+                           atomic_load(&gCaptureWarmDeadlineNs);
+            bool stillRunning = gCapturesRunning;
+            bool stillWanted = atomic_load(&vncConnectedClients) > 0;
+            if (due && stillRunning && !stillWanted) {
+                gCapturesRunning = false;
+                atomic_store(&gCaptureWarmDeadlineNs, 0);
+            } else {
+                due = false; /* reconnected meanwhile: keep warm wins */
+            }
+            pthread_mutex_unlock(&captureControlMutex);
+            if (!due)
+                return;
+#if defined(MACVNC_ENABLE_TEST_HOOKS)
+            atomic_fetch_add(&gCaptureStopCount, 1);
+#endif
+            dimmingShutdown();
+            macVNCCaptureSessionStopAndWait();
+            macVNCInputResetModifiers();
+            rfbLog("Capture keep-warm window elapsed; %lu display captures stopped\n",
+                   (unsigned long)macVNCCaptureSessionCount());
+        });
+        dispatch_resume(timer);
     }
     pthread_mutex_unlock(&captureControlMutex);
 }
@@ -683,6 +741,14 @@ void macVNCTLSHandleVeNCrypt(rfbClientPtr cl)
     /* Exported by the dylib; header is internal to libvncserver. After a
        successful init sockets.c transparently SSL-wraps this client's I/O. */
     extern int rfbssl_init(rfbClientPtr cl);
+    /* OpenSSL 3/4: SSL_library_init() inside rfbssl_init does NOT load the
+       config, and without it SSL_CTX ends up with an EMPTY cipher list
+       ("library has no ciphers"). Loading the default provider explicitly
+       populates the algorithm table - the fix that made handshakes pass. */
+    extern void *OSSL_PROVIDER_load(void *libctx, const char *name);
+    static void *defaultProvider = NULL;
+    if (!defaultProvider)
+        defaultProvider = OSSL_PROVIDER_load(NULL, "default");
     if (rfbssl_init(cl) < 0) {
         rfbErr("macVNC TLS: handshake failed\n");
         rfbCloseClient(cl);
@@ -773,6 +839,7 @@ vncServerStopLocked(void)
 
     pthread_mutex_lock(&captureControlMutex);
     gCapturesRunning = false;
+    atomic_store(&gCaptureWarmDeadlineNs, 0); /* full stop beats keep-warm */
     pthread_mutex_unlock(&captureControlMutex);
     macVNCCaptureSessionStopAndWait();
     macVNCCaptureSessionReset();
