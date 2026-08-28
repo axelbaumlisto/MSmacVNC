@@ -41,6 +41,7 @@ modules**, and keep the Objective-C layer as thin glue to macOS frameworks
                  │ NetworkPolicyResolver · FirstFrameBudget       │
                  │ FrameMailbox · PointerState                    │
                  │ KeyboardModifierState · CaptureRate · RFBKeySym│
+                 │ MacVNCCurtainPolicy                            │
                  └───────────────────────────────────────────────┘
 ```
 
@@ -120,6 +121,26 @@ Objective-C glue:
   compression level is fixed because levels 1-9 are byte-identical. On a
   rejected name the output is left untouched, so callers pre-load the default
   instead of restating it in every branch.
+- **MacVNCCurtainPolicy** — the way BACK from curtain mode: whether what the
+  person standing at the Mac typed lifts the curtain
+  (`macVNCCurtainPolicyFeed`). Pure, because the caller is a `CGEventTapCallBack`
+  behind a black screen: the module never sleeps, never allocates and never
+  reads a clock — the caller passes the monotonic timestamp in, and the throttle
+  after a wrong attempt is a CAPPED deadline it compares against, since a
+  blocking callback makes WindowServer disable the tap and an uncapped backoff
+  is indistinguishable from a lockout. It compares only the 8 effective bytes
+  VNC's DES auth keys itself from (`MACVNC_CURTAIN_SECRET_EFFECTIVE_BYTES`,
+  mirroring `MACVNC_VNC_PASSWORD_EFFECTIVE_MAX`), constant-time and with no
+  early exit; a full-string comparison would refuse a password the server
+  itself accepts. Its input is already-translated UTF-16 units, as
+  `CGEventKeyboardGetUnicodeString` produces them, buffered as UTF-8 BYTES so
+  the comparison agrees with the server on non-ASCII secrets. It refuses to arm
+  without a usable secret (`macVNCCurtainPolicyArm`) — deliberately breaking the
+  parser modules' leave-the-output-untouched rule, because here "untouched"
+  would mean a curtain still armed with a password the owner just cleared. The
+  typing buffer is fixed and cleared on every outcome, and
+  `macVNCCurtainPolicySecretChanged` is the seam for "any change to the secret
+  lifts the curtain".
 - **MacVNCSweepSchedule** — decides when a display must be composited in full
   regardless of the dirty hint (`macVNCSweepScheduleDueAt`). Pure, so the
   safety net under the hint is tested directly: first frame always sweeps, the
@@ -206,7 +227,7 @@ pixels rather than points.
 
 ## Tests
 
-`ctest` runs 35 targets (the number is enforced: `architecture_doc` compares
+`ctest` runs 36 targets (the number is enforced: `architecture_doc` compares
 this sentence against CMakeLists.txt's `add_test` count, so a target added or
 commented out fails the suite until this line is updated deliberately). Every
 assertion added here is checked by mutating the source and confirming the test
