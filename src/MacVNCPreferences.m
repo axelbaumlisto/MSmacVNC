@@ -71,6 +71,25 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
  * which value went where, and adding a sixth field meant touching the
  * signature, the declaration block and the assignment block in three places.
  */
+/*
+ * What the window is opened WITH.
+ *
+ * The builder had grown to eight parameters, which is the same problem this
+ * file already solved once for its outputs: at that count a call site says
+ * nothing about which value goes where, and adding a setting means editing a
+ * signature, a declaration block and an assignment block in three places.
+ */
+typedef struct {
+    int port;
+    __unsafe_unretained NSString *password;
+    __unsafe_unretained NSString *listenMode;
+    __unsafe_unretained NSString *listenAddress;
+    __unsafe_unretained NSString *manualAllowed;
+    __unsafe_unretained NSArray<NSDictionary *> *networkRows;
+    int captureFPS;
+    __unsafe_unretained NSString *imageProfileName;
+} MacVNCPreferencesValues;
+
 @interface MacVNCPreferencesForm : NSObject
 @property (nonatomic, retain) NSView *view;
 @property (nonatomic, retain) NSTextField *portField;
@@ -144,15 +163,15 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
 
 /* Builds the Preferences form, populated from the given values, and returns it
  * together with the controls the caller reads back after the modal. */
-- (MacVNCPreferencesForm *)buildFormForPort:(int)port
-                                   password:(NSString *)pwd
-                                currentMode:(NSString *)currentMode
-                             currentAddress:(NSString *)currentAddress
-                              manualAllowed:(NSString *)manualAllowed
-                                networkRows:(NSArray<NSDictionary *> *)networkRows
-                                 captureFPS:(int)captureFPS
-                           imageProfileName:(NSString *)imageProfileName
+- (MacVNCPreferencesForm *)buildFormWithValues:(MacVNCPreferencesValues)values
 {
+    const int port = values.port;
+    NSString *pwd = values.password;
+    NSString *currentMode = values.listenMode;
+    NSString *currentAddress = values.listenAddress;
+    NSString *manualAllowed = values.manualAllowed;
+    NSArray<NSDictionary *> *networkRows = values.networkRows;
+
     NSView *form = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, kFormWidth, kFormHeight)] autorelease];
 
     NSTextField *portLabel = [NSTextField labelWithString:@"Port:"];
@@ -262,11 +281,11 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
     }
     /* A rate set outside this list (by hand, or by a future default) must not
        silently become one of these - show it rather than lie about it. */
-    if (![ratePopup selectItemWithTag:captureFPS]) {
+    if (![ratePopup selectItemWithTag:values.captureFPS]) {
         [ratePopup addItemWithTitle:[NSString stringWithFormat:@"Custom - %d fps",
-                                                              captureFPS]];
-        ratePopup.lastItem.tag = captureFPS;
-        [ratePopup selectItemWithTag:captureFPS];
+                                                              values.captureFPS]];
+        ratePopup.lastItem.tag = values.captureFPS;
+        [ratePopup selectItemWithTag:values.captureFPS];
     }
 
     NSTextField *qualityLabel = [NSTextField labelWithString:@"Image quality:"];
@@ -275,30 +294,25 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
                            "level 0 uses about a third of the bandwidth of lossless.";
     NSPopUpButton *qualityPopup = [[[NSPopUpButton alloc]
         initWithFrame:NSMakeRect(kColCtrlX, kRowQuality, 360, 26) pullsDown:NO] autorelease];
-    /* Tags are indices into this table, so the popup and the stored NAME cannot
-       drift apart. Levels 8 and 9 are absent on purpose: each costs more bytes
-       than lossless while being worse than lossless. */
-    const char *const qualityNames[] = {
-        "viewer", "lossless", "7", "6", "5", "4", "3", "2", "1", "0"
-    };
-    const char *const qualityTitles[] = {
-        "Follow the viewer's own setting",
-        "Maximum - lossless, no JPEG",
-        "7 - sharpest JPEG",
-        "6",
-        "5 - balanced (recommended)",
-        "4",
-        "3",
-        "2",
-        "1",
-        "0 - smallest bandwidth",
-    };
-    NSInteger selectedQuality = 4; /* the recommended level */
-    for (size_t i = 0; i < sizeof(qualityNames) / sizeof(qualityNames[0]); ++i) {
-        [qualityPopup addItemWithTitle:@(qualityTitles[i])];
+    /* Tags are indices into the ladder that MacVNCImageProfile owns, so the
+       popup and the stored NAME cannot drift apart - this list used to exist
+       here AND in the save path. */
+    NSInteger selectedQuality = -1;
+    for (size_t i = 0; i < macVNCImageProfileLadderCount(); ++i) {
+        [qualityPopup addItemWithTitle:@(macVNCImageProfileLadderTitle(i))];
         qualityPopup.lastItem.tag = (NSInteger)i;
-        if (!strcmp(qualityNames[i], imageProfileName.UTF8String))
+        if (!strcmp(macVNCImageProfileLadderName(i), values.imageProfileName.UTF8String))
             selectedQuality = (NSInteger)i;
+    }
+    if (selectedQuality < 0) {
+        /* Stored value is not on the ladder (hand-edited, or a level we stopped
+           offering): fall back to the default rather than preselecting whatever
+           happens to be first. */
+        MacVNCImageProfile fallback = macVNCDefaultImageProfile();
+        for (size_t i = 0; i < macVNCImageProfileLadderCount(); ++i)
+            if (!strcmp(macVNCImageProfileLadderName(i),
+                        macVNCImageProfileName(fallback)))
+                selectedQuality = (NSInteger)i;
     }
     [qualityPopup selectItemWithTag:selectedQuality];
 
@@ -444,11 +458,17 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
     NSString *manualAllowed = macVNCManualAllowedText(
         currentAllowed, [defaults stringForKey:MacVNCKeyAutoAllowedClients]);
 
-    MacVNCPreferencesForm *form =
-        [self buildFormForPort:port password:pwd
-                   currentMode:currentMode currentAddress:currentAddress
-                 manualAllowed:manualAllowed networkRows:networkRows
-                    captureFPS:captureFPS imageProfileName:imageProfileName];
+    MacVNCPreferencesValues values = {
+        .port = port,
+        .password = pwd,
+        .listenMode = currentMode,
+        .listenAddress = currentAddress,
+        .manualAllowed = manualAllowed,
+        .networkRows = networkRows,
+        .captureFPS = captureFPS,
+        .imageProfileName = imageProfileName,
+    };
+    MacVNCPreferencesForm *form = [self buildFormWithValues:values];
 
     NSAlert *alert = [[[NSAlert alloc] init] autorelease];
     alert.messageText     = @"macVNC Preferences";
@@ -462,18 +482,13 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
 
     int newPort = form.portField.intValue;
 
-    /* Popup tags carry the values themselves, so nothing has to re-derive them
-       from the visible titles. */
+    /* Popup tags are ladder indices, so nothing has to re-derive a value from
+       the visible titles - and the ladder has exactly one definition. */
     int newCaptureFPS = (int)form.frameRatePopup.selectedItem.tag;
-    static const char *const kQualityNames[] = {
-        "viewer", "lossless", "7", "6", "5", "4", "3", "2", "1", "0"
-    };
-    NSInteger qualityIndex = form.imageQualityPopup.selectedItem.tag;
-    NSString *newImageProfile =
-        (qualityIndex >= 0 &&
-         qualityIndex < (NSInteger)(sizeof(kQualityNames) / sizeof(kQualityNames[0])))
-            ? @(kQualityNames[qualityIndex])
-            : @(MACVNC_IMAGE_PROFILE_DEFAULT_NAME);
+    const char *ladderName =
+        macVNCImageProfileLadderName((size_t)form.imageQualityPopup.selectedItem.tag);
+    NSString *newImageProfile = ladderName ? @(ladderName)
+                                           : @(MACVNC_IMAGE_PROFILE_DEFAULT_NAME);
 
     NSString *newMode = nil, *newAddress = nil, *autoCIDR = nil;
     macVNCDecodeListenSelection(form.listenPopup.selectedItem.tag,

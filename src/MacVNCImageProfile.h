@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 
 /*
  * How the server encodes pixels for a viewer.
@@ -78,3 +79,17 @@ MacVNCImageProfile macVNCDefaultImageProfile(void);
 
 /** Stable name for a profile, suitable for storing and logging. */
 const char *macVNCImageProfileName(MacVNCImageProfile profile);
+
+/*
+ * The ladder as the settings UI must present it, in order.
+ *
+ * It lives here because this module owns the vocabulary: the list existed twice
+ * in the Preferences file - once to build the popup and once to read it back -
+ * so adding an entry to one copy and not the other would have silently stored
+ * the wrong setting.
+ *
+ * `name` is what gets stored (and parses back); `title` is what the user reads.
+ */
+size_t macVNCImageProfileLadderCount(void);
+const char *macVNCImageProfileLadderName(size_t index);
+const char *macVNCImageProfileLadderTitle(size_t index);

@@ -42,6 +42,45 @@ macVNCParseImageProfile(const char *name, MacVNCImageProfile *profile)
     return true;
 }
 
+/*
+ * The one ladder. Order is what the popup shows: delegation first, then the
+ * best picture, then decreasing bandwidth. Levels 8 and 9 are absent because
+ * each sends more bytes than lossless while looking worse than lossless.
+ */
+static const struct {
+    const char *name;
+    const char *title;
+} kLadder[] = {
+    { "viewer",   "Follow the viewer's own setting" },
+    { "lossless", "Maximum - lossless, no JPEG" },
+    { "7",        "7 - sharpest JPEG" },
+    { "6",        "6" },
+    { "5",        "5 - balanced (recommended)" },
+    { "4",        "4" },
+    { "3",        "3" },
+    { "2",        "2" },
+    { "1",        "1" },
+    { "0",        "0 - smallest bandwidth" },
+};
+
+size_t
+macVNCImageProfileLadderCount(void)
+{
+    return sizeof(kLadder) / sizeof(kLadder[0]);
+}
+
+const char *
+macVNCImageProfileLadderName(size_t index)
+{
+    return index < macVNCImageProfileLadderCount() ? kLadder[index].name : NULL;
+}
+
+const char *
+macVNCImageProfileLadderTitle(size_t index)
+{
+    return index < macVNCImageProfileLadderCount() ? kLadder[index].title : NULL;
+}
+
 const char *
 macVNCImageProfileName(MacVNCImageProfile profile)
 {
