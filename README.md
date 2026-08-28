@@ -64,7 +64,8 @@ The app stores normal settings in macOS preferences. Use **Preferences…** from
 - VNC password;
 - listen mode: localhost, all interfaces, custom IPv4, or a selected active IPv4 network interface;
 - allowed client networks: checked active network rows plus manual IPv4/CIDR entries;
-- explicit allow-all mode.
+- explicit allow-all mode;
+- **frame rate** and **image quality** (see below).
 
 The network policy is IPv4-only in this version. The IPv6 listener is disabled in every mode until IPv6 allowlist semantics exist. Empty allowed-client lists are fail-closed unless **Allow all IPv4 clients** is explicitly checked.
 
@@ -78,6 +79,54 @@ Examples:
 
 Interfaces in `100.64.0.0/10` are labeled CGNAT/Tailscale-like, but the app does not call Tailscale or infer identity from that range. If you manually allow `100.64.0.0/10`, keep Tailscale ACLs as the primary security boundary.
 
+### Frame rate and image quality
+
+Both are measured settings, not preferences of taste. Numbers below come from
+this repository's own instruments (`tests/measure_felt_latency.sh` and
+`tests/reference_server.c`) on a two-display Mac; your link and content will
+move the absolute values, not the ordering.
+
+**Frame rate** is shared by every viewer: there is one ScreenCaptureKit stream
+per display, so it cannot be per-connection.
+
+| Setting | Delivered to a viewer | Server CPU |
+|---|---|---|
+| Battery saver — 8 fps | ~16 fps with two displays | lowest |
+| Balanced — 15 fps | ~24 fps | low |
+| **Smooth — 30 fps (default)** | **~33 fps, 30 ms average gap** | ~5.5 s per 15 s |
+| Maximum — 60 fps | ~30 fps, worse worst case | highest |
+
+60 fps is offered but measured no faster than 30 with worse tails, because the
+limit is encode and transfer rather than capture.
+
+**Image quality** is honestly a bandwidth control: across the whole JPEG range
+the delivered frame rate and CPU barely move, while bandwidth spans 1.9 to
+5.1 MB/s.
+
+| Setting | Bandwidth | Fidelity (PSNR on text) |
+|---|---|---|
+| Follow the viewer's own setting | whatever the device asks for | — |
+| Maximum — lossless, no JPEG | 5.7 MB/s, highest CPU | perfect |
+| 7 — sharpest JPEG | 5.1 MB/s | 35.7 dB |
+| 6 | 4.4 MB/s | 33.4 dB |
+| **5 — balanced (default)** | **3.8 MB/s** | **31.5 dB** |
+| 4 | 3.2 MB/s | 29.8 dB |
+| 3 | 2.6 MB/s | 28.5 dB |
+| 2 | 2.6 MB/s | 28.2 dB |
+| 1 | 2.1 MB/s | 27.3 dB |
+| 0 — smallest bandwidth | 1.9 MB/s | 25.4 dB |
+
+Levels 8 and 9 exist in the VNC protocol and are deliberately NOT offered: each
+sends MORE data than lossless while looking worse than lossless (level 9 costs
+2.45x the bytes of lossless). The Tight compression level is not offered either
+— levels 1 to 9 produce byte-identical output, and level 0 is 4.3x larger for
+the same pixels.
+
+macVNC applies the chosen level on top of what the viewer requests, because most
+viewers send their own and a setting that only applied to silent viewers would
+do nothing. Choose **Follow the viewer's own setting** to let each device decide
+for itself.
+
 Environment overrides remain for debug/headless launches:
 
 | Variable | Meaning | Example |
@@ -87,7 +136,13 @@ Environment overrides remain for debug/headless launches:
 | `MACVNC_PORT` | RFB port. | `5903` |
 | `MACVNC_DISPLAY` | `-2`: all active displays; `-1`: primary; `0+`: enumerated display index. | `-2` |
 | `MACVNC_PASSWORD_FILE` | UTF-8 file containing the VNC password. | `~/.config/macvnc/password` |
-| `MACVNC_CAPTURE_FPS` | Integer capture rate for every selected display and the global per-client framebuffer-send ceiling; allowed `1..60`, default `12`. | `12` |
+| `MACVNC_CAPTURE_FPS` | Integer capture rate for every selected display; allowed `1..60`, default `30`. Overrides the Preferences setting. | `30` |
+| `MACVNC_IMAGE_PROFILE` | `viewer`, `lossless`, or a level `0`..`7`. Overrides the Preferences setting. | `5` |
+
+A stored frame rate or image profile that cannot be parsed falls back to the
+default and logs it, because a hand-edited value must not make the Mac
+unreachable. The environment variables are stricter: they are typed
+deliberately, so an invalid one fails closed rather than being silently ignored.
 
 A non-empty invalid `MACVNC_CAPTURE_FPS`, invalid bind address, invalid allowed-client list, or missing password fails closed and opens no listener. The configured password path is also fail-closed: it must be a non-empty regular UTF-8 file owned by the current UID and inaccessible to group/others. Symlinks and special files are rejected.
 

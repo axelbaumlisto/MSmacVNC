@@ -1,4 +1,7 @@
 #import "MacVNCPreferences.h"
+
+#include "CaptureRate.h"
+#include "MacVNCImageProfile.h"
 #import "MacVNCDefaultsKeys.h"
 #import "MacVNCPassword.h"
 #import "MacVNCNetworkRows.h"
@@ -16,17 +19,21 @@ static const NSInteger kListenTagRowBase   = 1000; /* + interface row index */
    give a label column and a control column so the magic NSMakeRect numbers read
    as intent, not arbitrary constants. */
 static const CGFloat kFormWidth   = 520;
-static const CGFloat kFormHeight  = 236;
+static const CGFloat kFormHeight  = 272;
 static const CGFloat kColLabelX   = 0;
 static const CGFloat kColCtrlX    = 160;
 static const CGFloat kRowHeight   = 22;
-static const CGFloat kRowPort     = 206;
-static const CGFloat kRowListen   = 170;
-static const CGFloat kRowCustom   = 140;
-static const CGFloat kRowAllowed  = 110;
-static const CGFloat kRowManual   = 76;
-static const CGFloat kRowScroll   = 42;
-static const CGFloat kRowHint     = 18;
+static const CGFloat kRowPort     = 242;
+static const CGFloat kRowListen   = 206;
+static const CGFloat kRowCustom   = 176;
+static const CGFloat kRowAllowed  = 146;
+static const CGFloat kRowManual   = 112;
+static const CGFloat kRowScroll   = 78;
+static const CGFloat kRowHint     = 54;
+/* Performance rows sit below the network block: they are the settings people
+   revisit, and they must not push the allowlist off the top of the sheet. */
+static const CGFloat kRowFrameRate = 28;
+static const CGFloat kRowQuality   = 2;
 
 static const NSInteger kCustomAddressLabelTag = 9101;
 static const NSInteger kCustomAddressFieldTag = 9102;
@@ -71,6 +78,8 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
 @property (nonatomic, retain) NSPopUpButton *listenPopup;
 @property (nonatomic, retain) NSTextField *customField;
 @property (nonatomic, retain) NSTextView *allowedText;
+@property (nonatomic, retain) NSPopUpButton *frameRatePopup;
+@property (nonatomic, retain) NSPopUpButton *imageQualityPopup;
 @end
 
 @implementation MacVNCPreferencesForm
@@ -82,6 +91,8 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
     [_listenPopup release];
     [_customField release];
     [_allowedText release];
+    [_frameRatePopup release];
+    [_imageQualityPopup release];
     [super dealloc];
 }
 @end
@@ -139,6 +150,8 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
                              currentAddress:(NSString *)currentAddress
                               manualAllowed:(NSString *)manualAllowed
                                 networkRows:(NSArray<NSDictionary *> *)networkRows
+                                 captureFPS:(int)captureFPS
+                           imageProfileName:(NSString *)imageProfileName
 {
     NSView *form = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, kFormWidth, kFormHeight)] autorelease];
 
@@ -225,6 +238,73 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
     scroll.hasVerticalScroller = YES;
     scroll.borderType = NSBezelBorder;
 
+    /* Performance: one universal frame rate (there is one capture stream per
+       display shared by every viewer, so it cannot be per-connection) and one
+       image-quality ladder whose entries are measured, not a marketing scale.
+       Level 5 delivers MORE frames than level 7 - fewer bytes means less
+       encode and less transfer - so the items are labelled by what they
+       trade. */
+    NSTextField *rateLabel = [NSTextField labelWithString:@"Frame rate:"];
+    rateLabel.frame = NSMakeRect(kColLabelX, kRowFrameRate + 2, 150, kRowHeight);
+    rateLabel.toolTip = @"How often each display is captured. Higher is smoother "
+                        "and costs CPU; it is shared by every connected viewer.";
+    NSPopUpButton *ratePopup = [[[NSPopUpButton alloc]
+        initWithFrame:NSMakeRect(kColCtrlX, kRowFrameRate, 360, 26) pullsDown:NO] autorelease];
+    const struct { const char *title; int fps; } rates[] = {
+        { "Battery saver - 8 fps",  8 },
+        { "Balanced - 15 fps",     15 },
+        { "Smooth - 30 fps",       30 },
+        { "Maximum - 60 fps",      60 },
+    };
+    for (size_t i = 0; i < sizeof(rates) / sizeof(rates[0]); ++i) {
+        [ratePopup addItemWithTitle:@(rates[i].title)];
+        ratePopup.lastItem.tag = rates[i].fps;
+    }
+    /* A rate set outside this list (by hand, or by a future default) must not
+       silently become one of these - show it rather than lie about it. */
+    if (![ratePopup selectItemWithTag:captureFPS]) {
+        [ratePopup addItemWithTitle:[NSString stringWithFormat:@"Custom - %d fps",
+                                                              captureFPS]];
+        ratePopup.lastItem.tag = captureFPS;
+        [ratePopup selectItemWithTag:captureFPS];
+    }
+
+    NSTextField *qualityLabel = [NSTextField labelWithString:@"Image quality:"];
+    qualityLabel.frame = NSMakeRect(kColLabelX, kRowQuality + 2, 150, kRowHeight);
+    qualityLabel.toolTip = @"Higher quality sends more data. Measured on this Mac: "
+                           "level 0 uses about a third of the bandwidth of lossless.";
+    NSPopUpButton *qualityPopup = [[[NSPopUpButton alloc]
+        initWithFrame:NSMakeRect(kColCtrlX, kRowQuality, 360, 26) pullsDown:NO] autorelease];
+    /* Tags are indices into this table, so the popup and the stored NAME cannot
+       drift apart. Levels 8 and 9 are absent on purpose: each costs more bytes
+       than lossless while being worse than lossless. */
+    const char *const qualityNames[] = {
+        "viewer", "lossless", "7", "6", "5", "4", "3", "2", "1", "0"
+    };
+    const char *const qualityTitles[] = {
+        "Follow the viewer's own setting",
+        "Maximum - lossless, no JPEG",
+        "7 - sharpest JPEG",
+        "6",
+        "5 - balanced (recommended)",
+        "4",
+        "3",
+        "2",
+        "1",
+        "0 - smallest bandwidth",
+    };
+    NSInteger selectedQuality = 4; /* the recommended level */
+    for (size_t i = 0; i < sizeof(qualityNames) / sizeof(qualityNames[0]); ++i) {
+        [qualityPopup addItemWithTitle:@(qualityTitles[i])];
+        qualityPopup.lastItem.tag = (NSInteger)i;
+        if (!strcmp(qualityNames[i], imageProfileName.UTF8String))
+            selectedQuality = (NSInteger)i;
+    }
+    [qualityPopup selectItemWithTag:selectedQuality];
+
+    [form addSubview:rateLabel]; [form addSubview:ratePopup];
+    [form addSubview:qualityLabel]; [form addSubview:qualityPopup];
+
     [form addSubview:portLabel]; [form addSubview:portField];
     [form addSubview:pwdLabel]; [form addSubview:pwdField];
     [form addSubview:listenLabel]; [form addSubview:listenPopup];
@@ -241,6 +321,8 @@ static NSString *macVNCManualAllowedText(NSString *currentAllowed,
     result.listenPopup = listenPopup;
     result.customField = customField;
     result.allowedText = allowedText;
+    result.frameRatePopup = ratePopup;
+    result.imageQualityPopup = qualityPopup;
     return result;
 }
 
@@ -315,7 +397,9 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
                                      NSString *mode,
                                      NSString *address,
                                      MacVNCAllowlistPlan *plan,
-                                     BOOL allowAllConfirmed)
+                                     BOOL allowAllConfirmed,
+                                     int captureFPS,
+                                     NSString *imageProfileName)
 {
     /* Plaintext in defaults, by explicit request; also clears any older
        Keychain copy. */
@@ -331,6 +415,15 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
     [defaults setObject:[plan.autoAdded componentsJoinedByString:@"\n"]
                  forKey:MacVNCKeyAutoAllowedClients];
     [defaults setBool:allowAllConfirmed forKey:MacVNCKeyAllowAllConfirmed];
+
+    /* Validated here as well as at startup: a popup should never be able to
+       store a value the server would have to reject on the next launch. */
+    if (captureFPS >= MACVNC_CAPTURE_FPS_MIN && captureFPS <= MACVNC_CAPTURE_FPS_MAX)
+        [defaults setInteger:captureFPS forKey:MacVNCKeyCaptureFPS];
+    MacVNCImageProfile parsedProfile;
+    if (macVNCParseImageProfile(imageProfileName.UTF8String, &parsedProfile))
+        [defaults setObject:imageProfileName forKey:MacVNCKeyImageProfile];
+
     [defaults synchronize];
 }
 
@@ -342,6 +435,11 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
     NSString *currentMode = [defaults stringForKey:MacVNCKeyListenMode] ?: MacVNCListenModeLocalhost;
     NSString *currentAddress = [defaults stringForKey:MacVNCKeyListenAddress] ?: @"";
     NSString *currentAllowed = [defaults stringForKey:MacVNCKeyAllowedClients] ?: @"";
+    int captureFPS = (int)[defaults integerForKey:MacVNCKeyCaptureFPS];
+    if (captureFPS < MACVNC_CAPTURE_FPS_MIN || captureFPS > MACVNC_CAPTURE_FPS_MAX)
+        captureFPS = MACVNC_CAPTURE_FPS_DEFAULT;
+    NSString *imageProfileName = [defaults stringForKey:MacVNCKeyImageProfile]
+                                 ?: @(MACVNC_IMAGE_PROFILE_DEFAULT_NAME);
     NSArray<NSDictionary *> *networkRows = macVNCActiveNetworkRows();
     NSString *manualAllowed = macVNCManualAllowedText(
         currentAllowed, [defaults stringForKey:MacVNCKeyAutoAllowedClients]);
@@ -349,7 +447,8 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
     MacVNCPreferencesForm *form =
         [self buildFormForPort:port password:pwd
                    currentMode:currentMode currentAddress:currentAddress
-                 manualAllowed:manualAllowed networkRows:networkRows];
+                 manualAllowed:manualAllowed networkRows:networkRows
+                    captureFPS:captureFPS imageProfileName:imageProfileName];
 
     NSAlert *alert = [[[NSAlert alloc] init] autorelease];
     alert.messageText     = @"macVNC Preferences";
@@ -362,6 +461,19 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
         return;
 
     int newPort = form.portField.intValue;
+
+    /* Popup tags carry the values themselves, so nothing has to re-derive them
+       from the visible titles. */
+    int newCaptureFPS = (int)form.frameRatePopup.selectedItem.tag;
+    static const char *const kQualityNames[] = {
+        "viewer", "lossless", "7", "6", "5", "4", "3", "2", "1", "0"
+    };
+    NSInteger qualityIndex = form.imageQualityPopup.selectedItem.tag;
+    NSString *newImageProfile =
+        (qualityIndex >= 0 &&
+         qualityIndex < (NSInteger)(sizeof(kQualityNames) / sizeof(kQualityNames[0])))
+            ? @(kQualityNames[qualityIndex])
+            : @(MACVNC_IMAGE_PROFILE_DEFAULT_NAME);
 
     NSString *newMode = nil, *newAddress = nil, *autoCIDR = nil;
     macVNCDecodeListenSelection(form.listenPopup.selectedItem.tag,
@@ -431,7 +543,8 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
     }
 
     macVNCPersistPreferences(defaults, newPort, form.pwdField.stringValue,
-                             newMode, newAddress, plan, newAllowAll);
+                             newMode, newAddress, plan, newAllowAll,
+                             newCaptureFPS, newImageProfile);
 }
 
 @end
