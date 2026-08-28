@@ -28,6 +28,27 @@ macVNCParseCaptureFPS(const char *value, int *framesPerSecond)
     return MACVNC_CAPTURE_RATE_VALID;
 }
 
+/* Coalescing window: long enough to batch one frame's tiles, short enough to
+   be invisible. See the header for the measurements behind both bounds. */
+#define MACVNC_DEFER_TARGET_MILLISECONDS 10
+
+/* The window must never exceed the wait for the next frame. Rather than a
+   runtime clamp - which is unreachable while the fastest supported rate leaves
+   a 17 ms interval, and therefore untestable dead code - the relationship is
+   enforced here: raising MACVNC_CAPTURE_FPS_MAX past 100 breaks the build
+   instead of quietly making the defer the dominant delay. */
+_Static_assert(1000 / MACVNC_CAPTURE_FPS_MAX >= MACVNC_DEFER_TARGET_MILLISECONDS,
+               "defer window would exceed the capture interval at the maximum "
+               "supported frame rate");
+
+int
+macVNCFramebufferDeferMilliseconds(int framesPerSecond)
+{
+    if (macVNCCaptureFrameIntervalMilliseconds(framesPerSecond) == 0)
+        return 0; /* invalid rate: report it the same way its sibling does */
+    return MACVNC_DEFER_TARGET_MILLISECONDS;
+}
+
 int
 macVNCCaptureFrameIntervalMilliseconds(int framesPerSecond)
 {
