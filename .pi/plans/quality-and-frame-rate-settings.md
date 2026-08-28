@@ -79,6 +79,120 @@ for CPU and the network path is not real. Valid for A/B (both sides measured
 identically), invalid as "what the iPad sees". The real device is the final
 judge.
 
+
+## Measured results: what the ideal settings actually are
+
+Everything below is measured, and three earlier attempts at this measurement
+were thrown away because they were invalid. Recording that, because the traps
+are the reason to trust the final numbers:
+
+1. The probe saved the framebuffer after the first "update finished", which can
+   be an empty update - producing PURE BLACK images that an entire quality
+   sweep was then computed from. The tool now waits for the region's worth of
+   pixels and prints a content signature, so an empty capture cannot pass.
+2. The regions were picked by eye at (0,0), which is a solid black area of this
+   desktop. Regions are now chosen by measurement.
+3. Comparing codec settings against the LIVE desktop was meaningless: over the
+   ~60 s a sweep takes, 10-40% of every candidate region repainted, so the
+   "JPEG artefacts" were mostly content changes. Codec fidelity is now measured
+   against a static image served by a purpose-built libvncserver instance
+   (`/tmp/qserver.c`), which removes the desktop from the experiment.
+
+### Codec fidelity and size, static UI+photo image (1600x600)
+
+| setting | wire KB | vs lossless | PSNR text | PSNR photo | max error |
+|---|---|---|---|---|---|
+| lossless (JPEG off), compress 1-9 | 305 | 1.00x | perfect | perfect | 0 |
+| lossless, compress 0 | 1315 | 4.31x | perfect | perfect | 0 |
+| JPEG quality 9 | 748 | **2.45x** | 53.0 dB | 56.2 dB | 4 |
+| JPEG quality 7 | 261 | 0.86x | 35.7 dB | 39.1 dB | 52 |
+| JPEG quality 5 | 191 | 0.63x | 31.5 dB | 35.5 dB | 85 |
+| JPEG quality 2 | 124 | 0.42x | 28.2 dB | 31.3 dB | 90 |
+| JPEG quality 0 | 90 | 0.29x | 25.4 dB | 28.1 dB | 139 |
+
+Two conclusions that change the design:
+
+- **Quality 9 must never be offered.** It costs 2.45x MORE than lossless and is
+  still lossy. "Maximum quality" means JPEG OFF, not quality 9.
+- **The compression knob is inert and must not be exposed.** Levels 1 through 9
+  produce byte-identical output (305435 bytes every time, identical CPU). Only
+  level 0 differs, by being 4.3x larger for the same pixels. A setting whose
+  only working value is "not 0" is not a setting.
+
+### The same profiles on the LIVE desktop, 15 s streaming
+
+| profile | MB/s | server CPU-s | fps | mean gap | max gap |
+|---|---|---|---|---|---|
+| lossless | 9.4 | 7.29 | 6.0 | 169 ms | 221 ms |
+| quality 7 | 2.1 | 3.42 | 8.5 | 119 ms | 187 ms |
+| quality 5 | 1.7 | 3.26 | 7.9 | 127 ms | 200 ms |
+| quality 0 | 0.9 | 3.38 | 8.5 | 118 ms | 163 ms |
+
+Lossless wins on a static UI image and LOSES badly on a real desktop: 4.4x the
+bytes, 2.1x the CPU, and it costs frames. Real screens contain photographs,
+gradients and video, which is exactly what JPEG is for. So "maximum quality"
+belongs in the menu as an honest option, not as the default.
+
+### Pacing sweep: capture rate x defer, quality 7, two displays
+
+| capture | defer | CPU-s | fps | mean | p90 | p99 | max |
+|---|---|---|---|---|---|---|---|
+| 12 (today) | 84 (today) | 3.37 | 8.1 | 125 ms | 155 ms | 173 ms | 174 ms |
+| 12 | 20 | 4.09 | 12.1 | 83 ms | 93 ms | 113 ms | 322 ms |
+| 12 | 10 | 4.47 | 24.4 | 41 ms | 58 ms | 67 ms | **86 ms** |
+| 12 | 0 | 8.35 | 13.0 | 77 ms | 141 ms | 1395 ms | 2142 ms |
+| 30 | 84 | 5.18 | 7.3 | 139 ms | 186 ms | 352 ms | 387 ms |
+| 30 | 20 | 6.18 | 21.3 | 47 ms | 59 ms | 106 ms | 293 ms |
+| 30 | 10 | 5.99 | 30.9 | 33 ms | 42 ms | 76 ms | 112 ms |
+| 30 | 0 | 15.69 | 61.6 | 16 ms | 32 ms | 104 ms | 358 ms |
+| 60 | 84 | 4.85 | 5.5 | 185 ms | 266 ms | 2114 ms | 2114 ms |
+| 60 | 20 | 5.55 | 16.2 | 62 ms | 65 ms | 549 ms | 919 ms |
+| 60 | 10 | 6.70 | 30.5 | 33 ms | 45 ms | 114 ms | 445 ms |
+| 60 | 0 | 14.36 | 65.9 | 15 ms | 26 ms | 97 ms | 749 ms |
+
+- **The defer, not the capture rate, is what was crippling this.** Dropping it
+  from 84 ms to 10 ms at the CURRENT 12 FPS triples the delivered frame rate
+  (8.1 -> 24.4) and halves the worst case (174 -> 86 ms), for 33% more CPU.
+- **Defer 0 is a trap and must not be offered.** Frame rate looks spectacular
+  and the tail explodes: p99 of 1.4 s and a 2.1 s stall at 12 FPS, with CPU
+  doubling. Unbatched marking thrashes the update threads.
+- **60 FPS buys nothing over 30** - the same ~30 fps delivered, worse tails.
+- Two displays each mark independently, so 12 FPS capture can deliver ~24
+  updates/s. That is why 12/10 already feels smooth.
+
+### Combined sweep: best pacing x profile
+
+| capture/defer | profile | MB/s | CPU-s | fps | mean | p99 | max |
+|---|---|---|---|---|---|---|---|
+| 30/10 | lossless | 5.5 | 5.96 | 4.0 | 256 ms | 2086 ms | 2086 ms |
+| 30/10 | quality 7 | 6.0 | 6.52 | 26.9 | 37 ms | 158 ms | 353 ms |
+| 30/10 | quality 5 | 3.9 | 5.55 | **33.4** | **30 ms** | **53 ms** | 128 ms |
+| 30/10 | quality 2 | 2.9 | 5.71 | 31.3 | 32 ms | 68 ms | 131 ms |
+| 12/10 | lossless | 14.3 | 9.66 | 12.3 | 82 ms | 288 ms | 310 ms |
+| 12/10 | quality 7 | 3.3 | 4.15 | 17.8 | 56 ms | 100 ms | 105 ms |
+| 12/10 | quality 5 | 2.4 | 3.32 | 24.1 | 42 ms | 78 ms | **84 ms** |
+| 12/10 | quality 2 | 1.2 | 3.18 | 20.6 | 49 ms | 82 ms | 195 ms |
+
+### The settings this measurement argues for
+
+- **Default: capture 30 FPS, defer 10 ms, image quality 5.** Measured 33.4 fps,
+  mean gap 30 ms, p99 53 ms, 3.9 MB/s, 5.55 CPU-s per 15 s. That is 4x the
+  delivered frame rate and 4x lower latency than today, for CPU comparable to
+  the PRE-optimisation server.
+- **Quality 5 beats quality 7 on every axis here** - more frames, lower
+  latency, 35% fewer bytes - because fewer bytes means less time in encode and
+  transfer. Fidelity cost: 31.5 dB vs 35.7 dB on text.
+- **Battery/slow-link option: 12 FPS, defer 10 ms, quality 5** - 24 fps, mean
+  42 ms, best worst case of the whole matrix (84 ms), 2.4 MB/s, 3.32 CPU-s,
+  which is CHEAPER than today's 3.37 while delivering 3x the frames.
+- **Offer "Maximum quality (JPEG off)" honestly**, with its measured cost: it
+  drops to 4-12 fps and multiplies traffic. Right for reading a static page,
+  wrong as a default.
+- **Do not expose compression level, and do not offer quality 9 or defer 0.**
+
+The defer therefore stops being derived from the capture rate and becomes a
+fixed 10 ms coalescing window, as Task 2 already proposed - now with numbers.
+
 ## Approach
 
 1. Build the instrument first — nothing else can be accepted without it.
