@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.73 LANGUAGES C)
+project(macVNC VERSION 0.3.74 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -182,6 +182,12 @@ if(BUILD_TESTING)
     add_executable(test_display_layout tests/test_display_layout.c src/DisplayLayout.c)
     target_include_directories(test_display_layout PRIVATE src)
     add_test(NAME display_layout COMMAND test_display_layout)
+
+    # Not a test: a measuring instrument. Build with
+    #   cmake --build <dir> --target bench_composite && ./bench_composite
+    add_executable(bench_composite EXCLUDE_FROM_ALL
+                   tests/bench_composite.c src/CompositeFramebuffer.c)
+    target_include_directories(bench_composite PRIVATE src)
 
     add_executable(test_compositor tests/test_compositor.c src/CompositeFramebuffer.c)
     target_include_directories(test_compositor PRIVATE src)

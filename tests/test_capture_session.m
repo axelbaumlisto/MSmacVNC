@@ -10,7 +10,8 @@
 
 static bool acceptFrame(const MacVNCDisplayGeometry *geometry,
                         const uint8_t *pixels, size_t stride,
-                        int width, int height)
+                        int width, int height,
+                          const MacVNCDirtyHint *hint)
 {
     (void)geometry; (void)pixels; (void)stride; (void)width; (void)height;
     return true;
