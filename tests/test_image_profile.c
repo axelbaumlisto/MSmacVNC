@@ -78,6 +78,35 @@ main(void)
     assert(MACVNC_IMAGE_COMPRESS_LEVEL >= 1 &&
            MACVNC_IMAGE_COMPRESS_LEVEL <= 9);
 
+    /* The ladder is what Preferences shows AND what it stores, so every entry
+       must parse, and the stored name must survive the round trip. The list
+       used to exist twice in the UI file; these assertions are what make one
+       copy enough. */
+    size_t ladder = macVNCImageProfileLadderCount();
+    assert(ladder == 10);
+    assert(macVNCImageProfileLadderName(ladder) == NULL);
+    assert(macVNCImageProfileLadderTitle(ladder) == NULL);
+
+    int defaultsSeen = 0;
+    for (size_t i = 0; i < ladder; ++i) {
+        const char *name = macVNCImageProfileLadderName(i);
+        const char *title = macVNCImageProfileLadderTitle(i);
+        assert(name && title && *name && *title);
+        assert(macVNCParseImageProfile(name, &profile));
+        assert(!strcmp(macVNCImageProfileName(profile), name));
+        if (profile.kind == MacVNCImageProfileJPEG &&
+            profile.qualityLevel == MACVNC_IMAGE_QUALITY_DEFAULT)
+            ++defaultsSeen;
+    }
+    /* Exactly one entry is the default, so the popup always has something
+       to preselect and never two candidates. */
+    assert(defaultsSeen == 1);
+
+    /* Ordering matters: delegation first, best picture second - the UI relies
+       on it, and a reshuffle would silently change what "recommended" means. */
+    assert(!strcmp(macVNCImageProfileLadderName(0), "viewer"));
+    assert(!strcmp(macVNCImageProfileLadderName(1), "lossless"));
+
     puts("test_image_profile: all assertions passed");
     return 0;
 }
