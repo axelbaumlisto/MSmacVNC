@@ -315,6 +315,12 @@ buildClientAccessList(void)
 static MacVNCImageProfile gImageProfile;
 
 /*
+ * Whether an unencrypted viewer is admitted. Written once before
+ * rfbInitServer publishes the screen, read on client threads.
+ */
+static MacVNCEncryptionPolicy gEncryptionPolicy = MacVNCEncryptionOptional;
+
+/*
  * Impose the configured image profile just before this client's update is
  * encoded.
  *
@@ -390,7 +396,8 @@ reportCaptureFailure(bool likelyPermissionDenial)
 
 static rfbBool
 ScreenInit(int port, const char *password, int captureFramesPerSecond,
-           MacVNCImageProfile imageProfile)
+           MacVNCImageProfile imageProfile,
+           MacVNCEncryptionPolicy encryptionPolicy)
 {
   int bitsPerSample = 8;
 
@@ -482,6 +489,8 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond,
      transmission ceiling. Input processing and deferPtrUpdateTime are unchanged. */
   rfbScreen->deferUpdateTime = framebufferDeferMilliseconds;
 
+  gEncryptionPolicy = encryptionPolicy;
+  rfbLog("Encryption: %s\n", macVNCEncryptionPolicyName(encryptionPolicy));
   gImageProfile = imageProfile;
   if (imageProfile.kind != MacVNCImageProfileFollowViewer)
       rfbScreen->displayHook = applyImageProfile;
@@ -676,6 +685,25 @@ macVNCPasswordCheck(rfbClientPtr client,
                     const char *encryptedPassword,
                     int length)
 {
+    /*
+     * The encryption policy is enforced HERE because this is the first moment
+     * the answer is known: the security type is chosen by the client, and
+     * cl->sslctx only becomes non-NULL once the VeNCrypt handshake has actually
+     * completed. Refusing earlier would mean guessing, and refusing later would
+     * mean the screen had already been published over a plaintext socket.
+     *
+     * The refusal is deliberately indistinguishable from a wrong password on
+     * the wire - a probe learns nothing about the policy - while the log says
+     * exactly what happened, because the owner locking themselves out is the
+     * other way this can go wrong.
+     */
+    if (!macVNCEncryptionAdmits(gEncryptionPolicy, client->sslctx != NULL)) {
+        rfbLog("Refused unencrypted client %s: encryption is set to 'required'. "
+               "Use a viewer that supports VeNCrypt/TLS, or change the setting "
+               "in Preferences.\n", client->host ? client->host : "(unknown)");
+        return FALSE;
+    }
+
     if (!rfbCheckPasswordByList(client, encryptedPassword, length))
         return FALSE;
     prepareAuthenticatedClient(client);
@@ -983,7 +1011,7 @@ vncServerStartWithResult(const MacVNCServerConfig *config)
         goto FAILURE;
 
     if (!ScreenInit(config->port, config->password, config->captureFramesPerSecond,
-                    config->imageProfile))
+                    config->imageProfile, config->encryptionPolicy))
         goto FAILURE;
 
     rfbScreen->newClientHook = newClient;

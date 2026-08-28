@@ -3,6 +3,7 @@
 #include <rfb/rfb.h>
 #include <stdatomic.h>
 #include <stddef.h>
+#include "MacVNCEncryptionPolicy.h"
 #include "MacVNCImageProfile.h"
 #include "NetworkPolicyResolver.h"
 
@@ -20,7 +21,9 @@ typedef struct {
     const char *password;        /* Shared password; must be non-empty. */
     int captureFramesPerSecond;
     /* How pixels are encoded for viewers; see MacVNCImageProfile.h. */
-    MacVNCImageProfile imageProfile;  /* Validated capture rate for every display. */
+    MacVNCImageProfile imageProfile;
+    /* Whether an unencrypted viewer is admitted at all. */
+    MacVNCEncryptionPolicy encryptionPolicy;  /* Validated capture rate for every display. */
     rfbBool viewOnly;            /* TRUE = accept clients but ignore input. */
     int displayNumber;           /* -2 = all displays, -1 = primary, >=0 = one. */
     const char *listenAddress;   /* IPv4 bind address; NULL/empty = all. */

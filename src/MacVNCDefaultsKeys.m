@@ -1,6 +1,7 @@
 #import "MacVNCDefaultsKeys.h"
 
 #include "CaptureRate.h"
+#include "MacVNCEncryptionPolicy.h"
 #include "MacVNCImageProfile.h"
 #import "MacVNCListenMode.h"
 
@@ -15,6 +16,7 @@ NSString * const MacVNCKeyAllowAllConfirmed = @"allowAllConfirmed";
 NSString * const MacVNCKeyAutoAllowedClients = @"autoAllowedClients";
 NSString * const MacVNCKeyCaptureFPS = @"captureFPS";
 NSString * const MacVNCKeyImageProfile = @"imageProfile";
+NSString * const MacVNCKeyEncryption = @"encryption";
 
 NSString * const MacVNCBundleID = @"net.christianbeier.macVNC";
 
@@ -27,7 +29,8 @@ NSArray<NSString *> *macVNCAllDefaultsKeys(void)
              MacVNCKeyAllowedClients, MacVNCKeyAllowAllConfirmed,
              MacVNCKeyAutoAllowedClients,
              MacVNCKeyCaptureFPS,
-             MacVNCKeyImageProfile];
+             MacVNCKeyImageProfile,
+             MacVNCKeyEncryption];
 }
 
 void macVNCRegisterDefaults(void)
@@ -43,6 +46,7 @@ void macVNCRegisterDefaults(void)
         MacVNCKeyAllowAllConfirmed: @NO,
         MacVNCKeyCaptureFPS:        @(MACVNC_CAPTURE_FPS_DEFAULT),
         MacVNCKeyImageProfile:      @(MACVNC_IMAGE_PROFILE_DEFAULT_NAME),
+        MacVNCKeyEncryption:        @(MACVNC_ENCRYPTION_DEFAULT_NAME),
         /* Registered so a fresh install is symmetric with a saved one: the
            loopback entry in allowedClients was put there by US, not typed by the
            user, and the "extra allowed clients" field must not present it as if

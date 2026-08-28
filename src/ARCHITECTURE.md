@@ -102,6 +102,17 @@ Objective-C glue:
   rate ladder the settings UI offers. The ladder lives here, not in the UI, so
   a test can assert the SHIPPED default is on it - otherwise changing the
   default would silently downgrade the popup to "Custom - N fps".
+- **MacVNCEncryptionPolicy** — decides whether an unencrypted viewer is admitted
+  (`macVNCEncryptionAdmits`). Pure, so "who is let in" is tested without a
+  socket. It exists because the ORDER of security types cannot be controlled:
+  LibVNCServer inserts each handler at the head of its list and sends the list
+  from the head (`auth.c:58-69`, `:224`), and registers its own VncAuth handler
+  lazily on the FIRST connection - after ours - so plain is always offered
+  first and every viewer takes it. Refusing is the only reliable lever.
+  Enforced in `macVNCPasswordCheck`, the first moment the answer is known:
+  `cl->sslctx` is non-NULL only once the VeNCrypt handshake has completed.
+  The refusal is indistinguishable from a wrong password on the wire, and
+  explicit in the log.
 - **MacVNCImageProfile** — maps a stored setting name (`viewer`, `lossless`, or
   a level `0`-`7`) to encoder levels (`macVNCParseImageProfile`). Pure, and the
   ladder is measured rather than chosen: levels 8 and 9 are refused because both
@@ -195,7 +206,7 @@ pixels rather than points.
 
 ## Tests
 
-`ctest` runs 34 targets (the number is enforced: `architecture_doc` compares
+`ctest` runs 35 targets (the number is enforced: `architecture_doc` compares
 this sentence against CMakeLists.txt's `add_test` count, so a target added or
 commented out fails the suite until this line is updated deliberately). Every
 assertion added here is checked by mutating the source and confirming the test
