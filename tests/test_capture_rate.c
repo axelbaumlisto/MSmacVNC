@@ -52,6 +52,16 @@ int main(void)
     assert(macVNCCaptureFrameIntervalMilliseconds(60) == 17);
     assert(macVNCCaptureFrameIntervalMilliseconds(61) == 0);
 
+    /* A rejected value must not touch the output: callers rely on it to keep
+       the fallback they pre-loaded, instead of restating it in every branch. */
+    int preloaded = 42;
+    assert(macVNCParseCaptureFPS("999", &preloaded) == MACVNC_CAPTURE_RATE_INVALID);
+    assert(preloaded == 42);
+    assert(macVNCParseCaptureFPS("abc", &preloaded) == MACVNC_CAPTURE_RATE_INVALID);
+    assert(preloaded == 42);
+    assert(macVNCParseCaptureFPS("-5", &preloaded) == MACVNC_CAPTURE_RATE_INVALID);
+    assert(preloaded == 42);
+
     /* The defer is a SEPARATE decision from the capture interval. Deriving it
        from the rate stacked two delays and cost 3x the delivered frame rate. */
     assert(macVNCFramebufferDeferMilliseconds(12) == 10);

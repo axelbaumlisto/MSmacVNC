@@ -1,4 +1,7 @@
 #import "MacVNCStartupConfig.h"
+
+#include "CaptureRate.h"
+#include "MacVNCImageProfile.h"
 #import "MacVNCDefaultsKeys.h"
 
 #import <Foundation/Foundation.h>
@@ -84,6 +87,61 @@ int main(void)
     assert(c3.error != nil);
     MacVNCServerConfig sc3;
     assert(![c3 fillServerConfig:&sc3]);
+
+    /* 3b. A STORED capture rate is a different source with a different
+           contract: a hand-edited value must not make the Mac unreachable, so
+           it falls back to the default and the server still starts. */
+    NSUserDefaults *d3b = makeDefaults(@"macvnc.test.startup3b", @{
+        MacVNCKeyPort:          @5911,
+        MacVNCKeyPassword:      @"secret",
+        MacVNCKeyListenMode:    @"localhost",
+        MacVNCKeyAllowedClients: @"127.0.0.1/32",
+        MacVNCKeyCaptureFPS:    @999,
+        MacVNCKeyImageProfile:  @"nonsense",
+    });
+    MacVNCStartupConfig *c3b = [MacVNCStartupConfig configWithDefaults:d3b
+                                                          environment:@{}];
+    assert(c3b.error == nil);
+    MacVNCServerConfig sc3b;
+    assert([c3b fillServerConfig:&sc3b]);
+    assert(sc3b.captureFramesPerSecond == MACVNC_CAPTURE_FPS_DEFAULT);
+    assert(sc3b.imageProfile.kind == MacVNCImageProfileJPEG);
+    assert(sc3b.imageProfile.qualityLevel == MACVNC_IMAGE_QUALITY_DEFAULT);
+
+    /* 3c. A VALID stored pair is honoured. */
+    NSUserDefaults *d3c = makeDefaults(@"macvnc.test.startup3c", @{
+        MacVNCKeyPort:          @5912,
+        MacVNCKeyPassword:      @"secret",
+        MacVNCKeyListenMode:    @"localhost",
+        MacVNCKeyAllowedClients: @"127.0.0.1/32",
+        MacVNCKeyCaptureFPS:    @20,
+        MacVNCKeyImageProfile:  @"lossless",
+    });
+    MacVNCServerConfig sc3c;
+    MacVNCStartupConfig *c3c = [MacVNCStartupConfig configWithDefaults:d3c
+                                                          environment:@{}];
+    assert([c3c fillServerConfig:&sc3c]);
+    assert(sc3c.captureFramesPerSecond == 20);
+    assert(sc3c.imageProfile.kind == MacVNCImageProfileLossless);
+
+    /* 3d. The environment beats the stored setting - it is the debugging seam. */
+    MacVNCServerConfig sc3d;
+    MacVNCStartupConfig *c3d = [MacVNCStartupConfig configWithDefaults:d3c
+                                                          environment:@{
+        @"MACVNC_CAPTURE_FPS": @"45",
+        @"MACVNC_IMAGE_PROFILE": @"2",
+    }];
+    assert([c3d fillServerConfig:&sc3d]);
+    assert(sc3d.captureFramesPerSecond == 45);
+    assert(sc3d.imageProfile.kind == MacVNCImageProfileJPEG);
+    assert(sc3d.imageProfile.qualityLevel == 2);
+
+    /* 3e. An invalid environment profile is an ERROR, unlike a stored one. */
+    MacVNCStartupConfig *c3e = [MacVNCStartupConfig configWithDefaults:d3c
+                                                          environment:@{
+        @"MACVNC_IMAGE_PROFILE": @"9",
+    }];
+    assert(c3e.error != nil);
 
     /* 4. Invalid network policy (bad custom address) => error. */
     NSUserDefaults *d4 = makeDefaults(@"macvnc.test.startup4", @{

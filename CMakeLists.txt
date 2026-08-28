@@ -50,6 +50,7 @@ set(SOURCE_FILES
     src/MacVNCCompositor.m
     src/MacVNCCaptureSession.h
     src/MacVNCCaptureSession.m
+    src/MacVNCImageProfile.c
     src/MacVNCSweepSchedule.c
     src/PointerState.h
     src/PointerState.c
@@ -207,8 +208,14 @@ if(BUILD_TESTING)
                    tests/bench_composite.c src/CompositeFramebuffer.c)
     target_include_directories(bench_composite PRIVATE src)
 
+    add_executable(test_image_profile tests/test_image_profile.c
+                   src/MacVNCImageProfile.c)
+    target_include_directories(test_image_profile PRIVATE src)
+    add_test(NAME image_profile COMMAND test_image_profile)
+
     add_executable(test_sweep_schedule tests/test_sweep_schedule.c
-                   src/MacVNCSweepSchedule.c)
+                   src/MacVNCImageProfile.c
+    src/MacVNCSweepSchedule.c)
     target_include_directories(test_sweep_schedule PRIVATE src)
     add_test(NAME sweep_schedule COMMAND test_sweep_schedule)
 
@@ -288,6 +295,7 @@ if(BUILD_TESTING)
 
     add_executable(test_capture_session tests/test_capture_session.m
         src/MacVNCCaptureSession.m
+    src/MacVNCImageProfile.c
     src/MacVNCSweepSchedule.c src/ScreenCapturer.m src/FrameMailbox.c
         src/FirstFrameBudget.c src/CaptureRate.c)
     target_include_directories(test_capture_session PRIVATE src)
@@ -302,7 +310,8 @@ if(BUILD_TESTING)
     add_test(NAME start_failure COMMAND test_start_failure)
 
     add_executable(test_defaults tests/test_defaults.m
-        src/MacVNCDefaultsKeys.m src/MacVNCListenMode.m)
+        src/MacVNCDefaultsKeys.m src/MacVNCListenMode.m
+        src/MacVNCImageProfile.c src/CaptureRate.c)
     target_include_directories(test_defaults PRIVATE src)
     # The test cross-checks macVNCAllDefaultsKeys() against the header's own
     # declarations, so it needs the header's path at build time.
@@ -339,7 +348,7 @@ if(BUILD_TESTING)
         src/NetworkPolicyResolver.c
         src/NetworkAccess.c
         src/NetworkCIDR.c
-    )
+        src/MacVNCImageProfile.c)
     target_include_directories(test_startup_config PRIVATE src)
     target_link_libraries(test_startup_config
         LibVNCServer::vncserver
@@ -384,6 +393,7 @@ if(BUILD_TESTING)
         src/CompositeFramebuffer.c
         src/MacVNCCompositor.m
         src/MacVNCCaptureSession.m
+    src/MacVNCImageProfile.c
     src/MacVNCSweepSchedule.c
         src/PointerState.c
         src/KeyboardModifierState.c

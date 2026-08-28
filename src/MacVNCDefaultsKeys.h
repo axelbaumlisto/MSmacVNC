@@ -15,6 +15,12 @@ extern NSString * const MacVNCKeyAllowAllConfirmed;
  * separately so a later save can drop stale ones instead of mistaking them for
  * user-typed entries (which would accumulate every network ever joined). */
 extern NSString * const MacVNCKeyAutoAllowedClients;
+/* Frames captured per display, per second. Server-wide by construction: one
+ * ScreenCaptureKit stream per display is shared by every viewer. */
+extern NSString * const MacVNCKeyCaptureFPS;
+/* How pixels are encoded: "viewer", "lossless", or a quality level "0".."7".
+ * See MacVNCImageProfile.h for the measurements behind the ladder. */
+extern NSString * const MacVNCKeyImageProfile;
 
 extern NSString * const MacVNCBundleID;
 

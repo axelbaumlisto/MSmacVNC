@@ -11,7 +11,10 @@
 # that did not build at all.
 #
 # Rules enforced here:
-#   1. the pattern must exist in the file (a typo is an error, not a survivor);
+#   1. the pattern must exist in the file EXACTLY ONCE - a pattern matching two
+#      places silently mutated the wrong one (trimmed indentation made
+#      "x = DEFAULT;" also match the DECLARATION "int x = DEFAULT;", which then
+#      failed to compile and looked like a bad pattern);
 #   2. the baseline must BUILD and PASS before anything is mutated;
 #   3. a mutation that does not build is an ERROR, never a survivor;
 #   4. the mutated file is given a strictly newer timestamp before building -
@@ -26,6 +29,9 @@
 # Usage:
 #   tests/mutate.sh <build-dir> <target> <source-file> <<'EOF'
 #   pattern-to-find ==> replacement ==> description
+#
+# One mutation per line. Use \n inside a pattern to span lines, which is how a
+# line that appears twice (a declaration and an assignment) is disambiguated.
 #   ...
 #   EOF
 set -uo pipefail
@@ -74,22 +80,34 @@ while IFS= read -r line; do
     rest=${line#*==>}
     replacement=${rest%%==>*}
     description=${rest#*==>}
-    # trim surrounding spaces
-    pattern=$(printf '%s' "$pattern" | sed 's/^ *//; s/ *$//')
-    replacement=$(printf '%s' "$replacement" | sed 's/^ *//; s/ *$//')
-    description=$(printf '%s' "$description" | sed 's/^ *//; s/ *$//')
+    # Strip exactly ONE space either side of the separators, so indentation is
+    # preserved and can be used to disambiguate a pattern.
+    pattern=${pattern% }
+    replacement=${replacement# }
+    replacement=${replacement% }
+    description=${description# }
 
     if ! PATTERN="$pattern" REPLACEMENT="$replacement" SRC="$SOURCE" \
          PRIST="$PRISTINE" python3 -c '
 import os, sys
-pattern = os.environ["PATTERN"]
+pattern = os.environ["PATTERN"].replace("\\n", "\n")
+replacement = os.environ["REPLACEMENT"].replace("\\n", "\n")
 text = open(os.environ["PRIST"]).read()
-if pattern not in text:
+occurrences = text.count(pattern)
+if occurrences == 0:
     sys.exit(3)
-open(os.environ["SRC"], "w").write(text.replace(pattern, os.environ["REPLACEMENT"], 1))
+if occurrences > 1:
+    sys.exit(4)   # ambiguous: refuse rather than mutate an arbitrary one
+open(os.environ["SRC"], "w").write(text.replace(pattern, replacement, 1))
 '; then
+        status=$?
         echo "ERROR  $description"
-        echo "       pattern not found: $pattern"
+        if [ "$status" = 4 ]; then
+            echo "       pattern matches more than once - add indentation or"
+            echo "       more context so it identifies ONE place: $pattern"
+        else
+            echo "       pattern not found: $pattern"
+        fi
         failures=$((failures + 1))
         continue
     fi
