@@ -29,14 +29,41 @@ measure. Nothing is bandwidth-bound and nothing is CPU-bound: this is pacing.
 The defer was reasonable when a frame cost 44 ms of CPU to composite. It costs
 3 ms now, which is exactly the headroom this plan spends.
 
+### What a real viewer actually negotiates (measured, not assumed)
+
+An earlier draft of this plan claimed the server cannot influence compression.
+That was wrong, and checking it changed the plan. Server log from a real
+libvncclient session:
+
+```
+Using tight encoding for client
+Using compression level 5, image quality level 7, JPEG subsampling 0, Q86
+tight : 2724 events | 11996562/272461296 (95.6% saved)
+```
+
+- The encoding in use is **Tight with JPEG**, so `tightQualityLevel` and
+  `tightCompressLevel` are exactly the knobs that matter.
+- Compression already saves 95.6%: 12.0 MB sent for 272 MB of raw pixels.
+- That is **1.5 MB/s** on the wire for 8 seconds of streaming - nowhere near
+  any limit, which independently confirms the bottleneck is pacing, not bytes.
+- The client asks for its levels via pseudo-encodings, but the SERVER owns the
+  fields afterwards. There is no `setEncodingsHook`, however `displayHook` is
+  called "just before a frame buffer update" (rfb.h:307-308), which is a
+  legitimate seam for applying our profile to `cl->tightQualityLevel` and
+  `cl->tightCompressLevel`.
+
+So both knobs the user asked for are reachable: frame rate is ours already,
+and image quality is ours per-frame through `displayHook`.
+
 ### Non-goals
 
-- Encoding/quality tuning. Tight/ZRLE parameters are chosen by the CLIENT via
-  pseudo-encodings; the server cannot force them. Out of scope.
-- Server-side scaling. It changes what the user sees and needs its own UI
-  decision.
-- Adaptive/dynamic frame rates. No evidence yet that a fixed rate is the
-  problem; adding a control loop before measuring would be guessing.
+- Server-side scaling. It changes what the user sees and needs its own product
+  decision, not a tuning change.
+- Adaptive/dynamic frame rates or bandwidth estimation. No evidence yet that a
+  fixed rate is the problem; a control loop before measurement is guessing.
+- Choosing the ENCODING for the client. The server may only pick among what the
+  client advertised, and libvncserver discards part of that list, so forcing an
+  encoding risks breaking viewers. Levels only.
 
 ### Measurement caveat to respect throughout
 
@@ -54,9 +81,12 @@ impact, verifying each step before taking the next:
 1. Stop deferring a whole frame interval (pure latency, no extra work).
 2. Raise the capture rate now that a frame is cheap (latency + smoothness,
    costs CPU).
-3. Make the rate a real setting rather than an env var, so a slow link or a
-   battery-conscious user can turn it down.
-4. Re-measure the breakdown and stop when the next lever is no longer pacing.
+3. Give the image quality a server-side profile, since the measurement shows
+   Tight+JPEG is what viewers actually use.
+4. Put BOTH in the Preferences window with the best-for-us defaults
+   preselected and the alternatives one click away - the settings are the
+   deliverable, not an env var.
+5. Re-measure the breakdown and stop when the next lever is no longer pacing.
 
 Each step is independently reversible and independently measurable.
 
@@ -122,7 +152,57 @@ plus a two-display CPU check
 4. Re-verify the first-frame path: `test_first_frame_wait` and a cold connect
    must still show no placeholder.
 
-### Task 4: Make the capture rate a setting, not an env var
+### Task 4: Image-quality profiles, applied server-side
+**Files:** `src/MacVNCImageProfile.h` (new), `src/MacVNCImageProfile.c` (new),
+`src/mac.m`, `tests/test_image_profile.c` (new)
+**Depends:** Task 3
+**Acceptance:** each profile changes the bytes actually sent (visible in the
+server's per-client statistics) and the log line reports the applied levels;
+"Follow the viewer" leaves the client's own request untouched.
+**Verify:** `ctest -R image_profile`, then one 8-second run per profile
+comparing `Transmit/RawEquiv` from the server statistics
+**Steps:**
+1. New pure module mapping a profile to levels, so the mapping is testable
+   without a client: `Sharp` = quality 9 / compress 1, `Balanced` = 7 / 5
+   (today's measured behaviour), `Slow link` = 4 / 9, `Follow viewer` = leave
+   both fields alone.
+2. Unit-test the mapping and the parse of an unknown/absent name (must fall
+   back to `Balanced`, never to an undefined level).
+3. Apply it in a `displayHook` in `mac.m`: set `cl->tightQualityLevel` and
+   `cl->tightCompressLevel` before each update unless the profile is
+   "Follow viewer". Note in the comment that this deliberately overrides the
+   viewer's preference, which is the point of having the setting.
+4. Log the applied profile ONCE per client, not per frame.
+5. Measure bytes/s and CPU per profile; record the table in this plan so the
+   default is chosen from data rather than taste.
+
+### Task 5: Both settings in the Preferences window
+**Files:** `src/MacVNCPreferences.m`, `src/MacVNCDefaultsKeys.h`,
+`src/MacVNCDefaultsKeys.m`, `tests/test_defaults.m`, `README.md`
+**Depends:** Task 4
+**Acceptance:** Preferences shows two popups with the proposed defaults
+preselected; changing either and reopening the window shows the stored choice;
+a restart applies it; `test_defaults` set-equality passes with the new keys.
+**Verify:** `ctest -R defaults`, then open Preferences, change both, restart,
+confirm the log line reports the new values
+**Steps:**
+1. Add `MacVNCKeyCaptureFPS` and `MacVNCKeyImageProfile` with defaults
+   registered in `macVNCAllDefaultsKeys()`, which makes the
+   defaults-completeness test cover them automatically.
+2. Add to the existing Preferences layout, following the `listenPopup`
+   pattern already there (label + NSPopUpButton, no new window):
+   - **Frame rate:** `Battery saver (8 fps)`, `Balanced (15 fps)`,
+     **`Smooth (30 fps)` - default**, `Maximum (60 fps)`
+   - **Image quality:** `Sharp (more data)`,
+     **`Balanced` - default**, `Slow link (less data)`,
+     `Follow the viewer`
+3. Store the FPS as a NUMBER and the profile as a NAME, so a hand-edited
+   `defaults write` stays readable and the parser has one validation rule.
+4. Note next to the frame-rate popup that it applies on restart if that is
+   what the implementation does - do not imply live application.
+5. Document both in `README.md` with the measured cost of each choice.
+
+### Task 6: Make the capture rate a setting, not an env var
 **Files:** `src/MacVNCDefaultsKeys.h`, `src/MacVNCDefaultsKeys.m`,
 `src/MacVNCStartupConfig.m`, `tests/test_defaults.m`,
 `tests/test_startup_config.m`
@@ -141,9 +221,9 @@ not prevent start; `MACVNC_CAPTURE_FPS` still wins for debugging.
    env override beating the setting.
 4. Document the setting in `README.md` next to the other defaults.
 
-### Task 5: Re-measure the breakdown and decide whether to continue
+### Task 7: Re-measure the breakdown and decide whether to continue
 **Files:** `.pi/plans/felt-latency.md` (this file), `RELEASE_NOTES.md`
-**Depends:** Task 4
+**Depends:** Task 6
 **Acceptance:** a table of before/after felt-latency and CPU numbers, plus an
 explicit statement of what now dominates the remaining gap.
 **Steps:**
@@ -167,4 +247,6 @@ explicit statement of what now dominates the remaining gap.
 - [ ] measured p50 gap at least halved versus 0.3.76, with p99 no worse
 - [ ] CPU-seconds no higher than the pre-optimisation baseline (`be4c83e`)
 - [ ] cold connect still shows no placeholder checkerboard
-- [ ] user confirms on the real device
+- [ ] every Preferences choice survives a restart and is visible in the log
+- [ ] user confirms on the real device, including which image profile reads
+      best for code on the iPad
