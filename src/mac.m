@@ -308,6 +308,46 @@ buildClientAccessList(void)
 /* Capture callbacks. Plain C function pointers rather than blocks: the session
    must not capture this file's state, and these two are the whole seam. */
 
+/*
+ * The encoding settings for this run. Read by displayHook on the client
+ * threads, written once before rfbInitServer publishes the screen.
+ */
+static MacVNCImageProfile gImageProfile;
+
+/*
+ * Impose the configured image profile just before this client's update is
+ * encoded.
+ *
+ * This deliberately OVERRIDES what the viewer asked for. Most viewers send
+ * their own quality level, so a setting that only applied when they stayed
+ * silent would do nothing on the devices people actually use. The honest way
+ * to disagree is the "viewer" profile, which does not install this hook at all.
+ *
+ * displayHook is the only seam available: LibVNCServer has no hook after
+ * SetEncodings, but it calls this one before every framebuffer update
+ * (rfb.h:307), by which point the client's levels are ours to set.
+ */
+static void
+applyImageProfile(rfbClientPtr cl)
+{
+    if (!cl)
+        return;
+
+    switch (gImageProfile.kind) {
+        case MacVNCImageProfileFollowViewer:
+            return; /* the hook is not installed in this case */
+        case MacVNCImageProfileLossless:
+            /* -1 is what keeps Tight on its lossless path: with a quality level
+               set, photographic subrects go through JPEG. */
+            cl->tightQualityLevel = -1;
+            break;
+        case MacVNCImageProfileJPEG:
+            cl->tightQualityLevel = gImageProfile.qualityLevel;
+            break;
+    }
+    cl->tightCompressLevel = MACVNC_IMAGE_COMPRESS_LEVEL;
+}
+
 static bool
 compositeCapturedFrame(const MacVNCDisplayGeometry *geometry,
                        const uint8_t *pixels, size_t stride,
@@ -349,7 +389,8 @@ reportCaptureFailure(bool likelyPermissionDenial)
 }
 
 static rfbBool
-ScreenInit(int port, const char *password, int captureFramesPerSecond)
+ScreenInit(int port, const char *password, int captureFramesPerSecond,
+           MacVNCImageProfile imageProfile)
 {
   int bitsPerSample = 8;
 
@@ -440,6 +481,11 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
   /* Coalesce dirty regions from every display into one per-client framebuffer
      transmission ceiling. Input processing and deferPtrUpdateTime are unchanged. */
   rfbScreen->deferUpdateTime = framebufferDeferMilliseconds;
+
+  gImageProfile = imageProfile;
+  if (imageProfile.kind != MacVNCImageProfileFollowViewer)
+      rfbScreen->displayHook = applyImageProfile;
+  rfbLog("Image profile: %s\n", macVNCImageProfileName(imageProfile));
 
   gethostname(rfbScreen->thisHost, 255);
   rfbScreen->thisHost[254] = '\0'; /* gethostname need not NUL-terminate on truncation */
@@ -936,7 +982,8 @@ vncServerStartWithResult(const MacVNCServerConfig *config)
     if (!macVNCInputStart())
         goto FAILURE;
 
-    if (!ScreenInit(config->port, config->password, config->captureFramesPerSecond))
+    if (!ScreenInit(config->port, config->password, config->captureFramesPerSecond,
+                    config->imageProfile))
         goto FAILURE;
 
     rfbScreen->newClientHook = newClient;

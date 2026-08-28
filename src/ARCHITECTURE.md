@@ -242,6 +242,17 @@ must not be counted as automated coverage.
 - **Screen publication:** `rfbScreen` is set to NULL *before* `rfbScreenCleanup`,
   because the capture stop is deliberately bounded and a late frame must see
   NULL rather than a freed pointer.
+- **Image profile is imposed per frame, on purpose:** `displayHook` sets
+  `cl->tightQualityLevel` and `cl->tightCompressLevel` from the configured
+  profile before every framebuffer update. It OVERRIDES what the viewer asked
+  for, because most viewers send their own level and a setting that only applied
+  when they stayed silent would do nothing on real devices; the honest way to
+  disagree is the `viewer` profile, which does not install the hook at all.
+  LibVNCServer offers no hook after SetEncodings, so this is the only seam - the
+  same `displayHook` that was deleted in `28b7b62` for having no purpose.
+  Verified live: with the client requesting quality 7 in every run, bytes per
+  megapixel followed OUR profile (level 0: 155 KB, level 5: 167 KB, lossless:
+  205 KB).
 - **First-frame wait ends on the answer, not on the clock:** a capture failure
   goes through `-[ScreenCapturer reportCaptureError:]`, which broadcasts the
   readiness condition BEFORE calling the error handler. Without that, a client

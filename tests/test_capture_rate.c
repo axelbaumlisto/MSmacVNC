@@ -19,12 +19,24 @@ static void expect_invalid(const char *value)
 
 int main(void)
 {
+    /* Absent input selects the default. Written against the constant, not a
+       literal: the default is a measured choice that will move again, and a
+       test that has to be edited alongside it tests the edit, not the code. */
     int fps = -1;
     assert(macVNCParseCaptureFPS(NULL, &fps) == MACVNC_CAPTURE_RATE_DEFAULTED);
-    assert(fps == 12);
+    assert(fps == MACVNC_CAPTURE_FPS_DEFAULT);
     fps = -1;
     assert(macVNCParseCaptureFPS("", &fps) == MACVNC_CAPTURE_RATE_DEFAULTED);
-    assert(fps == 12);
+    assert(fps == MACVNC_CAPTURE_FPS_DEFAULT);
+
+    /* The default must be one the parser accepts and the defer helper supports:
+       shipping a default outside the supported range would refuse to start. */
+    int roundTrip = -1;
+    char defaultText[8];
+    snprintf(defaultText, sizeof(defaultText), "%d", MACVNC_CAPTURE_FPS_DEFAULT);
+    assert(macVNCParseCaptureFPS(defaultText, &roundTrip) == MACVNC_CAPTURE_RATE_VALID);
+    assert(roundTrip == MACVNC_CAPTURE_FPS_DEFAULT);
+    assert(macVNCFramebufferDeferMilliseconds(MACVNC_CAPTURE_FPS_DEFAULT) > 0);
 
     expect_valid("1", 1);
     expect_valid("12", 12);

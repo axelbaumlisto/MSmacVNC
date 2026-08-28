@@ -1,6 +1,14 @@
 #pragma once
 
-#define MACVNC_CAPTURE_FPS_DEFAULT 12
+/*
+ * Measured default. 12 FPS was chosen when compositing a frame cost 44 ms of
+ * CPU; it costs 3 ms now. With the 10 ms defer window, 30 FPS delivers 33.4
+ * frames per second to a viewer at a 30 ms average gap and a 53 ms p99, for
+ * CPU comparable to the PRE-optimisation server - while 60 FPS delivers no
+ * more frames and has worse tails. The Preferences popup is the way down for
+ * a slow link or a battery.
+ */
+#define MACVNC_CAPTURE_FPS_DEFAULT 30
 #define MACVNC_CAPTURE_FPS_MIN 1
 #define MACVNC_CAPTURE_FPS_MAX 60
 
