@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.70 LANGUAGES C)
+project(macVNC VERSION 0.3.71 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -399,6 +399,12 @@ if(BUILD_TESTING)
     add_test(NAME server_generation COMMAND test_server_generation)
     # Skips visibly (77), never silently green (see the port-probe comment in the test).
     set_tests_properties(server_generation PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_executable(test_capture_restart tests/test_capture_restart.m)
+    target_include_directories(test_capture_restart PRIVATE src)
+    target_link_libraries(test_capture_restart macvnc_core_testable)
+    add_test(NAME capture_restart COMMAND test_capture_restart)
+    set_tests_properties(capture_restart PROPERTIES SKIP_RETURN_CODE 77)
 
     add_executable(test_power_mgmt
         tests/test_power_mgmt.m
