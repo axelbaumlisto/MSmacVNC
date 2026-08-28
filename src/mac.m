@@ -28,7 +28,6 @@
 /* Mirror of the private constants in MacVNCTLS.c - kept tiny on purpose. */
 #define MACVNC_VENCRYPT_MAJOR 0
 #define MACVNC_VENCRYPT_MINOR 2
-#define MACVNC_SUBTYPE_TLSVNC 258u
 #include <sys/socket.h>
 #include <time.h>
 
@@ -829,10 +828,29 @@ void macVNCTLSHandleVeNCrypt(rfbClientPtr cl)
     uint8_t vReply[2];
     if (rfbReadExact(cl, (char *)vReply, 2) < 0) { rfbCloseClient(cl); return; }
 
-    uint32_t count = Swap32IfLE(1);
-    uint32_t sub   = Swap32IfLE(MACVNC_SUBTYPE_TLSVNC);
-    if (rfbWriteExact(cl, (char *)&count, 4) < 0 ||
-        rfbWriteExact(cl, (char *)&sub, 4) < 0) { rfbCloseClient(cl); return; }
+    /*
+     * Wire format, per the VeNCrypt specification and both reference
+     * implementations (TigerVNC SSecurityVeNCrypt, QEMU vnc-auth-vencrypt):
+     *
+     *   U8   version ack       0 = the version we agreed on is acceptable
+     *   U8   number of subtypes
+     *   U32  subtype           x number-of-subtypes
+     *   ---- client sends U32  its choice
+     *   U8   subtype ack       1 = accepted, proceed to TLS
+     *
+     * This used to send the COUNT as a U32 and the final ack as a U32. A real
+     * viewer read those four bytes as "ack 0, zero subtypes" and gave up with
+     * "The server reported no VeNCrypt sub-types". It went unnoticed because
+     * the only client that ever tested it was a script written against this
+     * code rather than against the specification.
+     */
+    uint8_t greeting[8];
+    size_t greetingLength = macVNCTLSBuildSubtypeGreeting(greeting, sizeof(greeting));
+    if (greetingLength == 0 ||
+        rfbWriteExact(cl, (char *)greeting, (int)greetingLength) < 0) {
+        rfbCloseClient(cl);
+        return;
+    }
 
     uint32_t chosenRaw;
     if (rfbReadExact(cl, (char *)&chosenRaw, 4) < 0) { rfbCloseClient(cl); return; }
@@ -840,13 +858,13 @@ void macVNCTLSHandleVeNCrypt(rfbClientPtr cl)
                                          Swap32IfLE(chosenRaw))) {
         rfbErr("macVNC TLS: client picked version %d.%d subtype %u - refused\n",
                vReply[0], vReply[1], Swap32IfLE(chosenRaw));
-        uint32_t fail = Swap32IfLE(0xFFFFFFFFu);
-        rfbWriteExact(cl, (char *)&fail, 4);
+        uint8_t reject = 0; /* subtype ack: 0 = refused */
+        rfbWriteExact(cl, (char *)&reject, 1);
         rfbCloseClient(cl);
         return;
     }
-    uint32_t ok = Swap32IfLE(1); /* VeNCrypt SecurityResult */
-    if (rfbWriteExact(cl, (char *)&ok, 4) < 0) { rfbCloseClient(cl); return; }
+    uint8_t subtypeAck = 1; /* accepted; the TLS handshake follows */
+    if (rfbWriteExact(cl, (char *)&subtypeAck, 1) < 0) { rfbCloseClient(cl); return; }
 
     /* Exported by the dylib; header is internal to libvncserver. After a
        successful init sockets.c transparently SSL-wraps this client's I/O. */
