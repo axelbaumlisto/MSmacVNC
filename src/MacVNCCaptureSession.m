@@ -2,6 +2,7 @@
 
 #include <ScreenCaptureKit/ScreenCaptureKit.h>
 
+#import "MacVNCSweepSchedule.h"
 #import "ScreenCapturer.h"
 #import "FirstFrameBudget.h"
 
@@ -116,10 +117,11 @@ bool macVNCCaptureSessionBuild(const MacVNCDisplayLayout *layout,
         /* Points into the caller's layout, which outlives the session: mac.m
            keeps it in the run's private state. */
         const MacVNCDisplayGeometry *geometry = &layout->displays[i];
-        /* Per-display, per-block state: when this display last had a full
-           sweep. Each loop iteration creates a fresh block, so the displays
-           cannot share (or race on) the deadline. */
-        __block uint64_t nextFullSweep = 0;
+        /* Per-display, per-block state. Each loop iteration creates a fresh
+           block, so displays cannot share (or race on) the deadline; frames
+           of one display are delivered serially, so it needs no lock. */
+        __block MacVNCSweepSchedule sweepSchedule;
+        macVNCSweepScheduleInit(&sweepSchedule, MACVNC_FULL_SWEEP_INTERVAL_NS);
         ScreenCapturer *capturer = [[ScreenCapturer alloc]
             initWithDisplay:geometry->input.displayID
             captureFramesPerSecond:captureFramesPerSecond
@@ -136,15 +138,11 @@ bool macVNCCaptureSessionBuild(const MacVNCDisplayLayout *layout,
                 hint.count = extractDirtyRects(sampleBuffer, rectStorage,
                                                MACVNC_MAX_HINT_RECTS);
 
-                /* Periodic full sweep: the hint is an optimisation we do not
-                   control, so we never let it be the ONLY thing that decides
-                   what reaches the canvas. If it ever under-reports, the next
-                   sweep repairs the region instead of leaving it stale. */
-                uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC);
-                if (now >= nextFullSweep) {
+                /* An empty hint means "sweep everything" - see
+                   MacVNCSweepSchedule for why that must happen periodically. */
+                if (macVNCSweepScheduleDueAt(&sweepSchedule,
+                                             clock_gettime_nsec_np(CLOCK_MONOTONIC)))
                     hint.count = 0;
-                    nextFullSweep = now + MACVNC_FULL_SWEEP_INTERVAL_NS;
-                }
 
                 CVPixelBufferLockBaseAddress(pixelBuffer,
                                              kCVPixelBufferLock_ReadOnly);
