@@ -65,7 +65,10 @@ echo "baseline: builds and passes"
 failures=0
 while IFS= read -r line; do
     [ -z "$line" ] && continue
-    case "$line" in \#*) continue ;; esac
+    # Comments start with // - '#' is the first character of every C
+    # preprocessor directive, and treating those as comments silently SKIPPED
+    # mutations of #define lines while still reporting success.
+    case "$line" in //*) continue ;; esac
 
     pattern=${line%%==>*}
     rest=${line#*==>}
@@ -93,9 +96,16 @@ open(os.environ["SRC"], "w").write(text.replace(pattern, os.environ["REPLACEMENT
 
     mutated_at=$(date +%s)
     if ! rebuild; then
-        echo "ERROR  $description"
-        echo "       mutation does not compile (would have been a false survivor)"
-        failures=$((failures + 1))
+        # A mutation stopped by a static assertion is killed at COMPILE time,
+        # which is the strongest possible kill: the configuration cannot even
+        # be built. Distinguish that from a pattern that simply broke the code.
+        if grep -qi 'static.assert' /tmp/mutate_build.log; then
+            echo "killed    $description (compile-time guard)"
+        else
+            echo "ERROR  $description"
+            echo "       mutation does not compile (would have been a false survivor)"
+            failures=$((failures + 1))
+        fi
         cp "$PRISTINE" "$SOURCE"
         continue
     fi

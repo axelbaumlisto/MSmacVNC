@@ -52,6 +52,32 @@ int main(void)
     assert(macVNCCaptureFrameIntervalMilliseconds(60) == 17);
     assert(macVNCCaptureFrameIntervalMilliseconds(61) == 0);
 
+    /* The defer is a SEPARATE decision from the capture interval. Deriving it
+       from the rate stacked two delays and cost 3x the delivered frame rate. */
+    assert(macVNCFramebufferDeferMilliseconds(12) == 10);
+    assert(macVNCFramebufferDeferMilliseconds(30) == 10);
+    assert(macVNCFramebufferDeferMilliseconds(1) == 10);
+
+    /* Never longer than the wait for the next frame: holding an update past
+       that can only add latency. At 120 FPS the interval would be 9 ms - but
+       the supported maximum is 60, where the interval is 17 ms. */
+    assert(macVNCFramebufferDeferMilliseconds(60) == 10);
+    assert(macVNCFramebufferDeferMilliseconds(60) <=
+           macVNCCaptureFrameIntervalMilliseconds(60));
+
+    /* Never zero for a valid rate: at zero, updates stop coalescing and the
+       tail collapses (measured p99 1.4 s, max 2.1 s, double the CPU). */
+    for (int fps = MACVNC_CAPTURE_FPS_MIN; fps <= MACVNC_CAPTURE_FPS_MAX; ++fps) {
+        assert(macVNCFramebufferDeferMilliseconds(fps) > 0);
+        assert(macVNCFramebufferDeferMilliseconds(fps) <=
+               macVNCCaptureFrameIntervalMilliseconds(fps));
+    }
+
+    /* Invalid rates report zero, exactly like the interval helper. */
+    assert(macVNCFramebufferDeferMilliseconds(0) == 0);
+    assert(macVNCFramebufferDeferMilliseconds(61) == 0);
+    assert(macVNCFramebufferDeferMilliseconds(-1) == 0);
+
     puts("capture rate tests passed");
     return 0;
 }

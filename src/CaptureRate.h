@@ -17,3 +17,23 @@ MacVNCCaptureRateParseResult macVNCParseCaptureFPS(const char *value, int *frame
 /* Convert a validated FPS to a millisecond interval without exceeding that
    rate. Returns zero when framesPerSecond is outside the supported range. */
 int macVNCCaptureFrameIntervalMilliseconds(int framesPerSecond);
+
+/*
+ * How long the server holds a framebuffer update before sending it, so the
+ * tiles of one captured frame travel together.
+ *
+ * This used to BE the capture interval, which stacked two delays: 83 ms
+ * waiting for a frame at 12 FPS, then 84 ms holding it. Measured, that pairing
+ * delivered 8.1 frames per second with a 125 ms average gap; the same capture
+ * rate with a 10 ms window delivers 24.4 with a 41 ms gap, and the worst case
+ * halves (174 -> 86 ms).
+ *
+ * The window is small but never zero: at zero, updates stop coalescing and the
+ * tail collapses - measured p99 of 1.4 s and a 2.1 s stall, with double the
+ * CPU. It is also clamped to the capture interval, because holding an update
+ * longer than the wait for the next frame can only add latency (at 60 FPS the
+ * interval is 17 ms).
+ *
+ * Returns zero when framesPerSecond is outside the supported range.
+ */
+int macVNCFramebufferDeferMilliseconds(int framesPerSecond);
