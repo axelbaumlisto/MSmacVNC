@@ -1,3 +1,67 @@
+# macVNC 0.3.77
+
+## The remote screen is now three times faster, for half the CPU
+
+Measured against the version from before this work, alternating runs on the
+same machine and the same workload:
+
+| | before | after |
+|---|---|---|
+| frames delivered to a viewer | 7.8 /s | 28.7 /s |
+| average gap between frames | 129 ms | 35 ms |
+| p99 gap | 174 ms | 57 ms |
+| worst gap | 183 ms | 89 ms |
+| server CPU per 15 s | 4.32 s | 2.23 s |
+
+The earlier release made compositing four times cheaper without making the
+screen feel faster. Measuring what a viewer actually experiences showed why:
+compositing was 3 ms of a 140 ms budget, and the other 137 ms were two
+deliberate delays stacked on top of each other. Captures ran at 12 frames per
+second, and each update was then held for another 84 ms - a value derived from
+the capture rate itself.
+
+Both are now settings, with defaults chosen from measurement:
+
+- the hold is a fixed 10 ms coalescing window, just long enough to let one
+  captured frame's tiles travel together. It is never zero: at zero, updates
+  stop batching and the worst case explodes to over two seconds.
+- captures default to 30 per second. 60 was measured and delivers no more
+  frames with worse worst-cases, because the limit is encode and transfer.
+
+## Frame rate and image quality in Preferences
+
+Two new popups. Both defaults are the measured best, and every alternative is
+one click away.
+
+**Frame rate** - Battery saver 8, Balanced 15, **Smooth 30 (default)**,
+Maximum 60. It is shared by every viewer, because there is one screen capture
+per display no matter how many people are connected.
+
+**Image quality** - Follow the viewer, Maximum (lossless), then 7 down to 0,
+with **5** as the default. This is honestly a bandwidth control: across the
+whole JPEG range the frame rate and CPU barely move while bandwidth spans
+1.9 to 5.1 MB/s.
+
+Two things are deliberately NOT offered, because measurement showed them to be
+traps rather than choices:
+
+- **Quality levels 8 and 9.** Each sends MORE data than lossless while looking
+  worse than lossless - level 9 costs 2.45x the bytes for a picture that is
+  still lossy. If you want the best possible image, "Maximum - lossless" is
+  both better and cheaper.
+- **The compression level.** Levels 1 through 9 produce byte-identical output;
+  only level 0 differs, by being 4.3x larger for the same pixels.
+
+macVNC applies your chosen level on top of what the viewer asks for, since most
+viewers send their own and a setting that only applied to silent viewers would
+do nothing. "Follow the viewer's own setting" is there for the opposite choice.
+
+## Fixes
+
+- A stored frame rate or image quality that cannot be read falls back to the
+  default and says so in the log, instead of preventing the server from
+  starting: a mistyped setting must not make the Mac unreachable.
+
 # macVNC 0.3.75
 
 ## The remote screen paints roughly six times cheaper

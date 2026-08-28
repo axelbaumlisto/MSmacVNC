@@ -470,6 +470,28 @@ shifts or breaks.
    line rather than implying live application.
 6. Document both settings in `README.md` with their measured cost.
 
+### Task 7 RESULT (measured, two rounds, alternating)
+
+| build | CPU-s / 15 s | fps | mean gap | p99 | max |
+|---|---|---|---|---|---|
+| baseline `be4c83e` r1 | 4.32 | 7.8 | 129.5 ms | 174.5 ms | 183.0 ms |
+| new r1 | 2.27 | 27.5 | 36.5 ms | 70.7 ms | 108.6 ms |
+| baseline `be4c83e` r2 | 4.32 | 7.8 | 129.0 ms | 172.7 ms | 178.6 ms |
+| new r2 | 2.19 | 29.8 | 33.7 ms | 43.4 ms | 70.3 ms |
+
+3.7x the frames, 3.7x lower average latency, 3x lower p99 - at HALF the CPU of
+the version from before any of this work, which is better than the budget the
+plan set (equal CPU). The extra saving comes from the image profile: quality 5
+sends fewer bytes than the quality 7 the probe requests, so there is less to
+encode and transmit.
+
+Pacing no longer dominates: the average gap is 35 ms against a 33 ms capture
+interval, so the remaining budget IS the capture interval. Going further means
+capturing faster, and 60 FPS was already measured to deliver no more frames -
+the limit moved to encode and transfer. That is where a next plan would start,
+and it needs a product decision (resolution, or a codec beyond Tight), not a
+tuning change. STOPPING here as the plan required.
+
 ### Task 7: Re-measure, then stop or escalate
 **Files:** `.pi/plans/quality-and-frame-rate-settings.md`, `RELEASE_NOTES.md`
 **Depends:** Task 6
