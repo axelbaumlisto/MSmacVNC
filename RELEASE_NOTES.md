@@ -1,3 +1,57 @@
+# macVNC 0.3.75
+
+## The remote screen paints roughly six times cheaper
+
+Measured with a client attached and two displays streaming, before and after,
+in the same conditions:
+
+| | before | after |
+|---|---|---|
+| composite, average | 44.22 ms | 3.01 ms |
+| composite, worst | 536 ms | 14.8 ms |
+| app CPU while streaming | ~29% | ~5% |
+
+Two separate causes, both measured before anything was changed.
+
+- **The pixel loops worked one byte at a time.** Comparing and copying went
+  three loads and three stores per pixel, because the fourth byte is alpha and
+  VNC's 24-bit depth ignores it. They now work on whole pixels with alpha
+  masked out. A full-frame sweep dropped from 10.05 ms to 3.30 ms.
+- **macOS was already telling us what changed, and we ignored it.**
+  ScreenCaptureKit reports the rectangles it repainted; the server re-scanned
+  all 29.5 MB of every frame to rediscover them. It now reads that metadata:
+  588 of 600 live frames composited from a hint.
+
+  The hint is never trusted blindly, because being wrong about it would leave
+  part of your screen stale: every hinted tile is still compared before being
+  copied, rectangles are clamped into the frame, anything unexpected means
+  "scan everything", and each display is swept in full every five seconds
+  regardless. Audited live under load - 500 hinted frames, 61 225 tiles - with
+  zero tiles missed.
+
+A NEON implementation was tried and rejected: at ~25 GB/s the loop is limited
+by memory bandwidth, not arithmetic, so wider registers bought nothing worth
+the architecture-specific code.
+
+## The placeholder checkerboard on connect is gone
+
+A viewer shows its own "no data" pattern when it is let in before any pixels
+exist. The server holds authentication back until every display has produced a
+frame - the budget for that was 3 seconds, set when captures were always warm.
+Cold starts measure 1.3-2.1 s, and once power assertions became per-session the
+panel could be asleep, so waking it ate the rest of the margin.
+
+The budget is now 8 seconds, and it is a ceiling rather than a delay: a warm
+reconnect still costs 0.00 s. A capture FAILURE now ends the wait immediately
+instead of burning the whole budget on a frame that is never coming.
+
+## Fixes
+
+- Every encrypted (TLS) connection leaked a small block of memory that
+  LibVNCServer allocates and never frees. Certificate paths are also copied
+  once per process instead of once per connection.
+- Two viewers connecting at once no longer starve each other's first paint.
+
 # macVNC 0.3.66
 
 ## Six adversarial review rounds applied to the whole codebase
