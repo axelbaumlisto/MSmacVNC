@@ -359,7 +359,7 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond)
       return FALSE;
   }
   int framebufferDeferMilliseconds =
-      macVNCCaptureFrameIntervalMilliseconds(captureFramesPerSecond);
+      macVNCFramebufferDeferMilliseconds(captureFramesPerSecond);
   if (framebufferDeferMilliseconds == 0) {
       rfbErr("Could not derive framebuffer interval for %d FPS\n",
              captureFramesPerSecond);
