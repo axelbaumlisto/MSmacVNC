@@ -173,6 +173,80 @@ belongs in the menu as an honest option, not as the default.
 | 12/10 | quality 5 | 2.4 | 3.32 | 24.1 | 42 ms | 78 ms | **84 ms** |
 | 12/10 | quality 2 | 1.2 | 3.18 | 20.6 | 49 ms | 82 ms | 195 ms |
 
+### Every level, measured: which ones actually give something
+
+The live-desktop sweep was invalid for this question - bytes measured how much
+the desktop happened to repaint. The workload is now REPRODUCIBLE: `qserver`
+scrolls the same image by 4 px at 30 FPS and marks the screen, so every level
+encodes exactly the same changes (`QSERVER_ANIMATE=4`).
+
+Static image, identical pixels every run (1600x600 UI + photo):
+
+| level | wire KB | vs lossless | PSNR text | PSNR photo | max error | step |
+|---|---|---|---|---|---|---|
+| lossless | 298 | 1.00x | perfect | perfect | 0 | |
+| 0 | 88 | 0.29x | 25.4 dB | 28.1 dB | 163 | |
+| 1 | 109 | 0.37x | 27.3 dB | 30.2 dB | 156 | +22 KB |
+| 2 | 124 | 0.42x | 28.2 dB | 31.3 dB | 130 | +15 KB |
+| 3 | 127 | 0.43x | 28.5 dB | 31.9 dB | 108 | **+3 KB** |
+| 4 | 152 | 0.51x | 29.8 dB | 33.5 dB | 101 | +25 KB |
+| 5 | 187 | 0.63x | 31.5 dB | 35.5 dB | 85 | +34 KB |
+| 6 | 214 | 0.72x | 33.4 dB | 36.9 dB | 75 | +27 KB |
+| 7 | 255 | 0.86x | 35.7 dB | 39.1 dB | 56 | +41 KB |
+| 8 | 318 | **1.07x** | 39.1 dB | 42.4 dB | 45 | +62 KB |
+| 9 | 730 | **2.45x** | 53.0 dB | 56.2 dB | 5 | +412 KB |
+
+Reproducible animated workload, 12 s streaming:
+
+| level | MB/s | server CPU-s | fps | mean gap |
+|---|---|---|---|---|
+| lossless | 5.70 | 3.48 | 19.3 | 52 ms |
+| 0 | 1.85 | 2.18 | 21.3 | 47 ms |
+| 1 | 2.07 | 2.19 | 19.1 | 53 ms |
+| 2 | 2.61 | 2.40 | 21.3 | 47 ms |
+| 3 | 2.61 | 2.24 | 20.9 | 48 ms |
+| 4 | 3.16 | 2.29 | 21.2 | 48 ms |
+| 5 | 3.83 | 2.31 | 21.0 | 48 ms |
+| 6 | 4.39 | 2.32 | 21.1 | 48 ms |
+| 7 | 5.14 | 2.29 | 20.8 | 48 ms |
+| 8 | 6.38 | 2.51 | 20.8 | 48 ms |
+| 9 | 14.45 | 2.49 | 20.6 | 49 ms |
+
+What the two tables say together:
+
+- **Bandwidth is the only thing quality really buys or spends**: 1.85 to 14.45
+  MB/s, a 7.8x range. Frame rate stays 19-21 and CPU stays 2.2-2.5 s across the
+  whole JPEG range, because on a fast link the encode is not the bottleneck.
+  So the setting is honestly a BANDWIDTH control, and must be labelled as one.
+- **Levels 8 and 9 are strictly dominated by lossless** - more bytes AND worse
+  pixels (8: 1.07x bytes for 39 dB; 9: 2.45x bytes for 53 dB, vs lossless at
+  1.00x and perfect). They are excluded, and this is the measured reason.
+- **Level 3 is a duplicate of level 2**: +3 KB and +0.3 dB static, byte-identical
+  animated. It stays in the list only so the scale reads 0-7 without a hole -
+  noted here so nobody later "fixes" the gap they would otherwise find.
+- **Lossless costs the most CPU** (3.48 vs ~2.3) and the second-most bandwidth,
+  but is the ONLY perfect option. It belongs at the top of the ladder, not
+  hidden.
+
+### The full menu
+
+```
+Follow the viewer            leave the device's own request alone
+Maximum - lossless           perfect pixels, 5.7 MB/s, highest CPU
+7 - sharpest JPEG            35.7 dB, 5.1 MB/s
+6                            33.4 dB, 4.4 MB/s
+5 - balanced (default)       31.5 dB, 3.8 MB/s
+4                            29.8 dB, 3.2 MB/s
+3                            28.5 dB, 2.6 MB/s
+2                            28.2 dB, 2.6 MB/s
+1                            27.3 dB, 2.1 MB/s
+0 - smallest bandwidth       25.4 dB, 1.9 MB/s
+```
+
+Eleven items, every one of which changes something measurable. Quality 8 and 9
+are absent because lossless beats both on both axes; compression level is absent
+because levels 1-9 are byte-identical and 0 is 4.3x worse.
+
 ### The settings this measurement argues for
 
 - **Default: capture 30 FPS, defer 10 ms, image quality 5.** Measured 33.4 fps,
@@ -386,9 +460,10 @@ shifts or breaks.
    `NSPopUpButton`, same window, no new controller.
 2. **Frame rate:** `Battery saver (8 fps)`, `Balanced (15 fps)`,
    **`Smooth (30 fps)` — default**, `Maximum (60 fps)`.
-3. **Image quality**, named for what it trades (see the decision section):
-   `Maximum quality (no JPEG)`, `High quality`, **`Balanced` — default**,
-   `Low bandwidth`, `Follow the viewer`. No quality 9, no compression level.
+3. **Image quality:** the full eleven-item ladder from the measurement section
+   (`Follow the viewer`, `Maximum - lossless`, then 7 down to 0 with
+   **5 as the default**). Every item changes something measurable; 8, 9 and the
+   compression level are excluded with measured reasons.
 4. Persist as number and name respectively, so a hand-edited `defaults write`
    stays readable and matches Task 3's parser.
 5. Rely on the window's existing "Changes take effect after restarting macVNC"
