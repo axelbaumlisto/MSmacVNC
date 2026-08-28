@@ -30,6 +30,7 @@ modules**, and keep the Objective-C layer as thin glue to macOS frameworks
                  │   MacVNCCompositor (pixels → canvas, locking) │
                  │   MacVNCInput (kbd/ptr)  MacVNCPowerMgmt      │
                  │   MacVNCDisplayWake      ScreenCapturer (SCK) │
+                 │   MacVNCCurtainWindow (black locally only)    │
                  └───────────────┬──────────────────────────────┘
                                  │ function-pointer / block seams
                  ┌───────────────▼──────────────────────────────┐
@@ -153,6 +154,44 @@ Objective-C glue:
   and shares ONE first-frame budget across displays so a two-monitor Mac does
   not make the client wait twice as long. Because it holds the framework,
   `mac.m` no longer includes ScreenCaptureKit at all.
+  It also owns the curtain's capture half
+  (`macVNCCaptureSessionSetSelfExcluded`): every stream's filter is rebuilt to
+  exclude THIS APPLICATION and swapped onto the RUNNING stream with
+  `-updateContentFilter:completionHandler:`. Excluding by application rather
+  than by window is what makes the swap order-independent — a window filter
+  would need the window to be on screen to be enumerable, forcing the curtain
+  to be shown BEFORE the stream stops carrying it, i.e. showing the remote
+  viewer black. A session with no live stream reports FAILURE, because
+  "nothing to exclude" must not read as "the curtain may go up".
+- **MacVNCCurtainWindow** — the curtain's screen half: one borderless black
+  window per `NSScreen` at `NSScreenSaverWindowLevel` (joining all Spaces, and
+  auxiliary to full-screen apps, because the level alone covers neither),
+  ordered in with `orderFrontRegardless` so the LSUIElement app never activates
+  or takes focus. Two rules are load-bearing. (1) The window is `setOpaque:NO`
+  with `MACVNC_CURTAIN_ALPHA` = 0.999: an opaque occluder would make every
+  window under it report `NSWindowOcclusionState` "not visible", well-behaved
+  apps would stop drawing, and the REMOTE viewer would get a frozen desktop
+  that a "not black" acceptance test still passes. 0.999 is a luminance
+  criterion, not a taste: `(1 - alpha) * 255 = 0.255` of one 8-bit level, which
+  quantises to 0 even over pure white — stated for 8-BIT output, since the same
+  arithmetic yields level 1 of 1023 on a 10-bit panel (the header says so, and
+  the on-device luminance check is what would justify changing the value). (2)
+  Raise and lift are MIRRORED orders —
+  swap the filter, then show the windows; hide the windows, then restore the
+  filter — and a swap that never answers is a FAILURE, bounded by
+  `MACVNC_CURTAIN_FILTER_SWAP_TIMEOUT_NANOSECONDS`, after which the windows
+  stay down and the exclusion is taken back. The window set, the ordering and
+  the timeout sit above injected seams (occluders, exclusion, scheduler), so
+  `tests/test_curtain_window.m` exercises hot-plug, both orders, the timeout
+  and the late-answer race with no display attached, plus the rule that a
+  curtain which is DOWN answers `NSApplicationDidChangeScreenParameters` with
+  nothing at all — a resolution change or a display sleep must not quietly
+  allocate a window per screen for a curtain nobody raised.
+  `tests/test_capture_exclusion.m` covers the other side of the seam: one
+  answer per request, on the main thread, surviving a session rebuilt from
+  another thread. Nothing raises it yet: the controller that decides when a
+  curtain should be up is separate, and so is re-establishing the exclusion
+  after a session rebuild (a rebuilt stream carries the default filter again).
 
 ### The dirty hint is an optimisation, never the source of truth
 
@@ -227,7 +266,7 @@ pixels rather than points.
 
 ## Tests
 
-`ctest` runs 36 targets (the number is enforced: `architecture_doc` compares
+`ctest` runs 38 targets (the number is enforced: `architecture_doc` compares
 this sentence against CMakeLists.txt's `add_test` count, so a target added or
 commented out fails the suite until this line is updated deliberately). Every
 assertion added here is checked by mutating the source and confirming the test
@@ -248,10 +287,20 @@ must not be counted as automated coverage.
   **MacVNCCompositor**) guards the shared canvas; `clientLifecycleMutex` guards
   per-client state and the connected-client count; `vncConnectedClients` /
   `publishedServerPort` are `_Atomic`.
-- **MacVNCCaptureSession** holds no lock of its own. Its set is mutated only
-  under `serverLifecycleMutex` at points where no client thread is running, and
-  merely read from client threads; see the header for the invariant that makes
-  this sound.
+- **MacVNCCaptureSession** holds ONE lock, and only three functions take it.
+  Its set is mutated under `serverLifecycleMutex` at points where no client
+  thread is running, and merely read from client threads — which are joined by
+  `rfbShutdownServer(screen, TRUE)` before a writer runs, so those readers stay
+  lock-free; see the header for that invariant. The exception is
+  `macVNCCaptureSessionSetSelfExcluded`, the curtain's capture seam: it is
+  called from the MAIN thread, which is never joined, so "lift the curtain" and
+  "stop the server" really can overlap and an unlocked `[gCapturers copy]`
+  would retain an array `Reset` had just freed. Build, Reset and SetSelfExcluded
+  therefore share a module-private mutex; it is a LEAF (taken under
+  `serverLifecycleMutex`, never held while messaging a capturer) and is never
+  held across `-[ScreenCapturer dealloc]`, whose bounded sample-queue drain
+  would otherwise stall the main thread for seconds — `Reset` moves the list
+  out under the lock and releases it outside.
 - `captureControlMutex` serialises capture start/stop and is **never** held
   together with `clientLifecycleMutex`, so no order can arise between them.
   Captures run iff `vncConnectedClients > 0`; both the connect and disconnect

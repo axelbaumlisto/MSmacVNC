@@ -15,8 +15,8 @@
  * blocks that composite frames, and classified SCK error codes, so the file
  * that starts a TCP server also had to know the capture framework.
  *
- * THREADING, as used by mac.m - the stream list is not mutex-protected, and
- * that is sound only because of WHEN each operation runs:
+ * THREADING, as used by mac.m - MOST of the stream list is not mutex-protected,
+ * and that is sound only because of WHEN each operation runs:
  *
  *  - Build and Reset mutate the list. Both run under serverLifecycleMutex, at a
  *    point where no client thread exists yet or all have been joined by
@@ -28,6 +28,22 @@
  * So a reader never overlaps a writer. Calling Build or Reset from a client
  * thread, or stopping the server without joining clients first, breaks that and
  * needs a lock here.
+ *
+ * SetSelfExcluded is the ONE reader that argument does not cover, and it does
+ * take a lock. It is called from the MAIN thread (the curtain lives there,
+ * because ordering windows is main-thread work), and the main thread is never
+ * joined by rfbShutdownServer - so "server stop" and "lift the curtain" can be
+ * genuinely concurrent, and reading the list unlocked would be a retain of an
+ * array Reset had just freed. Build, Reset and SetSelfExcluded therefore share
+ * a module-private mutex; the client-thread readers above are deliberately
+ * left lock-free, since their justification still holds.
+ *
+ * That mutex is a LEAF: it is taken after serverLifecycleMutex (Build/Reset run
+ * under it) and never held while messaging a capturer, so no callback path can
+ * take it in the other order. It is never held across -[ScreenCapturer dealloc]
+ * either - Reset moves the list out under the lock and releases it outside,
+ * because that dealloc can wait, bounded, for a sample queue to drain and the
+ * main thread must not block for seconds behind it.
  *
  * StopAndWait BLOCKS - bounded, but up to five seconds per display while
  * in-flight capture work drains. Never call it while holding a lock that a
@@ -91,3 +107,41 @@ void macVNCCaptureSessionStopAndWait(void);
  * of monitors. True when all became ready inside the budget.
  */
 bool macVNCCaptureSessionWaitForFirstFrames(uint64_t timeoutNanoseconds);
+
+/* Called exactly once, on the MAIN queue, with the outcome of an exclusion
+ * request. Main queue because the only caller acts on it by ordering windows
+ * in or out, which is main-thread-only work. */
+typedef void (*MacVNCCaptureExclusionCompletion)(void *context, bool success);
+
+/*
+ * Ask every stream of the session to stop (or resume) capturing THIS
+ * application's own windows - the capture half of curtain mode.
+ *
+ * Excludes by APPLICATION, not by window: the filter is rebuilt with
+ * -[SCContentFilter initWithDisplay:excludingApplications:exceptingWindows:]
+ * and swapped onto the RUNNING stream with -updateContentFilter:, so no window
+ * has to exist (let alone be on screen and enumerable) for the exclusion to
+ * take effect, and the stream is never stopped and restarted.
+ *
+ * `success` is true only when EVERY stream confirmed the swap. A session with
+ * no streams reports failure: "nothing to exclude" must not read as "the
+ * curtain may go up", because with no live stream a raised curtain shows the
+ * local user black and the remote party nothing.
+ *
+ * Applies NO timeout of its own - a completion that never arrives is the
+ * caller's to bound (see MacVNCCurtainWindow), so the deadline has one owner.
+ *
+ * Safe to call from the main thread concurrently with a server start or stop:
+ * it takes the module mutex (see THREADING above) just long enough to copy the
+ * stream list, which retains every stream for the duration of the request, and
+ * releases it before messaging any of them. A session being rebuilt underneath
+ * is seen as "no streams", i.e. failure.
+ *
+ * The exclusion lives on the streams of the CURRENT session only: it is state
+ * on an SCStream, and Build always constructs the default filter, so a session
+ * rebuilt after a server stop/start no longer excludes us. Whoever decides when
+ * the curtain is up must re-establish or drop it; this module does not.
+ */
+void macVNCCaptureSessionSetSelfExcluded(bool excluded,
+                                         MacVNCCaptureExclusionCompletion completion,
+                                         void *context);
