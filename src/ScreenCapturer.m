@@ -19,6 +19,9 @@ static const void * const kMacVNCStateQueueKey = &kMacVNCStateQueueKey;
     pthread_mutex_t _readinessMutex;
     pthread_cond_t _readinessCondition;
     BOOL _firstFrameReady;
+    /* Set when this generation's capture failed: a waiter must stop waiting
+       for a first frame that is never coming. Guarded by _readinessMutex. */
+    BOOL _captureFailed;
     NSUInteger _readinessGeneration;
     MacVNCFrameMailbox _frameMailbox;
     BOOL _frameMailboxInitialized;
@@ -113,6 +116,7 @@ static void endMailboxActivity(void *context)
         pthread_mutex_init(&_readinessMutex, NULL);
         pthread_cond_init(&_readinessCondition, NULL);
         _firstFrameReady = NO;
+        _captureFailed = NO;
         _readinessGeneration = 0;
 #if defined(MACVNC_ENABLE_TEST_HOOKS)
         if (captureInitializationsBeforeFailure == 0) {
@@ -168,7 +172,7 @@ static void endMailboxActivity(void *context)
                       error:&addOutputError];
     if (addOutputError) {
         [stream release];
-        self.errorHandler(addOutputError);
+        [self reportCaptureError:addOutputError];
         dispatch_group_leave(self.operationGroup);
         return;
     }
@@ -179,7 +183,7 @@ static void endMailboxActivity(void *context)
         dispatch_async(self.stateQueue, ^{
             if (startError && self.captureRequested &&
                 self.generation == generation && self.stream == stream)
-                self.errorHandler(startError);
+                [self reportCaptureError:startError];
             dispatch_group_leave(self.operationGroup);
         });
     }];
@@ -196,6 +200,7 @@ static void endMailboxActivity(void *context)
         pthread_mutex_lock(&self->_readinessMutex);
         self->_readinessGeneration = generation;
         self->_firstFrameReady = NO;
+        self->_captureFailed = NO;
         pthread_cond_broadcast(&self->_readinessCondition);
         pthread_mutex_unlock(&self->_readinessMutex);
         dispatch_group_enter(self.operationGroup);
@@ -208,7 +213,7 @@ static void endMailboxActivity(void *context)
                     return;
                 }
                 if (error) {
-                    self.errorHandler(error);
+                    [self reportCaptureError:error];
                     dispatch_group_leave(self.operationGroup);
                     return;
                 }
@@ -221,7 +226,7 @@ static void endMailboxActivity(void *context)
                     NSError *noDisplayError = [NSError errorWithDomain:@"ScreenCapturerErrorDomain"
                                                                   code:1
                                                               userInfo:@{NSLocalizedDescriptionKey : @"Display not available for capture"}];
-                    self.errorHandler(noDisplayError);
+                    [self reportCaptureError:noDisplayError];
                     dispatch_group_leave(self.operationGroup);
                     return;
                 }
@@ -240,6 +245,7 @@ static void endMailboxActivity(void *context)
         pthread_mutex_lock(&self->_readinessMutex);
         self->_readinessGeneration = self.generation;
         self->_firstFrameReady = NO;
+        self->_captureFailed = NO;
         pthread_cond_broadcast(&self->_readinessCondition);
         pthread_mutex_unlock(&self->_readinessMutex);
         stream = [self.stream retain];
@@ -300,7 +306,7 @@ static void endMailboxActivity(void *context)
 - (void)stream:(SCStream *)stream didStopWithError:(NSError *)error {
     dispatch_async(self.stateQueue, ^{
         if (self.captureRequested && self.stream == stream)
-            self.errorHandler(error);
+            [self reportCaptureError:error];
     });
 }
 
@@ -402,6 +408,25 @@ static void endMailboxActivity(void *context)
     dispatch_group_leave(self.operationGroup);
 }
 
+/*
+ * Deliver a capture failure, waking anyone blocked on the first frame first.
+ *
+ * Without this a freshly authenticated client sat out the WHOLE first-frame
+ * budget on a failure it could already have been told about - eight silent
+ * seconds for a stream that will never produce a frame. The wake does not
+ * fake readiness: _firstFrameReady stays NO, so the waiter simply stops
+ * waiting and reports "not ready".
+ */
+- (void)reportCaptureError:(NSError *)error
+{
+    pthread_mutex_lock(&_readinessMutex);
+    _captureFailed = YES;
+    pthread_cond_broadcast(&_readinessCondition);
+    pthread_mutex_unlock(&_readinessMutex);
+    if (self.errorHandler)
+        self.errorHandler(error);
+}
+
 - (BOOL)waitForFirstFrameWithTimeout:(NSTimeInterval)timeout {
     __block NSUInteger generation = 0;
     __block BOOL requested = NO;
@@ -423,7 +448,8 @@ static void endMailboxActivity(void *context)
         macVNCMonotonicNow(), durationNanoseconds);
 
     pthread_mutex_lock(&_readinessMutex);
-    while (_readinessGeneration == generation && !_firstFrameReady) {
+    while (_readinessGeneration == generation && !_firstFrameReady &&
+           !_captureFailed) {
         uint64_t remaining = macVNCFirstFrameBudgetRemaining(
             &budget, macVNCMonotonicNow());
         if (remaining == 0)

@@ -57,6 +57,12 @@ int main(void)
         /* Round 1: start, expect frames. */
         macVNCCaptureSessionStart();
         BOOL got1 = macVNCCaptureSessionWaitForFirstFrames(5ULL * NSEC_PER_SEC);
+        /* The wait is woken by the failure BEFORE the failure handler runs -
+           that ordering is deliberate, so the client is released as early as
+           possible. It means the reason may land a moment after the wait
+           returns, so give it one, rather than racing it. */
+        for (int i = 0; !got1 && i < 200 && !atomic_load(&permissionDenied); ++i)
+            usleep(10000);
         if (!got1 && atomic_load(&permissionDenied)) {
             puts("test_capture_restart: SKIP (no Screen Recording grant for "
                  "the test binary; the flow is verified in the installed app)");
