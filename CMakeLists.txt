@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.75 LANGUAGES C)
+project(macVNC VERSION 0.3.76 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -50,6 +50,7 @@ set(SOURCE_FILES
     src/MacVNCCompositor.m
     src/MacVNCCaptureSession.h
     src/MacVNCCaptureSession.m
+    src/MacVNCSweepSchedule.c
     src/PointerState.h
     src/PointerState.c
     src/KeyboardModifierState.h
@@ -189,6 +190,11 @@ if(BUILD_TESTING)
                    tests/bench_composite.c src/CompositeFramebuffer.c)
     target_include_directories(bench_composite PRIVATE src)
 
+    add_executable(test_sweep_schedule tests/test_sweep_schedule.c
+                   src/MacVNCSweepSchedule.c)
+    target_include_directories(test_sweep_schedule PRIVATE src)
+    add_test(NAME sweep_schedule COMMAND test_sweep_schedule)
+
     add_executable(test_compositor tests/test_compositor.c src/CompositeFramebuffer.c)
     target_include_directories(test_compositor PRIVATE src)
     add_test(NAME compositor COMMAND test_compositor)
@@ -264,7 +270,8 @@ if(BUILD_TESTING)
     add_test(NAME allowlist_plan COMMAND test_allowlist_plan)
 
     add_executable(test_capture_session tests/test_capture_session.m
-        src/MacVNCCaptureSession.m src/ScreenCapturer.m src/FrameMailbox.c
+        src/MacVNCCaptureSession.m
+    src/MacVNCSweepSchedule.c src/ScreenCapturer.m src/FrameMailbox.c
         src/FirstFrameBudget.c src/CaptureRate.c)
     target_include_directories(test_capture_session PRIVATE src)
     target_link_libraries(test_capture_session
@@ -360,6 +367,7 @@ if(BUILD_TESTING)
         src/CompositeFramebuffer.c
         src/MacVNCCompositor.m
         src/MacVNCCaptureSession.m
+    src/MacVNCSweepSchedule.c
         src/PointerState.c
         src/KeyboardModifierState.c
         src/CaptureRate.c
