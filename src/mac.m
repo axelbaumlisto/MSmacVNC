@@ -639,6 +639,16 @@ static void clientGone(rfbClientPtr cl)
 {
     int remaining;
 
+    /* Upstream leak, 16 bytes per TLS client: rfbssl_destroy() frees the SSL
+       and SSL_CTX objects but never the little struct that holds them
+       (0.9.15 rfbssl_openssl.c:128-135). rfbCloseClient always runs that
+       destroy BEFORE rfbClientConnectionGone reaches this hook
+       (sockets.c:572 vs rfbserver.c:606), so nothing can still be using it. */
+    if (cl->sslctx) {
+        free(cl->sslctx);
+        cl->sslctx = NULL;
+    }
+
     pthread_mutex_lock(&clientLifecycleMutex);
     MacVNCClientState *state = cl->clientData;
     if (state && state->captureCounted) {
@@ -706,8 +716,15 @@ void macVNCTLSHandleVeNCrypt(rfbClientPtr cl)
         rfbCloseClient(cl);
         return;
     }
-    cl->screen->sslcertfile = strdup(certPath);
-    cl->screen->sslkeyfile  = strdup(keyPath);
+    /* One copy per process, not per connection: the paths never change, and
+       strdup-ing on every TLS client leaked the previous pair (the screen does
+       not own or free them). */
+    static char *gCertPathOwned = NULL;
+    static char *gKeyPathOwned = NULL;
+    if (!gCertPathOwned) gCertPathOwned = strdup(certPath);
+    if (!gKeyPathOwned)  gKeyPathOwned  = strdup(keyPath);
+    cl->screen->sslcertfile = gCertPathOwned;
+    cl->screen->sslkeyfile  = gKeyPathOwned;
 
     /* OpenSSL 4 defaults may exclude our self-signed-RSA setup ("library has
        no ciphers" at handshake). Point the TLS library at an explicit config
