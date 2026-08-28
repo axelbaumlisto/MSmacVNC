@@ -7,6 +7,88 @@
 #import "CaptureRate.h"
 #import "NetworkPolicyResolver.h"
 
+
+/*
+ * Resolving a performance setting: stored value first, environment override
+ * second, and the two have deliberately DIFFERENT contracts.
+ *
+ * A stored value that cannot be parsed falls back and logs, because a
+ * hand-edited setting must not make the Mac unreachable. An environment
+ * override that cannot be parsed is an error, because it was typed deliberately
+ * and silently ignoring it produces behaviour that disagrees with the command
+ * that asked for it.
+ *
+ * Extracted because both settings needed the same seven steps, and having them
+ * inline made the initialiser 148 lines that mixed network policy, credentials
+ * and encoder tuning.
+ */
+static int
+macVNCResolveCaptureRate(NSUserDefaults *defaults,
+                         NSDictionary<NSString *, NSString *> *environment,
+                         NSString **error)
+{
+    int rate = MACVNC_CAPTURE_FPS_DEFAULT;
+
+    /* A rejected value leaves `rate` alone (see macVNCParseCaptureFPS), so the
+       fallback is the initialiser above rather than a restatement. */
+    NSString *stored = [defaults objectForKey:MacVNCKeyCaptureFPS]
+                           ? [NSString stringWithFormat:@"%ld",
+                                  (long)[defaults integerForKey:MacVNCKeyCaptureFPS]]
+                           : nil;
+    if (stored.length > 0 &&
+        macVNCParseCaptureFPS(stored.UTF8String, &rate) ==
+            MACVNC_CAPTURE_RATE_INVALID)
+        NSLog(@"macVNC: ignoring stored captureFPS '%@'; using %d FPS",
+              stored, rate);
+
+    NSString *override = environment[@"MACVNC_CAPTURE_FPS"];
+    if (override.length > 0) {
+        int fromEnvironment = rate;
+        if (macVNCParseCaptureFPS(override.UTF8String, &fromEnvironment) ==
+                MACVNC_CAPTURE_RATE_INVALID) {
+            NSString *message = [NSString stringWithFormat:
+                @"Invalid MACVNC_CAPTURE_FPS '%@'; expected an integer from %d to %d",
+                override, MACVNC_CAPTURE_FPS_MIN, MACVNC_CAPTURE_FPS_MAX];
+            if (error && !*error)
+                *error = message;
+            NSLog(@"%@", message);
+        } else {
+            rate = fromEnvironment;
+        }
+    }
+    return rate;
+}
+
+static MacVNCImageProfile
+macVNCResolveImageProfile(NSUserDefaults *defaults,
+                          NSDictionary<NSString *, NSString *> *environment,
+                          NSString **error)
+{
+    MacVNCImageProfile profile = macVNCDefaultImageProfile();
+
+    NSString *stored = [defaults stringForKey:MacVNCKeyImageProfile];
+    if (stored.length > 0 && !macVNCParseImageProfile(stored.UTF8String, &profile))
+        NSLog(@"macVNC: ignoring stored imageProfile '%@'; using '%s'",
+              stored, macVNCImageProfileName(profile));
+
+    NSString *override = environment[@"MACVNC_IMAGE_PROFILE"];
+    if (override.length > 0) {
+        MacVNCImageProfile fromEnvironment;
+        if (macVNCParseImageProfile(override.UTF8String, &fromEnvironment)) {
+            profile = fromEnvironment;
+        } else {
+            NSString *message = [NSString stringWithFormat:
+                @"Invalid MACVNC_IMAGE_PROFILE '%@'; expected 'viewer', "
+                @"'lossless', or a level from %d to %d", override,
+                MACVNC_IMAGE_QUALITY_MIN, MACVNC_IMAGE_QUALITY_MAX];
+            if (error && !*error)
+                *error = message;
+            NSLog(@"%@", message);
+        }
+    }
+    return profile;
+}
+
 @implementation MacVNCStartupConfig {
     /* Backing storage keeping the produced config's const char* fields alive. */
     NSString *_password;               /* nil = no password (invalid) */
@@ -68,65 +150,10 @@
             NSLog(@"%@", error);
     }
 
-    /* Capture rate: the stored setting is the normal path, the environment
-       variable stays the debugging seam and therefore wins. Both go through the
-       same parser so there is exactly one validation rule. An unusable value
-       must never prevent the server from starting - it falls back and says so,
-       because a mistyped frame rate is not a reason to be unreachable. */
-    int captureFramesPerSecond = MACVNC_CAPTURE_FPS_DEFAULT;
-    NSString *storedFPS = [defaults objectForKey:MacVNCKeyCaptureFPS]
-                              ? [NSString stringWithFormat:@"%ld",
-                                     (long)[defaults integerForKey:MacVNCKeyCaptureFPS]]
-                              : nil;
-    /* A rejected value leaves the variable alone (see macVNCParseCaptureFPS),
-       so the fallback is the initialiser above rather than a restatement. */
-    if (storedFPS.length > 0 &&
-        macVNCParseCaptureFPS(storedFPS.UTF8String, &captureFramesPerSecond) ==
-            MACVNC_CAPTURE_RATE_INVALID)
-        NSLog(@"macVNC: ignoring stored captureFPS '%@'; using %d FPS",
-              storedFPS, captureFramesPerSecond);
-    /* The environment is a different SOURCE with a different contract: it is
-       typed deliberately by whoever is debugging, so silently ignoring it would
-       produce measurements that quietly disagree with the command that asked
-       for them. A stored setting falls back; an environment override fails. */
-    NSString *captureFPSOverride = environment[@"MACVNC_CAPTURE_FPS"];
-    if (captureFPSOverride.length > 0) {
-        int fromEnvironment = captureFramesPerSecond;
-        if (macVNCParseCaptureFPS(captureFPSOverride.UTF8String,
-                                  &fromEnvironment) == MACVNC_CAPTURE_RATE_INVALID) {
-            NSString *rateError = [NSString stringWithFormat:
-                @"Invalid MACVNC_CAPTURE_FPS '%@'; expected an integer from %d to %d",
-                captureFPSOverride, MACVNC_CAPTURE_FPS_MIN, MACVNC_CAPTURE_FPS_MAX];
-            if (!error)
-                error = rateError;
-            NSLog(@"%@", rateError);
-        } else {
-            captureFramesPerSecond = fromEnvironment;
-        }
-    }
-
-    /* Image profile: same shape, same reasoning. */
-    MacVNCImageProfile imageProfile = macVNCDefaultImageProfile();
-    NSString *storedProfile = [defaults stringForKey:MacVNCKeyImageProfile];
-    if (storedProfile.length > 0 &&
-        !macVNCParseImageProfile(storedProfile.UTF8String, &imageProfile))
-        NSLog(@"macVNC: ignoring stored imageProfile '%@'; using '%s'",
-              storedProfile, macVNCImageProfileName(imageProfile));
-    NSString *profileOverride = environment[@"MACVNC_IMAGE_PROFILE"];
-    if (profileOverride.length > 0) {
-        MacVNCImageProfile fromEnvironment;
-        if (macVNCParseImageProfile(profileOverride.UTF8String, &fromEnvironment)) {
-            imageProfile = fromEnvironment;
-        } else {
-            NSString *profileError = [NSString stringWithFormat:
-                @"Invalid MACVNC_IMAGE_PROFILE '%@'; expected 'viewer', "
-                @"'lossless', or a level from %d to %d", profileOverride,
-                MACVNC_IMAGE_QUALITY_MIN, MACVNC_IMAGE_QUALITY_MAX];
-            if (!error)
-                error = profileError;
-            NSLog(@"%@", profileError);
-        }
-    }
+    int captureFramesPerSecond =
+        macVNCResolveCaptureRate(defaults, environment, &error);
+    MacVNCImageProfile imageProfile =
+        macVNCResolveImageProfile(defaults, environment, &error);
 
     _viewOnly = (rfbBool)[defaults boolForKey:MacVNCKeyViewOnly];
     _displayNumber = (int)[defaults integerForKey:MacVNCKeyDisplay];
