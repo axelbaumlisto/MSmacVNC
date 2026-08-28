@@ -5,6 +5,7 @@
 
 #include <rfb/rfb.h>
 
+#include "CompositeFramebuffer.h"
 #include "DisplayLayout.h"
 
 /*
@@ -50,4 +51,5 @@ void macVNCCompositorSetScreen(rfbScreenInfoPtr screen);
  */
 rfbBool macVNCCompositorSubmitFrame(const MacVNCDisplayGeometry *geometry,
                                     const uint8_t *pixels,
-                                    size_t stride);
+                                    size_t stride,
+                                    const MacVNCDirtyHint *hint);

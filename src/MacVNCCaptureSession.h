@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "CompositeFramebuffer.h"
 #include "DisplayLayout.h"
 
 /*
@@ -41,7 +42,8 @@
  * unwrapped from ScreenCaptureKit.
  *
  * `pixels` is BGRA, `stride` bytes per row, valid only for the duration of the
- * call. Return false for "not now": the frame is re-submitted rather than
+ * call. `hint` names the rectangles the capture source repainted, and is valid
+ * for the duration of the call too; an empty hint means "sweep everything". Return false for "not now": the frame is re-submitted rather than
  * dropped, because after a static screen there may be no further frame for a
  * long time and its pixels would stay missing on the client.
  */
@@ -49,7 +51,8 @@ typedef bool (*MacVNCCaptureFrameHandler)(const MacVNCDisplayGeometry *geometry,
                                           const uint8_t *pixels,
                                           size_t stride,
                                           int width,
-                                          int height);
+                                          int height,
+                                          const MacVNCDirtyHint *hint);
 
 /*
  * Called when capture fails at runtime. `likelyPermissionDenial` is true only

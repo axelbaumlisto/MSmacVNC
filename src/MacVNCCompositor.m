@@ -98,7 +98,8 @@ macVNCCompositorSetScreen(rfbScreenInfoPtr screen)
 rfbBool
 macVNCCompositorSubmitFrame(const MacVNCDisplayGeometry *geometry,
                             const uint8_t *pixels,
-                            size_t stride)
+                            size_t stride,
+                            const MacVNCDirtyHint *hint)
 {
     if (!geometry || !pixels)
         return TRUE; /* nothing to composite; not a retryable condition */
@@ -120,15 +121,16 @@ macVNCCompositorSubmitFrame(const MacVNCDisplayGeometry *geometry,
         return FALSE;
     }
 
-    macVNCCompositeDisplayFrame((uint8_t *)screen->frameBuffer,
-                                screen->width,
-                                screen->height,
-                                geometry,
-                                pixels,
-                                stride,
-                                TILE_SIZE,
-                                markCompositeDirty,
-                                screen);
+    macVNCCompositeDisplayFrameHinted((uint8_t *)screen->frameBuffer,
+                                      screen->width,
+                                      screen->height,
+                                      geometry,
+                                      pixels,
+                                      stride,
+                                      TILE_SIZE,
+                                      hint,
+                                      markCompositeDirty,
+                                      screen);
 
     unlockCurrentClients(&lockedClients);
     pthread_mutex_unlock(&compositorMutex);
