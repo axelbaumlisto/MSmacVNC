@@ -140,7 +140,20 @@ static rfbBool macVNCPasswordCheck(rfbClientPtr client,
                                    int length);
 void macVNCTLSHandleVeNCrypt(rfbClientPtr cl);
 
-#define INITIAL_READINESS_TIMEOUT_NANOSECONDS (3ULL * NSEC_PER_SEC)
+/*
+ * How long a freshly authenticated client waits for the first frame of every
+ * display before the server gives up and lets it proceed.
+ *
+ * This wait is why viewers historically never showed their "no data yet"
+ * placeholder (the checkerboard): AUTH_OK is held back until real pixels
+ * exist. The budget used to be 3s, chosen when captures were always warm.
+ * Measured cold starts on this machine are 1.3-2.1s for two displays - and
+ * that margin disappeared once power assertions became session-scoped, since
+ * the panel may now be asleep and ScreenCaptureKit has to wake it first.
+ * The budget is a CEILING, not a delay: the wait returns the moment every
+ * display has delivered, so a warm reconnect still costs 0.00s.
+ */
+#define INITIAL_READINESS_TIMEOUT_NANOSECONDS (8ULL * NSEC_PER_SEC)
 
 /* Number of currently connected clients (read by AppDelegate for status display) */
 _Atomic int vncConnectedClients = 0;
@@ -602,8 +615,13 @@ prepareAuthenticatedClient(rfbClientPtr cl)
     /* Outside the client lock: reconciling can stop captures, which waits. */
     reconcileCaptureState();
 
+    /* Logged with the elapsed time: when this fires, the viewer WILL show its
+       own "no data" placeholder, so the number is the thing to act on. */
+    uint64_t waitStart = macVNCMonotonicNow();
     if (!macVNCCaptureSessionWaitForFirstFrames(INITIAL_READINESS_TIMEOUT_NANOSECONDS))
-        rfbLog("Initial display readiness timed out; sending frames as they arrive\n");
+        rfbLog("Initial display readiness timed out after %.2f s; the viewer will "
+               "show a placeholder until frames arrive\n",
+               (double)(macVNCMonotonicNow() - waitStart) / 1e9);
 }
 
 static rfbBool
