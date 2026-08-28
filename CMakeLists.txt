@@ -55,6 +55,8 @@ set(SOURCE_FILES
     src/MacVNCSweepSchedule.c
     src/MacVNCCurtainPolicy.h
     src/MacVNCCurtainPolicy.c
+    src/MacVNCCurtainWindow.h
+    src/MacVNCCurtainWindow.m
     src/PointerState.h
     src/PointerState.c
     src/KeyboardModifierState.h
@@ -232,6 +234,44 @@ if(BUILD_TESTING)
                    src/MacVNCCurtainPolicy.c)
     target_include_directories(test_curtain_policy PRIVATE src)
     add_test(NAME curtain_policy COMMAND test_curtain_policy)
+
+    # The curtain's capture half from the session's side: one answer per
+    # request, on the main thread, and requests that survive a session being
+    # rebuilt underneath them from another thread (the "stop the server" vs
+    # "lift the curtain" pair the module mutex exists for).
+    add_executable(test_capture_exclusion tests/test_capture_exclusion.m
+                   src/MacVNCCaptureSession.m
+                   src/MacVNCEncryptionPolicy.c
+                   src/MacVNCImageProfile.c
+                   src/MacVNCSweepSchedule.c
+                   src/ScreenCapturer.m
+                   src/FrameMailbox.c
+                   src/FirstFrameBudget.c
+                   src/CaptureRate.c)
+    target_include_directories(test_capture_exclusion PRIVATE src)
+    target_link_libraries(test_capture_exclusion
+        ${SCREEN_CAPTURE_KIT} ${CORE_MEDIA} ${CORE_VIDEO}
+        ${FOUNDATION} ${APPKIT_LIBRARY} ${CMAKE_THREAD_LIBS_INIT})
+    add_test(NAME capture_exclusion COMMAND test_capture_exclusion)
+
+    # The curtain's screen half: window bookkeeping, raise/lift ordering and the
+    # filter-swap timeout, all above the AppKit/ScreenCaptureKit seams so the
+    # test needs no display. It links the capture session because the shipped
+    # exclusion seam calls it - the test itself drives fakes.
+    add_executable(test_curtain_window tests/test_curtain_window.m
+                   src/MacVNCCurtainWindow.m
+                   src/MacVNCCaptureSession.m
+                   src/MacVNCEncryptionPolicy.c
+                   src/MacVNCImageProfile.c
+                   src/MacVNCSweepSchedule.c
+                   src/ScreenCapturer.m
+                   src/FrameMailbox.c
+                   src/FirstFrameBudget.c)
+    target_include_directories(test_curtain_window PRIVATE src)
+    target_link_libraries(test_curtain_window
+        ${SCREEN_CAPTURE_KIT} ${CORE_MEDIA} ${CORE_VIDEO}
+        ${FOUNDATION} ${APPKIT_LIBRARY} ${CMAKE_THREAD_LIBS_INIT})
+    add_test(NAME curtain_window COMMAND test_curtain_window)
 
     add_executable(test_compositor tests/test_compositor.c src/CompositeFramebuffer.c)
     target_include_directories(test_compositor PRIVATE src)
