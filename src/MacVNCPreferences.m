@@ -269,15 +269,9 @@ typedef struct {
                         "and costs CPU; it is shared by every connected viewer.";
     NSPopUpButton *ratePopup = [[[NSPopUpButton alloc]
         initWithFrame:NSMakeRect(kColCtrlX, kRowFrameRate, 360, 26) pullsDown:NO] autorelease];
-    const struct { const char *title; int fps; } rates[] = {
-        { "Battery saver - 8 fps",  8 },
-        { "Balanced - 15 fps",     15 },
-        { "Smooth - 30 fps",       30 },
-        { "Maximum - 60 fps",      60 },
-    };
-    for (size_t i = 0; i < sizeof(rates) / sizeof(rates[0]); ++i) {
-        [ratePopup addItemWithTitle:@(rates[i].title)];
-        ratePopup.lastItem.tag = rates[i].fps;
+    for (size_t i = 0; i < macVNCCaptureRateLadderCount(); ++i) {
+        [ratePopup addItemWithTitle:@(macVNCCaptureRateLadderTitle(i))];
+        ratePopup.lastItem.tag = macVNCCaptureRateLadderValue(i);
     }
     /* A rate set outside this list (by hand, or by a future default) must not
        silently become one of these - show it rather than lie about it. */

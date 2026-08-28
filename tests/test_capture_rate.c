@@ -100,6 +100,41 @@ int main(void)
     assert(macVNCFramebufferDeferMilliseconds(61) == 0);
     assert(macVNCFramebufferDeferMilliseconds(-1) == 0);
 
+    /* The ladder the settings UI offers. Tested here because a list living
+       inside a UI builder cannot be, and then nothing guarantees the shipped
+       default is even on it. */
+    size_t ladder = macVNCCaptureRateLadderCount();
+    assert(ladder == 4);
+    assert(macVNCCaptureRateLadderValue(ladder) == 0);
+    assert(macVNCCaptureRateLadderTitle(ladder) == NULL);
+
+    int defaultsSeen = 0, previous = 0;
+    for (size_t i = 0; i < ladder; ++i) {
+        int rate = macVNCCaptureRateLadderValue(i);
+        const char *title = macVNCCaptureRateLadderTitle(i);
+        assert(title && *title);
+
+        /* Every offered rate must be one the server accepts and can derive a
+           defer window from: a popup must not be able to store a value that
+           refuses to start. */
+        int parsed = -1;
+        char text[8];
+        snprintf(text, sizeof(text), "%d", rate);
+        assert(macVNCParseCaptureFPS(text, &parsed) == MACVNC_CAPTURE_RATE_VALID);
+        assert(parsed == rate);
+        assert(macVNCFramebufferDeferMilliseconds(rate) > 0);
+
+        /* Ascending, so the popup reads as a scale rather than an unordered set. */
+        assert(rate > previous);
+        previous = rate;
+
+        if (rate == MACVNC_CAPTURE_FPS_DEFAULT)
+            ++defaultsSeen;
+    }
+    /* The shipped default must be ON the ladder - otherwise the popup shows
+       "Custom" for a fresh install, which reads like a misconfiguration. */
+    assert(defaultsSeen == 1);
+
     puts("capture rate tests passed");
     return 0;
 }

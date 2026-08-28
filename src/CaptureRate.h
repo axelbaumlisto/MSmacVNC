@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stddef.h>
+
 /*
  * Measured default. 12 FPS was chosen when compositing a frame cost 44 ms of
  * CPU; it costs 3 ms now. With the 10 ms defer window, 30 FPS delivers 33.4
@@ -47,3 +49,20 @@ int macVNCCaptureFrameIntervalMilliseconds(int framesPerSecond);
  * Returns zero when framesPerSecond is outside the supported range.
  */
 int macVNCFramebufferDeferMilliseconds(int framesPerSecond);
+
+/*
+ * The rates the settings UI offers, in ascending order.
+ *
+ * Here rather than in the Preferences file for the same reason the image
+ * ladder moved into MacVNCImageProfile: a list that only exists inside a UI
+ * builder cannot be tested, and nothing then guarantees that the rate we SHIP
+ * as the default is even on it - changing the default would silently downgrade
+ * the popup to "Custom - N fps" instead of failing.
+ *
+ * Measured on a two-display Mac: 8 delivers ~16 frames per second to a viewer,
+ * 15 delivers ~24, 30 delivers ~33 at a 30 ms average gap, and 60 delivers no
+ * more than 30 with worse worst-cases because the limit is encode and transfer.
+ */
+size_t macVNCCaptureRateLadderCount(void);
+int macVNCCaptureRateLadderValue(size_t index);
+const char *macVNCCaptureRateLadderTitle(size_t index);

@@ -96,6 +96,12 @@ Objective-C glue:
   for the whole encode-and-write, so waiting would let one stalled viewer
   freeze the screen for all clients. A refused frame must be re-submitted, not
   dropped.
+- **CaptureRate** — parses and validates the capture rate, derives the framebuffer
+  defer window from it (`macVNCFramebufferDeferMilliseconds`, a fixed 10 ms
+  coalescing window rather than the frame interval it used to be), and owns the
+  rate ladder the settings UI offers. The ladder lives here, not in the UI, so
+  a test can assert the SHIPPED default is on it - otherwise changing the
+  default would silently downgrade the popup to "Custom - N fps".
 - **MacVNCImageProfile** — maps a stored setting name (`viewer`, `lossless`, or
   a level `0`-`7`) to encoder levels (`macVNCParseImageProfile`). Pure, and the
   ladder is measured rather than chosen: levels 8 and 9 are refused because both

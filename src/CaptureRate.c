@@ -41,6 +41,34 @@ _Static_assert(1000 / MACVNC_CAPTURE_FPS_MAX >= MACVNC_DEFER_TARGET_MILLISECONDS
                "defer window would exceed the capture interval at the maximum "
                "supported frame rate");
 
+static const struct {
+    int fps;
+    const char *title;
+} kRateLadder[] = {
+    {  8, "Battery saver - 8 fps" },
+    { 15, "Balanced - 15 fps" },
+    { 30, "Smooth - 30 fps" },
+    { 60, "Maximum - 60 fps" },
+};
+
+size_t
+macVNCCaptureRateLadderCount(void)
+{
+    return sizeof(kRateLadder) / sizeof(kRateLadder[0]);
+}
+
+int
+macVNCCaptureRateLadderValue(size_t index)
+{
+    return index < macVNCCaptureRateLadderCount() ? kRateLadder[index].fps : 0;
+}
+
+const char *
+macVNCCaptureRateLadderTitle(size_t index)
+{
+    return index < macVNCCaptureRateLadderCount() ? kRateLadder[index].title : NULL;
+}
+
 int
 macVNCFramebufferDeferMilliseconds(int framesPerSecond)
 {
