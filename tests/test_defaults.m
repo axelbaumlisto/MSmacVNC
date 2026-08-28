@@ -6,6 +6,7 @@
 #import "MacVNCDefaultsKeys.h"
 
 #include "CaptureRate.h"
+#include "MacVNCEncryptionPolicy.h"
 #include "MacVNCImageProfile.h"
 #import "MacVNCListenMode.h"
 
@@ -41,6 +42,16 @@ int main(void)
                    &profile));
         assert(profile.kind == MacVNCImageProfileJPEG);
         assert(profile.qualityLevel == MACVNC_IMAGE_QUALITY_DEFAULT);
+
+        /* Encryption defaults to the COMPATIBLE choice on purpose: shipping
+           "required" would lock out every viewer without VeNCrypt support on
+           an upgrade, which is a worse failure than an unencrypted session on
+           a trusted network. */
+        MacVNCEncryptionPolicy encryption;
+        assert(macVNCParseEncryptionPolicy(
+                   [defaults stringForKey:MacVNCKeyEncryption].UTF8String,
+                   &encryption));
+        assert(encryption == MacVNCEncryptionOptional);
 
         /* Server basics. */
         assert([defaults integerForKey:MacVNCKeyPort] == MacVNCDefaultPort);

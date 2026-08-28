@@ -63,6 +63,7 @@ The app stores normal settings in macOS preferences. Use **Preferences…** from
 - port;
 - VNC password;
 - listen mode: localhost, all interfaces, custom IPv4, or a selected active IPv4 network interface;
+- encryption policy: allow unencrypted viewers, or require TLS;
 - allowed client networks: checked active network rows plus manual IPv4/CIDR entries;
 - explicit allow-all mode;
 - **frame rate** and **image quality** (see below).
@@ -127,6 +128,30 @@ viewers send their own and a setting that only applied to silent viewers would
 do nothing. Choose **Follow the viewer's own setting** to let each device decide
 for itself.
 
+### Encryption
+
+macVNC always offers VeNCrypt/TLS alongside classic VNC authentication, but the
+**viewer** chooses which to use — and in practice it chooses the unencrypted
+one. That is not a setting we can flip by reordering: LibVNCServer inserts each
+security handler at the head of its list and sends the list from the head, and
+registers its own classic handler on the first connection, i.e. after ours. So
+plain is always listed first, and refusing it is the only reliable lever.
+
+| Setting | Effect |
+|---|---|
+| **Allow unencrypted connections (default)** | Both paths accepted; the viewer decides. Works with viewers that have no TLS support. |
+| Require encryption (TLS) | Viewers that will not use TLS are refused. The refusal looks like a wrong password on the wire and is explicit in the log. |
+
+The default is the compatible one deliberately: shipping "required" would lock
+out every viewer without VeNCrypt support on an upgrade, which is a worse
+failure than an unencrypted session on a trusted network. If macVNC is only
+reachable over a VPN such as Tailscale, the transport is already encrypted and
+this setting is a second layer.
+
+Measured cost of TLS on the same 57.5 MB frame: **0.13 s of server CPU
+unencrypted versus 0.35 s with TLS**, about 3x — worth knowing before requiring
+it on a busy machine.
+
 Environment overrides remain for debug/headless launches:
 
 | Variable | Meaning | Example |
@@ -138,6 +163,7 @@ Environment overrides remain for debug/headless launches:
 | `MACVNC_PASSWORD_FILE` | UTF-8 file containing the VNC password. | `~/.config/macvnc/password` |
 | `MACVNC_CAPTURE_FPS` | Integer capture rate for every selected display; allowed `1..60`, default `30`. Overrides the Preferences setting. | `30` |
 | `MACVNC_IMAGE_PROFILE` | `viewer`, `lossless`, or a level `0`..`7`. Overrides the Preferences setting. | `5` |
+| `MACVNC_ENCRYPTION` | `optional` or `required`. Overrides the Preferences setting. | `required` |
 
 A stored frame rate or image profile that cannot be parsed falls back to the
 default and logs it, because a hand-edited value must not make the Mac

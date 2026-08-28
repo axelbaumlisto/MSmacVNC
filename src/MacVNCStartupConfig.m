@@ -59,6 +59,36 @@ macVNCResolveCaptureRate(NSUserDefaults *defaults,
     return rate;
 }
 
+static MacVNCEncryptionPolicy
+macVNCResolveEncryptionPolicy(NSUserDefaults *defaults,
+                              NSDictionary<NSString *, NSString *> *environment,
+                              NSString **error)
+{
+    MacVNCEncryptionPolicy policy = MacVNCEncryptionOptional;
+
+    NSString *stored = [defaults stringForKey:MacVNCKeyEncryption];
+    if (stored.length > 0 &&
+        !macVNCParseEncryptionPolicy(stored.UTF8String, &policy))
+        NSLog(@"macVNC: ignoring stored encryption '%@'; using '%s'",
+              stored, macVNCEncryptionPolicyName(policy));
+
+    NSString *override = environment[@"MACVNC_ENCRYPTION"];
+    if (override.length > 0) {
+        MacVNCEncryptionPolicy fromEnvironment;
+        if (macVNCParseEncryptionPolicy(override.UTF8String, &fromEnvironment)) {
+            policy = fromEnvironment;
+        } else {
+            NSString *message = [NSString stringWithFormat:
+                @"Invalid MACVNC_ENCRYPTION '%@'; expected 'optional' or 'required'",
+                override];
+            if (error && !*error)
+                *error = message;
+            NSLog(@"%@", message);
+        }
+    }
+    return policy;
+}
+
 static MacVNCImageProfile
 macVNCResolveImageProfile(NSUserDefaults *defaults,
                           NSDictionary<NSString *, NSString *> *environment,
@@ -96,6 +126,7 @@ macVNCResolveImageProfile(NSUserDefaults *defaults,
     int _port;
     int _captureFramesPerSecond;
     MacVNCImageProfile _imageProfile;
+    MacVNCEncryptionPolicy _encryptionPolicy;
     BOOL _viewOnly;
     int _displayNumber;
     BOOL _policyOK;
@@ -154,6 +185,8 @@ macVNCResolveImageProfile(NSUserDefaults *defaults,
         macVNCResolveCaptureRate(defaults, environment, &error);
     MacVNCImageProfile imageProfile =
         macVNCResolveImageProfile(defaults, environment, &error);
+    MacVNCEncryptionPolicy encryptionPolicy =
+        macVNCResolveEncryptionPolicy(defaults, environment, &error);
 
     _viewOnly = (rfbBool)[defaults boolForKey:MacVNCKeyViewOnly];
     _displayNumber = (int)[defaults integerForKey:MacVNCKeyDisplay];
@@ -187,6 +220,7 @@ macVNCResolveImageProfile(NSUserDefaults *defaults,
     _port = port;
     _captureFramesPerSecond = captureFramesPerSecond;
     _imageProfile = imageProfile;
+    _encryptionPolicy = encryptionPolicy;
 
     _password = [(password.length > 0 ? password : nil) copy];
 
@@ -209,6 +243,7 @@ macVNCResolveImageProfile(NSUserDefaults *defaults,
     config->password = _password.length > 0 ? _password.UTF8String : NULL;
     config->captureFramesPerSecond = _captureFramesPerSecond;
     config->imageProfile = _imageProfile;
+    config->encryptionPolicy = _encryptionPolicy;
     config->viewOnly = _viewOnly;
     config->displayNumber = _displayNumber;
     config->listenAddress = _resolvedPolicy.bindAddress;
