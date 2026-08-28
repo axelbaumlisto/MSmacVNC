@@ -1,4 +1,7 @@
 #import "MacVNCDefaultsKeys.h"
+
+#include "CaptureRate.h"
+#include "MacVNCImageProfile.h"
 #import "MacVNCListenMode.h"
 
 NSString * const MacVNCKeyPort              = @"rfbPort";
@@ -10,6 +13,8 @@ NSString * const MacVNCKeyListenAddress     = @"listenAddress";
 NSString * const MacVNCKeyAllowedClients    = @"allowedClients";
 NSString * const MacVNCKeyAllowAllConfirmed = @"allowAllConfirmed";
 NSString * const MacVNCKeyAutoAllowedClients = @"autoAllowedClients";
+NSString * const MacVNCKeyCaptureFPS = @"captureFPS";
+NSString * const MacVNCKeyImageProfile = @"imageProfile";
 
 NSString * const MacVNCBundleID = @"net.christianbeier.macVNC";
 
@@ -20,7 +25,9 @@ NSArray<NSString *> *macVNCAllDefaultsKeys(void)
     return @[MacVNCKeyPort, MacVNCKeyPassword, MacVNCKeyViewOnly,
              MacVNCKeyDisplay, MacVNCKeyListenMode, MacVNCKeyListenAddress,
              MacVNCKeyAllowedClients, MacVNCKeyAllowAllConfirmed,
-             MacVNCKeyAutoAllowedClients];
+             MacVNCKeyAutoAllowedClients,
+             MacVNCKeyCaptureFPS,
+             MacVNCKeyImageProfile];
 }
 
 void macVNCRegisterDefaults(void)
@@ -34,6 +41,8 @@ void macVNCRegisterDefaults(void)
         MacVNCKeyListenAddress:     @"",
         MacVNCKeyAllowedClients:    MacVNCLoopbackIPv4,
         MacVNCKeyAllowAllConfirmed: @NO,
+        MacVNCKeyCaptureFPS:        @(MACVNC_CAPTURE_FPS_DEFAULT),
+        MacVNCKeyImageProfile:      @(MACVNC_IMAGE_PROFILE_DEFAULT_NAME),
         /* Registered so a fresh install is symmetric with a saved one: the
            loopback entry in allowedClients was put there by US, not typed by the
            user, and the "extra allowed clients" field must not present it as if

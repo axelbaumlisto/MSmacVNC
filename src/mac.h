@@ -3,6 +3,7 @@
 #include <rfb/rfb.h>
 #include <stdatomic.h>
 #include <stddef.h>
+#include "MacVNCImageProfile.h"
 #include "NetworkPolicyResolver.h"
 
 #define MACVNC_LISTEN_ADDRESS_MAX 64
@@ -17,7 +18,9 @@
 typedef struct {
     int port;                    /* TCP port (5900 = VNC default). */
     const char *password;        /* Shared password; must be non-empty. */
-    int captureFramesPerSecond;  /* Validated capture rate for every display. */
+    int captureFramesPerSecond;
+    /* How pixels are encoded for viewers; see MacVNCImageProfile.h. */
+    MacVNCImageProfile imageProfile;  /* Validated capture rate for every display. */
     rfbBool viewOnly;            /* TRUE = accept clients but ignore input. */
     int displayNumber;           /* -2 = all displays, -1 = primary, >=0 = one. */
     const char *listenAddress;   /* IPv4 bind address; NULL/empty = all. */

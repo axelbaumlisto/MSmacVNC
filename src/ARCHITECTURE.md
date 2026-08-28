@@ -96,6 +96,13 @@ Objective-C glue:
   for the whole encode-and-write, so waiting would let one stalled viewer
   freeze the screen for all clients. A refused frame must be re-submitted, not
   dropped.
+- **MacVNCImageProfile** — maps a stored setting name (`viewer`, `lossless`, or
+  a level `0`-`7`) to encoder levels (`macVNCParseImageProfile`). Pure, and the
+  ladder is measured rather than chosen: levels 8 and 9 are refused because both
+  cost MORE bytes than lossless while being worse than lossless, and the
+  compression level is fixed because levels 1-9 are byte-identical. On a
+  rejected name the output is left untouched, so callers pre-load the default
+  instead of restating it in every branch.
 - **MacVNCSweepSchedule** — decides when a display must be composited in full
   regardless of the dirty hint (`macVNCSweepScheduleDueAt`). Pure, so the
   safety net under the hint is tested directly: first frame always sweeps, the
@@ -182,7 +189,7 @@ pixels rather than points.
 
 ## Tests
 
-`ctest` runs 33 targets (the number is enforced: `architecture_doc` compares
+`ctest` runs 34 targets (the number is enforced: `architecture_doc` compares
 this sentence against CMakeLists.txt's `add_test` count, so a target added or
 commented out fails the suite until this line is updated deliberately). Every
 assertion added here is checked by mutating the source and confirming the test

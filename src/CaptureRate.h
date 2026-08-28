@@ -12,6 +12,8 @@ typedef enum {
 
 /* Empty or unset input selects the default. Non-empty input must consist only
    of decimal digits and be in the inclusive supported range. */
+/* On MACVNC_CAPTURE_RATE_INVALID the output is left UNTOUCHED, so a caller can
+   pre-load its fallback and let a rejected value simply not overwrite it. */
 MacVNCCaptureRateParseResult macVNCParseCaptureFPS(const char *value, int *framesPerSecond);
 
 /* Convert a validated FPS to a millisecond interval without exceeding that
