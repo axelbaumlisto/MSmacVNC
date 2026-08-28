@@ -8,6 +8,62 @@
 /* Capturers for the current run; nil between runs. */
 static NSMutableArray<ScreenCapturer *> *gCapturers;
 
+/*
+ * Upper bound on dirty rectangles taken from one frame. Past this many, the
+ * per-rect bookkeeping costs more than the full sweep it is meant to avoid,
+ * so we stop reading and let the compositor scan everything. Measured frames
+ * on a two-display desktop average ~13 rects.
+ */
+#define MACVNC_MAX_HINT_RECTS 32
+
+/* How often a display is composited in full regardless of the hint. */
+#define MACVNC_FULL_SWEEP_INTERVAL_NS (5ULL * NSEC_PER_SEC)
+
+/*
+ * Read ScreenCaptureKit's own list of repainted rectangles off the frame.
+ *
+ * Returns 0 - meaning "no usable hint, sweep everything" - when the metadata
+ * is absent, malformed, or longer than we are willing to process. The caller
+ * must treat 0 as a full sweep, never as "nothing changed": a frame whose
+ * rects we failed to read still carries pixels.
+ */
+static size_t
+extractDirtyRects(CMSampleBufferRef sampleBuffer,
+                  MacVNCDirtyRect *out,
+                  size_t capacity)
+{
+    CFArrayRef attachments =
+        CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, false);
+    if (!attachments || CFArrayGetCount(attachments) == 0)
+        return 0;
+
+    CFDictionaryRef info = CFArrayGetValueAtIndex(attachments, 0);
+    if (!info)
+        return 0;
+
+    CFArrayRef rects =
+        CFDictionaryGetValue(info, (CFStringRef)SCStreamFrameInfoDirtyRects);
+    if (!rects)
+        return 0;
+
+    CFIndex count = CFArrayGetCount(rects);
+    if (count <= 0 || (size_t)count > capacity)
+        return 0;
+
+    for (CFIndex i = 0; i < count; ++i) {
+        CGRect rect = CGRectZero;
+        if (!CGRectMakeWithDictionaryRepresentation(
+                CFArrayGetValueAtIndex(rects, i), &rect))
+            return 0; /* malformed entry: distrust the whole list */
+        rect = CGRectIntegral(rect); /* whole pixels; the grid is integral */
+        out[i].x = (int)CGRectGetMinX(rect);
+        out[i].y = (int)CGRectGetMinY(rect);
+        out[i].width = (int)CGRectGetWidth(rect);
+        out[i].height = (int)CGRectGetHeight(rect);
+    }
+    return (size_t)count;
+}
+
 void macVNCCaptureSessionReset(void)
 {
   @autoreleasepool {
@@ -60,6 +116,10 @@ bool macVNCCaptureSessionBuild(const MacVNCDisplayLayout *layout,
         /* Points into the caller's layout, which outlives the session: mac.m
            keeps it in the run's private state. */
         const MacVNCDisplayGeometry *geometry = &layout->displays[i];
+        /* Per-display, per-block state: when this display last had a full
+           sweep. Each loop iteration creates a fresh block, so the displays
+           cannot share (or race on) the deadline. */
+        __block uint64_t nextFullSweep = 0;
         ScreenCapturer *capturer = [[ScreenCapturer alloc]
             initWithDisplay:geometry->input.displayID
             captureFramesPerSecond:captureFramesPerSecond
@@ -71,6 +131,21 @@ bool macVNCCaptureSessionBuild(const MacVNCDisplayLayout *layout,
                 if (!pixelBuffer)
                     return YES; /* nothing to composite; not retryable */
 
+                MacVNCDirtyRect rectStorage[MACVNC_MAX_HINT_RECTS];
+                MacVNCDirtyHint hint = { rectStorage, 0 };
+                hint.count = extractDirtyRects(sampleBuffer, rectStorage,
+                                               MACVNC_MAX_HINT_RECTS);
+
+                /* Periodic full sweep: the hint is an optimisation we do not
+                   control, so we never let it be the ONLY thing that decides
+                   what reaches the canvas. If it ever under-reports, the next
+                   sweep repairs the region instead of leaving it stale. */
+                uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+                if (now >= nextFullSweep) {
+                    hint.count = 0;
+                    nextFullSweep = now + MACVNC_FULL_SWEEP_INTERVAL_NS;
+                }
+
                 CVPixelBufferLockBaseAddress(pixelBuffer,
                                              kCVPixelBufferLock_ReadOnly);
                 bool accepted = frameHandler(
@@ -78,7 +153,8 @@ bool macVNCCaptureSessionBuild(const MacVNCDisplayLayout *layout,
                     CVPixelBufferGetBaseAddress(pixelBuffer),
                     CVPixelBufferGetBytesPerRow(pixelBuffer),
                     (int)CVPixelBufferGetWidth(pixelBuffer),
-                    (int)CVPixelBufferGetHeight(pixelBuffer));
+                    (int)CVPixelBufferGetHeight(pixelBuffer),
+                    &hint);
                 CVPixelBufferUnlockBaseAddress(pixelBuffer,
                                                kCVPixelBufferLock_ReadOnly);
                 return accepted ? YES : NO;

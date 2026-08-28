@@ -14,9 +14,11 @@
 static _Atomic unsigned framesSeen = 0;
 static bool acceptFrame(const MacVNCDisplayGeometry *geometry,
                         const uint8_t *pixels, size_t stride,
-                        int width, int height)
+                        int width, int height,
+                        const MacVNCDirtyHint *hint)
 {
     (void)geometry; (void)pixels; (void)stride; (void)width; (void)height;
+    (void)hint;
     atomic_fetch_add(&framesSeen, 1);
     return true;
 }

@@ -65,7 +65,7 @@ int main(void)
         memset(pixels, 0x7F, stride * sh);
 
         MacVNCDisplayGeometry geometry = makeGeometry(0, 0, sw, sh);
-        assert(macVNCCompositorSubmitFrame(&geometry, pixels, stride) == TRUE);
+        assert(macVNCCompositorSubmitFrame(&geometry, pixels, stride, NULL) == TRUE);
 
         /* The pixels landed where the geometry says, and nowhere else. */
         const uint8_t *canvas = (const uint8_t *)screen->frameBuffer;
@@ -79,7 +79,7 @@ int main(void)
         assert(other);
         memset(other, 0x21, stride * sh);
         MacVNCDisplayGeometry offset = makeGeometry(sw, 0, sw, sh);
-        assert(macVNCCompositorSubmitFrame(&offset, other, stride) == TRUE);
+        assert(macVNCCompositorSubmitFrame(&offset, other, stride, NULL) == TRUE);
         assert(canvas[0] == 0x7F);                                /* untouched */
         assert(canvas[((size_t)0 * W + sw) * 4] == 0x21);         /* newly painted */
 
@@ -91,9 +91,9 @@ int main(void)
            guard is never reached - this test once claimed that coverage
            while still attached. */
         macVNCCompositorSetScreen(NULL);
-        assert(macVNCCompositorSubmitFrame(&geometry, pixels, stride) == TRUE);
-        assert(macVNCCompositorSubmitFrame(NULL, pixels, stride) == TRUE);
-        assert(macVNCCompositorSubmitFrame(&geometry, NULL, stride) == TRUE);
+        assert(macVNCCompositorSubmitFrame(&geometry, pixels, stride, NULL) == TRUE);
+        assert(macVNCCompositorSubmitFrame(NULL, pixels, stride, NULL) == TRUE);
+        assert(macVNCCompositorSubmitFrame(&geometry, NULL, stride, NULL) == TRUE);
         /* Nothing was written through any of those submits: canvas[0] still
            holds the last composite, not a fresh one. */
         assert(canvas[0] == 0x7F);
@@ -104,7 +104,7 @@ int main(void)
         free(noBuffer->frameBuffer);
         noBuffer->frameBuffer = NULL;
         macVNCCompositorSetScreen(noBuffer);
-        assert(macVNCCompositorSubmitFrame(&geometry, pixels, stride) == TRUE);
+        assert(macVNCCompositorSubmitFrame(&geometry, pixels, stride, NULL) == TRUE);
         macVNCCompositorSetScreen(NULL);
         free(noBuffer);
 #endif

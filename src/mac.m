@@ -311,7 +311,8 @@ buildClientAccessList(void)
 static bool
 compositeCapturedFrame(const MacVNCDisplayGeometry *geometry,
                        const uint8_t *pixels, size_t stride,
-                       int width, int height)
+                       int width, int height,
+                       const MacVNCDirtyHint *hint)
 {
     if (!pixels || !geometry)
         return true; /* nothing to composite; not a retryable condition */
@@ -331,7 +332,7 @@ compositeCapturedFrame(const MacVNCDisplayGeometry *geometry,
                snapshot.input.pixelWidth, snapshot.input.pixelHeight);
         return true; /* wrong geometry: retrying cannot help */
     }
-    return macVNCCompositorSubmitFrame(&snapshot, pixels, stride)
+    return macVNCCompositorSubmitFrame(&snapshot, pixels, stride, hint)
                ? true : false;
 }
 

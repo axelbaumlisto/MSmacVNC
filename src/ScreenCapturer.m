@@ -374,6 +374,7 @@ static void endMailboxActivity(void *context)
     if (type != SCStreamOutputTypeScreen)
         return;
 
+
     /* Cover admission before consulting lifecycle state. If stop invalidates
        concurrently, it cannot observe quiescence while this callback is live. */
     dispatch_group_enter(self.operationGroup);
