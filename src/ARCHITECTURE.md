@@ -87,7 +87,7 @@ Objective-C glue:
 - **AppDelegate** — status-bar UI, timers, server start/stop, permission flow;
   installs the capture-permission policy into the core.
 - **MacVNCCompositor** — composites raw BGRA pixels into the shared canvas
-  (`macVNCCompositorSubmitFrame(geometry, pixels, stride)`); OWNS the screen
+  (`macVNCCompositorSubmitFrame(geometry, pixels, stride, hint)`); OWNS the screen
   pointer (`macVNCCompositorSetScreen`) — detach takes the compositor lock, so
   returning from it means no in-flight composite can reach the screen.
   Taking pixels rather than a `CMSampleBuffer` is what makes the hot path
@@ -98,10 +98,45 @@ Objective-C glue:
   dropped.
 - **MacVNCCaptureSession** — owns ScreenCaptureKit. Builds one stream per
   display from a `MacVNCDisplayLayout`, unwraps each `CMSampleBuffer` to plain
-  BGRA pixels, classifies `SCStreamError` into "permission denial or not", and
-  shares ONE first-frame budget across displays so a two-monitor Mac does not
-  make the client wait twice as long. Because it holds the framework, `mac.m`
-  no longer includes ScreenCaptureKit at all.
+  BGRA pixels, reads the frame's dirty-rectangle metadata into a
+  `MacVNCDirtyHint`, classifies `SCStreamError` into "permission denial or not",
+  and shares ONE first-frame budget across displays so a two-monitor Mac does
+  not make the client wait twice as long. Because it holds the framework,
+  `mac.m` no longer includes ScreenCaptureKit at all.
+
+### The dirty hint is an optimisation, never the source of truth
+
+Comparing all 29.5 MB of a captured frame against the canvas was the most
+expensive thing the server did per frame (measured: 44 ms average, 536 ms worst,
+29% CPU while streaming). ScreenCaptureKit already reports which rectangles it
+repainted, so that metadata now bounds the comparison — 3 ms average, 5% CPU.
+
+Being wrong about a hint means a region of the client's screen stays stale, so
+the hint is treated as untrusted input at four levels:
+
+The entry point is `macVNCCompositeDisplayFrameHinted`; passing no hint falls
+back to `macVNCCompositeDisplayFrame`, the full sweep.
+
+1. **Every hinted tile is still compared** before being copied, so an
+   over-reporting hint costs a scan and nothing else, and a rectangle whose
+   pixels did not actually change produces no client traffic.
+2. **Rectangles are clamped into the frame and aligned down to the tile grid.**
+   `compositeTileRange` asserts the band it receives is in range, so deleting a
+   clamp fails the tests instead of forming pointers outside the buffers.
+3. **Anything unexpected means "sweep everything"**, never "nothing changed":
+   missing or malformed metadata, or more than `MACVNC_MAX_HINT_RECTS` (32)
+   rectangles, all yield `count == 0`, which the compositor treats as a full
+   sweep.
+4. **Every display is swept in full every 5 seconds regardless.** If a hint
+   ever under-reports, the next sweep repairs the region rather than leaving a
+   permanent hole.
+
+Verified empirically, not just by construction: a temporary audit ran a FULL
+sweep immediately after each hinted composite over the same pixels and counted
+the tiles the hint had missed. Under window-dragging and scrolling load across
+two displays — 500 hinted frames, 61 225 tiles found by the hint — the audit
+found **0** missed tiles, which is also what proves the rectangles arrive in
+pixels rather than points.
 - **MacVNCRelauncher** — `posix_spawn` of our own executable, used when a newly
   granted permission needs a fresh process. Both permissions bind at launch.
 - **MacVNCDefaultsKeys** — defaults keys *and* their registered fallbacks, so a
@@ -139,7 +174,7 @@ Objective-C glue:
 
 ## Tests
 
-`ctest` runs 31 targets (the number is enforced: `architecture_doc` compares
+`ctest` runs 32 targets (the number is enforced: `architecture_doc` compares
 this sentence against CMakeLists.txt's `add_test` count, so a target added or
 commented out fails the suite until this line is updated deliberately). Every
 assertion added here is checked by mutating the source and confirming the test
@@ -192,6 +227,13 @@ must not be counted as automated coverage.
 - **Screen publication:** `rfbScreen` is set to NULL *before* `rfbScreenCleanup`,
   because the capture stop is deliberately bounded and a late frame must see
   NULL rather than a freed pointer.
+- **First-frame wait ends on the answer, not on the clock:** a capture failure
+  goes through `-[ScreenCapturer reportCaptureError:]`, which broadcasts the
+  readiness condition BEFORE calling the error handler. Without that, a client
+  that had just authenticated sat out the whole 8-second budget waiting for a
+  frame that was never coming (`tests/test_first_frame_wait.m` fails if the
+  wait starts consuming its budget again). The wake does not fake readiness:
+  `_firstFrameReady` stays NO, so the waiter reports "not ready" immediately.
 - **Main-thread rule:** every server query the menu timer makes
   (`vncServerCopyActiveBindAddress`, `vncServerActivePolicyAllowsEveryone`,
   `vncServerCloseListeners`) takes the lifecycle

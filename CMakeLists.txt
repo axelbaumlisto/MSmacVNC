@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.74 LANGUAGES C)
+project(macVNC VERSION 0.3.75 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -411,6 +411,12 @@ if(BUILD_TESTING)
     target_link_libraries(test_capture_restart macvnc_core_testable)
     add_test(NAME capture_restart COMMAND test_capture_restart)
     set_tests_properties(capture_restart PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_executable(test_first_frame_wait tests/test_first_frame_wait.m)
+    target_include_directories(test_first_frame_wait PRIVATE src)
+    target_link_libraries(test_first_frame_wait macvnc_core_testable)
+    add_test(NAME first_frame_wait COMMAND test_first_frame_wait)
+    set_tests_properties(first_frame_wait PROPERTIES SKIP_RETURN_CODE 77)
 
     add_executable(test_power_mgmt
         tests/test_power_mgmt.m

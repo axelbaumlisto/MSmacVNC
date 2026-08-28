@@ -8,14 +8,19 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 fail=0
 
-# Bold runs may contain several names ("**NetworkAccess / NetworkCIDR**"):
-# extract the runs, strip the markers, split on any non-alphanumeric, keep
-# CamelCase tokens. The old single-token regex silently skipped every bold run
-# with a slash or space - 7 modules were exempt from the existence check.
-# Prose words that are not modules go to the skip-list below.
-SKIP='^(Lock|Screen|Keep|Bundle|The|A|An|No|One|Every|Both|Two|All|Any|Its|This|That|VNC|TCC|IOPM|IOKit|GUI|CIF|DPI|FP|CPU|GPU|SDK|API|CIDR|IPv|TCP|URL|MD|KISS|DRY|SOLID|MRC|ARC|XPC|Main|Thread|Teardown|Ordering|Rule|True|False|Yes|OK)$'
+# A bold run names a module only when it is a SINGLE token: "**MacVNCInput**",
+# or several separated by slashes ("**NetworkAccess / NetworkCIDR**"). Bold
+# PROSE always contains spaces ("**Teardown ordering**"), so splitting on
+# slashes and requiring one whole token per part separates the two without a
+# growing dictionary of English words - the previous rule split on every
+# non-alphanumeric character, so each new bold phrase in the document invented
+# a fake module and had to be appended to the skip-list by hand.
+# What remains in the list is the handful of single-word bold prose.
+SKIP='^(Lock|Screen|Keep|Bundle|Ordering|Teardown|Rule|True|False|Anything|Rectangles)$'
 modules=$(grep -oE '\*\*[^*]+\*\*' src/ARCHITECTURE.md \
-          | tr -d '*' | tr -c 'A-Za-z0-9' '\n' \
+          | sed 's/\*\*//g' \
+          | tr '/' '\n' \
+          | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/:$//' \
           | grep -E '^[A-Z][A-Za-z0-9]{3,}$' | grep -Ev "$SKIP" | sort -u)
 
 module_count=$(printf '%s\n' "$modules" | grep -c .)
@@ -40,6 +45,18 @@ check_declared() {
     fail=1
   fi
 }
+# Every macVNC* identifier the DOCUMENT names in backticks must actually exist
+# somewhere in src/. The hand-written list below is a stronger claim (those
+# names must be PUBLISHED in a header); this is the blanket rule that stops the
+# document from citing an API that was renamed or deleted - previously it could,
+# because the checks only ever verified the script's own list.
+for name in $(grep -oE '`macVNC[A-Za-z0-9]+' src/ARCHITECTURE.md | tr -d '`' | sort -u); do
+  if ! grep -Eq "(^|[^[:alnum:]_])$name[[:space:]]*\(" src/*.h src/*.m src/*.c 2>/dev/null; then
+    echo "ARCHITECTURE.md names an identifier that does not exist: $name"
+    fail=1
+  fi
+done
+
 check_declared macVNCCaptureAllowed        # core asks, never reads TCC
 check_declared shouldStartServer           # one resolver owns the start decision
 check_declared macVNCRegisterDefaults      # defaults live with their keys
