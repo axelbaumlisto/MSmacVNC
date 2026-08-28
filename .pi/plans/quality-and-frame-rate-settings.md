@@ -205,6 +205,63 @@ fixed 10 ms coalescing window, as Task 2 already proposed - now with numbers.
 6. Surface both in Preferences.
 7. Re-measure and stop when pacing is no longer what dominates.
 
+
+## Decision: one universal level, plus delegation - not per-client rules
+
+The two knobs are NOT symmetric, and the asymmetry decides the design:
+
+- **Frame rate cannot be per-client, by construction.** There is one
+  ScreenCaptureKit stream per display shared by every viewer
+  (`config.minimumFrameInterval`, `ScreenCapturer.m`), and `deferUpdateTime`
+  lives on `rfbScreenInfo`, not on the client. A second viewer cannot be given
+  a different capture rate without a second capture session and a second
+  framebuffer. Universal is the only honest option.
+- **Image quality CAN be per-client**: it is applied per connection
+  (`cl->tightQualityLevel`), and `cl->host` is available at that point, so
+  rules by address are technically possible.
+
+So the question only really applies to quality. Three candidates were
+considered:
+
+1. **Universal level only.** Simplest, but wrong the moment two devices with
+   different links connect - a laptop on the LAN and a phone on cellular want
+   different answers.
+2. **Universal level, plus "Follow the viewer".** The viewer apps already have
+   their own quality control, and libvncserver records the viewer's request in
+   `cl->tightQualityLevel` (rfbserver.c:2494). Choosing this option means we
+   simply do not override it - per-device behaviour for zero new state, zero
+   new UI, zero matching logic.
+3. **Automatic per-client rules by address.** Requires inventing thresholds
+   (is a Tailscale address "remote"? it is often faster than local WiFi),
+   storing rules, matching them, and testing them - all before a single
+   measurement exists to justify any threshold.
+
+**Chosen: option 2.** One universal level as the visible control, with "Follow
+the viewer" as one of its choices. That answers "universal or per-server" with
+"universal, and per-device is available by delegating to the device".
+
+Option 3 is deferred with an explicit trigger rather than a vague "later": if a
+measurement from the real iPad over the tailnet shows a different optimum than
+the local measurement, revisit - and derive the thresholds from THAT data.
+
+### The level names follow what they trade, not a marketing ladder
+
+Measured, quality 5 delivers MORE frames and LOWER latency than quality 7,
+because fewer bytes means less encode and less transfer. A ladder labelled
+"low / medium / high" would therefore promise that "high" is better while the
+measurement says it is slower. The names must say what is being traded:
+
+| menu item | levels | measured on this machine |
+|---|---|---|
+| Maximum quality (no JPEG) | quality off | perfect pixels, 4-12 fps, 9.4 MB/s |
+| High quality | 7 | 35.7 dB text, 26.9 fps, 6.0 MB/s |
+| **Balanced (default)** | 5 | 31.5 dB text, 33.4 fps, 3.9 MB/s |
+| Low bandwidth | 2 | 28.2 dB text, 31.3 fps, 2.9 MB/s |
+| Follow the viewer | untouched | whatever the device asks for |
+
+Quality 9 and compression level are absent on purpose: 9 costs 2.45x more than
+lossless while still being lossy, and compression levels 1-9 are byte-identical.
+
 ## Tasks
 
 ### Task 1: Felt-latency harness in the repo
@@ -329,8 +386,9 @@ shifts or breaks.
    `NSPopUpButton`, same window, no new controller.
 2. **Frame rate:** `Battery saver (8 fps)`, `Balanced (15 fps)`,
    **`Smooth (30 fps)` — default**, `Maximum (60 fps)`.
-3. **Image quality:** `Sharp — more data`, **`Balanced` — default**,
-   `Slow link — less data`, `Follow the viewer`.
+3. **Image quality**, named for what it trades (see the decision section):
+   `Maximum quality (no JPEG)`, `High quality`, **`Balanced` — default**,
+   `Low bandwidth`, `Follow the viewer`. No quality 9, no compression level.
 4. Persist as number and name respectively, so a hand-edited `defaults write`
    stays readable and matches Task 3's parser.
 5. Rely on the window's existing "Changes take effect after restarting macVNC"
