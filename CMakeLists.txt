@@ -184,6 +184,23 @@ if(BUILD_TESTING)
     target_include_directories(test_display_layout PRIVATE src)
     add_test(NAME display_layout COMMAND test_display_layout)
 
+    # Measuring instruments, not tests: they need a running server, so they are
+    # built on request and never added to ctest.
+    #   cmake --build <dir> --target vnc_probe reference_server
+    # See tests/measure_felt_latency.sh for the numbers they produced.
+    find_library(VNCCLIENT_LIB vncclient PATHS ${CMAKE_PREFIX_PATH}/lib)
+    find_library(VNCSERVER_LIB vncserver PATHS ${CMAKE_PREFIX_PATH}/lib)
+    if(VNCCLIENT_LIB)
+        add_executable(vnc_probe EXCLUDE_FROM_ALL tests/vnc_probe.c)
+        target_include_directories(vnc_probe PRIVATE ${CMAKE_PREFIX_PATH}/include)
+        target_link_libraries(vnc_probe ${VNCCLIENT_LIB})
+    endif()
+    if(VNCSERVER_LIB)
+        add_executable(reference_server EXCLUDE_FROM_ALL tests/reference_server.c)
+        target_include_directories(reference_server PRIVATE ${CMAKE_PREFIX_PATH}/include)
+        target_link_libraries(reference_server ${VNCSERVER_LIB})
+    endif()
+
     # Not a test: a measuring instrument. Build with
     #   cmake --build <dir> --target bench_composite && ./bench_composite
     add_executable(bench_composite EXCLUDE_FROM_ALL
