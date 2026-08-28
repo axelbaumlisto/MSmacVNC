@@ -4,6 +4,9 @@
 #include <stdio.h>
 
 #import "MacVNCDefaultsKeys.h"
+
+#include "CaptureRate.h"
+#include "MacVNCImageProfile.h"
 #import "MacVNCListenMode.h"
 
 /*
@@ -25,6 +28,19 @@ int main(void)
                    isEqualToString:MacVNCLoopbackIPv4]);
         assert([defaults boolForKey:MacVNCKeyAllowAllConfirmed] == NO);
         assert([[defaults stringForKey:MacVNCKeyListenAddress] isEqualToString:@""]);
+
+        /* Performance settings: the shipped defaults are the measured best
+           pair (30 FPS capture, JPEG quality 5). Pinned as VALUES, not just as
+           registered keys, because changing either silently changes what every
+           viewer experiences. */
+        assert([defaults integerForKey:MacVNCKeyCaptureFPS] ==
+               MACVNC_CAPTURE_FPS_DEFAULT);
+        MacVNCImageProfile profile;
+        assert(macVNCParseImageProfile(
+                   [defaults stringForKey:MacVNCKeyImageProfile].UTF8String,
+                   &profile));
+        assert(profile.kind == MacVNCImageProfileJPEG);
+        assert(profile.qualityLevel == MACVNC_IMAGE_QUALITY_DEFAULT);
 
         /* Server basics. */
         assert([defaults integerForKey:MacVNCKeyPort] == MacVNCDefaultPort);
