@@ -1,6 +1,7 @@
 #import "ScreenCapturer.h"
 #import "FirstFrameBudget.h"
 #import "FrameMailbox.h"
+#include <assert.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <errno.h>
@@ -46,6 +47,10 @@ static const void * const kMacVNCStateQueueKey = &kMacVNCStateQueueKey;
 @property (nonatomic, copy, nonnull) BOOL (^frameHandler)(CMSampleBufferRef sampleBuffer);
 @property (nonatomic, copy, nonnull) void (^errorHandler)(NSError *error);
 
+/* On stateQueue: the exclusion decision and, if it passes, the filter swap. */
+- (void)applyOwnApplicationExclusion:(BOOL)excluded
+                   completionHandler:(nullable void (^)(BOOL success))completionHandler;
+
 @end
 
 
@@ -66,6 +71,135 @@ macVNCCaptureInitializationFaultWasConsumed(void)
     return atomic_load(&captureInitializationFaultConsumed);
 }
 #endif
+
+/*
+ * The installed discovery seam, and the lock that lets a test swap it while a
+ * capturer's state queue may be reading it. A plain global would be a data race
+ * the project's TSan build would (rightly) report.
+ */
+static pthread_mutex_t gOwnApplicationDiscoveryMutex = PTHREAD_MUTEX_INITIALIZER;
+static MacVNCOwnApplicationDiscovery gOwnApplicationDiscovery;
+
+void
+macVNCSetOwnApplicationDiscovery(MacVNCOwnApplicationDiscovery discovery)
+{
+    MacVNCOwnApplicationDiscovery installed = [discovery copy];   /* heap block */
+    pthread_mutex_lock(&gOwnApplicationDiscoveryMutex);
+    MacVNCOwnApplicationDiscovery previous = gOwnApplicationDiscovery;
+    gOwnApplicationDiscovery = installed;
+    pthread_mutex_unlock(&gOwnApplicationDiscoveryMutex);
+    [previous release];
+}
+
+bool
+macVNCCaptureExclusionMayProceed(bool haveStream,
+                                 bool haveDisplay,
+                                 bool haveOwnApplication,
+                                 bool excluded)
+{
+    /* Restoring the default filter needs no application; excluding does, and
+       without one the request must refuse rather than swap in a filter that
+       hides nothing. */
+    return haveStream && haveDisplay && (!excluded || haveOwnApplication);
+}
+
+/*
+ * This process's entry in a discovery result, or nil.
+ *
+ * One place, used by both the start-time capture and the on-demand resolution,
+ * so "which application is ours" cannot drift between them.
+ */
+static SCRunningApplication *
+ownApplicationInList(NSArray<SCRunningApplication *> *applications)
+{
+    pid_t ownProcessID = getpid();
+    NSUInteger index = [applications indexOfObjectPassingTest:^BOOL(
+        SCRunningApplication *_Nonnull application, NSUInteger idx, BOOL *_Nonnull stop) {
+        (void)idx; (void)stop;
+        return application.processID == ownProcessID;
+    }];
+    return index == NSNotFound ? nil : applications[index];
+}
+
+MacVNCShareableContentCensus
+macVNCTakeShareableContentCensus(NSArray<SCRunningApplication *> *applications,
+                                 NSArray<SCWindow *> *windows,
+                                 pid_t ownProcessID)
+{
+    MacVNCShareableContentCensus census = {0, 0, 0, 0, false};
+    census.applications = (unsigned long)applications.count;
+    census.windows = (unsigned long)windows.count;
+    for (SCRunningApplication *application in applications) {
+        if (application.processID == ownProcessID) {
+            census.ownApplicationPresent = true;
+            break;
+        }
+    }
+    for (SCWindow *window in windows) {
+        SCRunningApplication *owner = window.owningApplication;
+        if (!owner || owner.processID != ownProcessID)
+            continue;
+        ++census.ownWindows;
+        if (window.isOnScreen)
+            ++census.ownWindowsOnScreen;
+    }
+    return census;
+}
+
+void
+macVNCLogShareableContentCensus(const char *phase,
+                                unsigned int displayID,
+                                MacVNCShareableContentCensus census)
+{
+    NSLog(@"macVNC: SCK census at %s (display %u, pid %d): applications=%lu, "
+          @"this process %s; windows=%lu, owned by this process=%lu (%lu on screen)",
+          phase ? phase : "?", displayID, (int)getpid(), census.applications,
+          census.ownApplicationPresent ? "PRESENT" : "ABSENT", census.windows,
+          census.ownWindows, census.ownWindowsOnScreen);
+    /* The one line that would settle the remaining question by itself: if SCK
+       can see our windows and STILL does not list us, no ordering of window
+       creation against the request can ever make application-level exclusion
+       work, and the filter would have to name windows. */
+    if (!census.ownApplicationPresent && census.ownWindows > 0)
+        NSLog(@"macVNC: SCK lists %lu window(s) of this process (%lu on screen) "
+              @"but not the process itself - application-level exclusion is "
+              @"impossible on this system",
+              census.ownWindows, census.ownWindowsOnScreen);
+}
+
+/*
+ * The applications and windows of one discovery, through the seam.
+ *
+ * onScreenWindowsOnly:NO is kept even though a live run proved it insufficient:
+ * it costs nothing and it is still the only variant that could ever list a
+ * window that is not on screen. What actually decides the outcome is that the
+ * CALLER owns a window by the time it asks - see the header. The completion may
+ * run on any thread and runs exactly once.
+ */
+static void
+discoverShareableContent(void (^completion)(NSArray<SCRunningApplication *> *applications,
+                                            NSArray<SCWindow *> *windows))
+{
+    pthread_mutex_lock(&gOwnApplicationDiscoveryMutex);
+    MacVNCOwnApplicationDiscovery discovery = [gOwnApplicationDiscovery retain];
+    pthread_mutex_unlock(&gOwnApplicationDiscoveryMutex);
+    if (discovery) {
+        discovery(completion);
+        [discovery release];
+        return;
+    }
+    [SCShareableContent
+        getShareableContentExcludingDesktopWindows:NO
+                              onScreenWindowsOnly:NO
+                                completionHandler:^(SCShareableContent *content, NSError *error) {
+          @autoreleasepool {
+            if (error)
+                NSLog(@"macVNC: shareable content discovery failed: %@",
+                      error.description);
+            completion(content.applications, content.windows);
+          }
+        }];
+}
 
 static void releaseMailboxFrame(void *frame)
 {
@@ -211,7 +345,14 @@ static void endMailboxActivity(void *context)
         pthread_mutex_unlock(&self->_readinessMutex);
         dispatch_group_enter(self.operationGroup);
 
-        [SCShareableContent getShareableContentWithCompletionHandler:^(SCShareableContent *content, NSError *error) {
+        /* onScreenWindowsOnly:NO for the same reason the resolution below uses
+           it: the plain getShareableContentWithCompletionHandler: is the
+           on-screen variant, whose `applications` cannot contain a windowless
+           menu-bar app. `displays` is the same either way. */
+        [SCShareableContent
+            getShareableContentExcludingDesktopWindows:NO
+                                  onScreenWindowsOnly:NO
+                                    completionHandler:^(SCShareableContent *content, NSError *error) {
             dispatch_async(self.stateQueue, ^{
                 /* A disconnect may have arrived while content discovery was pending. */
                 if (!self.captureRequested || self.generation != generation) {
@@ -239,17 +380,21 @@ static void endMailboxActivity(void *context)
                 /* Our own SCRunningApplication, taken from the list this call
                    already returned: it is the only way to name ourselves to
                    -initWithDisplay:excludingApplications:, and taking it here
-                   keeps a later curtain raise free of a second round trip.
-                   Absent (we own no window yet) means an exclusion request
-                   refuses rather than guesses. */
-                pid_t ownProcessID = getpid();
-                NSUInteger applicationIndex = [content.applications indexOfObjectPassingTest:^BOOL(
-                    SCRunningApplication *_Nonnull application, NSUInteger idx, BOOL *_Nonnull stop) {
-                    return application.processID == ownProcessID;
-                }];
-                self.ownApplication = applicationIndex == NSNotFound
-                    ? nil
-                    : content.applications[applicationIndex];
+                   keeps a later curtain raise free of a round trip.
+                   Absent is EXPECTED for a menu-bar app that owns no window
+                   yet - it is not an error here, and it is not final either:
+                   -setExcludesOwnApplication: resolves it again when it is
+                   actually needed.
+
+                   Censused because this is measurement point (a): the state of
+                   the discovery while this process owns NO curtain window. Its
+                   difference against the census at the exclusion request is the
+                   whole experiment. */
+                macVNCLogShareableContentCensus(
+                    "stream start", self.displayID,
+                    macVNCTakeShareableContentCensus(content.applications,
+                                                     content.windows, getpid()));
+                self.ownApplication = ownApplicationInList(content.applications);
 
                 [self beginStreamingWithDisplay:content.displays[displayIndex]
                                            generation:generation];
@@ -309,6 +454,48 @@ static void endMailboxActivity(void *context)
     [stream release];
 }
 
+- (void)resolveOwnApplicationWithCompletionHandler:
+    (void (^)(SCRunningApplication *application))handler
+{
+    dispatch_async(self.stateQueue, ^{
+      @autoreleasepool {
+        /* Cached from the stream's own discovery, or from an earlier raise:
+           one round trip per stream, not one per raise. */
+        if (self.ownApplication) {
+            NSLog(@"macVNC: own application for display %u answered from cache",
+                  self.displayID);
+            if (handler)
+                handler(self.ownApplication);
+            return;
+        }
+        discoverShareableContent(^(NSArray<SCRunningApplication *> *applications,
+                                   NSArray<SCWindow *> *windows) {
+            /* Back onto the queue that owns the cache; the discovery answers on
+               a thread of ScreenCaptureKit's choosing. */
+            dispatch_async(self.stateQueue, ^{
+              @autoreleasepool {
+                /* Measurement point (b): the same census, taken at the moment
+                   the exclusion is needed - by which time the caller has
+                   ordered its (invisible) curtain window in. */
+                macVNCLogShareableContentCensus(
+                    "exclusion request", self.displayID,
+                    macVNCTakeShareableContentCensus(applications, windows, getpid()));
+                SCRunningApplication *application = ownApplicationInList(applications);
+                if (application)
+                    self.ownApplication = application;
+                else
+                    NSLog(@"macVNC: this process is not among the %lu shareable "
+                          @"applications; own-window exclusion must refuse",
+                          (unsigned long)applications.count);
+                if (handler)
+                    handler(application);
+              }
+            });
+        });
+      }
+    });
+}
+
 - (void)setExcludesOwnApplication:(BOOL)excluded
                 completionHandler:(void (^)(BOOL success))completionHandler
 {
@@ -316,42 +503,73 @@ static void endMailboxActivity(void *context)
        a concurrent stop cannot half-apply it. */
     dispatch_async(self.stateQueue, ^{
       @autoreleasepool {
-        SCStream *stream = self.stream;
-        SCDisplay *display = self.captureDisplay;
-        SCRunningApplication *application = self.ownApplication;
-        if (!stream || !display || (excluded && !application)) {
-            NSLog(@"macVNC: cannot %s own windows for display %u "
-                  @"(stream %s, display %s, application %s)",
-                  excluded ? "exclude" : "restore", self.displayID,
-                  stream ? "yes" : "no", display ? "yes" : "no",
-                  application ? "yes" : "no");
-            if (completionHandler)
-                completionHandler(NO);
+        /* Resolve our own application at the moment it is needed - the
+           start-time answer is nil for a menu-bar app with no window of its
+           own, and that nil is what kept the curtain down on real hardware.
+
+           Only ever behind a RUNNING stream: a discovery is what can raise a
+           Screen Recording prompt, and a live stream is the proof that the
+           permission is already granted. With no stream this falls straight
+           through to the refusal below, exactly as it did before. */
+        if (excluded && !self.ownApplication && self.stream && self.captureDisplay) {
+            [self resolveOwnApplicationWithCompletionHandler:^(SCRunningApplication *application) {
+                (void)application;   /* the cache is the answer; re-checked below */
+                [self applyOwnApplicationExclusion:excluded
+                                 completionHandler:completionHandler];
+            }];
             return;
         }
-
-        /* By application, never by window: a window-based filter would have to
-           enumerate a window that is on screen, forcing the curtain to be shown
-           before the stream stops carrying it. */
-        SCContentFilter *filter = excluded
-            ? [[SCContentFilter alloc] initWithDisplay:display
-                                 excludingApplications:@[ application ]
-                                      exceptingWindows:@[]]
-            : [[SCContentFilter alloc] initWithDisplay:display
-                                      excludingWindows:@[]];
-        /* Swap on the RUNNING stream - never a stop/start. */
-        [stream updateContentFilter:filter completionHandler:^(NSError *error) {
-          @autoreleasepool {
-            if (error)
-                NSLog(@"macVNC: content filter update failed for display %u: %@",
-                      self.displayID, error.description);
-            if (completionHandler)
-                completionHandler(error == nil);
-          }
-        }];
-        [filter release];
+        [self applyOwnApplicationExclusion:excluded completionHandler:completionHandler];
       }
     });
+}
+
+/* The decision and the swap, on stateQueue. Split out so the resolution above
+   can re-enter it with exactly the same rules once it has an answer. */
+- (void)applyOwnApplicationExclusion:(BOOL)excluded
+                   completionHandler:(void (^)(BOOL success))completionHandler
+{
+  @autoreleasepool {
+    SCStream *stream = self.stream;
+    SCDisplay *display = self.captureDisplay;
+    SCRunningApplication *application = self.ownApplication;
+    if (!macVNCCaptureExclusionMayProceed(stream != nil, display != nil,
+                                          application != nil, excluded != NO)) {
+        NSLog(@"macVNC: cannot %s own windows for display %u "
+              @"(stream %s, display %s, application %s)",
+              excluded ? "exclude" : "restore", self.displayID,
+              stream ? "yes" : "no", display ? "yes" : "no",
+              application ? "yes" : "no");
+        if (completionHandler)
+            completionHandler(NO);
+        return;
+    }
+    /* What the gate just guaranteed, restated for the reader and for the static
+       analyzer, which does not see through the call above: everything the
+       filter is built from below is non-nil. */
+    assert(stream != nil && display != nil && (!excluded || application != nil));
+
+    /* By application, never by window: a window-based filter would have to
+       enumerate a window that is on screen, forcing the curtain to be shown
+       before the stream stops carrying it. */
+    SCContentFilter *filter = excluded
+        ? [[SCContentFilter alloc] initWithDisplay:display
+                             excludingApplications:@[ application ]
+                                  exceptingWindows:@[]]
+        : [[SCContentFilter alloc] initWithDisplay:display
+                                  excludingWindows:@[]];
+    /* Swap on the RUNNING stream - never a stop/start. */
+    [stream updateContentFilter:filter completionHandler:^(NSError *error) {
+      @autoreleasepool {
+        if (error)
+            NSLog(@"macVNC: content filter update failed for display %u: %@",
+                  self.displayID, error.description);
+        if (completionHandler)
+            completionHandler(error == nil);
+      }
+    }];
+    [filter release];
+  }
 }
 
 /*

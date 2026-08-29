@@ -127,9 +127,23 @@ typedef void (*MacVNCCaptureExclusionCompletion)(void *context, bool success);
  *
  * Excludes by APPLICATION, not by window: the filter is rebuilt with
  * -[SCContentFilter initWithDisplay:excludingApplications:exceptingWindows:]
- * and swapped onto the RUNNING stream with -updateContentFilter:, so no window
- * has to exist (let alone be on screen and enumerable) for the exclusion to
- * take effect, and the stream is never stopped and restarted.
+ * and swapped onto the RUNNING stream with -updateContentFilter:, so it
+ * survives window recreation (display hot-plug needs no second round trip) and
+ * the stream is never stopped and restarted.
+ *
+ * IT IS NOT ORDER-INDEPENDENT, though the first version of this comment said
+ * so. WHICH application is named is ScreenCapturer's business, and naming it
+ * requires finding this process in an SCShareableContent discovery - which
+ * lists the owners of shareable WINDOWS. A live run settled it: a menu-bar app
+ * that owns no window is absent from that list under EITHER discovery variant,
+ * and the request then refuses. So the CALLER must already have a window on
+ * screen before asking for `excluded:true` - MacVNCCurtain orders an invisible
+ * one in first. The first exclusion of a stream spends one discovery round trip
+ * on this (see -[ScreenCapturer resolveOwnApplicationWithCompletionHandler:]),
+ * which is why this call is asynchronous and why the caller owns the deadline.
+ * A process that cannot be resolved makes the request FAIL - never a filter
+ * that excludes nobody while reporting success, which would black out the
+ * remote viewer.
  *
  * `success` is true only when EVERY stream confirmed the swap. A session with
  * no streams reports failure: "nothing to exclude" must not read as "the

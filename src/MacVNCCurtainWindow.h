@@ -1,6 +1,7 @@
 #pragma once
 
 #import <Foundation/Foundation.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 /*
@@ -21,17 +22,27 @@
  * ---------------------------------------------------------------------------
  * Three decisions that are easy to get wrong, and why they are what they are:
  *
- * 1. THE FILTER EXCLUDES OUR APPLICATION, NOT OUR WINDOWS.
+ * 1. THE FILTER EXCLUDES OUR APPLICATION, NOT OUR WINDOWS - BUT NAMING
+ *    OURSELVES STILL NEEDS A WINDOW TO EXIST.
  *    `-[SCContentFilter initWithDisplay:excludingApplications:exceptingWindows:]`
- *    (SCStream.h:174-180) names an SCRunningApplication, so it is
- *    order-independent: the exclusion can be installed BEFORE any curtain
- *    window exists. Excluding by window would need the window to be on screen
- *    to be enumerable through SCShareableContent, which forces the order
- *    "show black, then update the filter" - i.e. the remote party watches the
- *    screen go black first. It also survives window recreation, which makes
- *    display hot-plug a pure window-creation problem (step 5) instead of a
- *    filter round trip. The cost is that our Preferences window disappears
- *    from the stream while the curtain is up.
+ *    (SCStream.h:174-180) names an SCRunningApplication, and that object can
+ *    only be obtained from an SCShareableContent discovery. A live run settled
+ *    what the plan assumed away: with an authenticated client, 797 delivered
+ *    frames and the `onScreenWindowsOnly:NO` discovery variant, this process
+ *    was STILL absent from `applications`, so every raise refused with
+ *    "application no". `applications` lists the owners of shareable CONTENT,
+ *    and this LSUIElement app owns no window ScreenCaptureKit will count while
+ *    its only UI is a status item.
+ *
+ *    So the exclusion is NOT order-independent after all. The raise now orders
+ *    a curtain window in FIRST, in a state neither party can see (note 4), and
+ *    only then asks for the exclusion. What survives from the original
+ *    argument is the rest of it: naming the APPLICATION still survives window
+ *    recreation, so display hot-plug stays a pure window-creation problem
+ *    instead of a filter round trip, and the swap still happens before the
+ *    curtain becomes opaque, so the remote viewer never sees black. The cost
+ *    is unchanged: our Preferences window leaves the stream while the curtain
+ *    is up.
  *
  * 2. THE CURTAIN IS NOT OPAQUE.
  *    An opaque full-screen window makes every window under it report
@@ -60,23 +71,55 @@
  *    exists.
  *
  * 3. RAISE AND LIFT ARE ORDERED, AND THE ORDERS ARE MIRRORS.
- *    Raise: swap the filter FIRST, show the windows only after the swap
- *    reports success. Lift: hide the windows FIRST, restore the filter after.
- *    Both orders keep the same invariant - the curtain is never in the stream,
- *    and the stream is never showing our excluded application to nobody.
- *    The filter is swapped with `-[SCStream updateContentFilter:completionHandler:]`
- *    on the RUNNING stream; stopping and restarting the stream would drop
- *    frames and re-run the permission-sensitive start path.
+ *    Raise: ARM the windows (order them in, invisible - note 4), swap the
+ *    filter, and only after the swap reports success make them opaque. Lift:
+ *    make them transparent and order them out FIRST, restore the filter after.
+ *    Both orders keep the same invariant - nothing the local user can see is
+ *    ever in the stream, and the stream is never excluding an application whose
+ *    curtain is not up. The filter is swapped with
+ *    `-[SCStream updateContentFilter:completionHandler:]` on the RUNNING
+ *    stream; stopping and restarting it would drop frames and re-run the
+ *    permission-sensitive start path.
  *
  *    A swap that never reports back is treated as FAILURE: MacVNCCurtain arms
  *    a timeout (MACVNC_CURTAIN_FILTER_SWAP_TIMEOUT_NANOSECONDS) alongside the
  *    request and, whichever arrives first wins, resolves exactly once. On
- *    failure the windows are NOT shown and a best-effort un-exclusion is sent,
- *    so a late success cannot leave the stream permanently excluding us.
+ *    failure the windows are ordered out WHILE STILL INVISIBLE and a
+ *    best-effort un-exclusion is sent, so neither party ever saw anything and
+ *    a late success cannot leave the stream permanently excluding us.
+ *
+ * 4. THE ARMED STATE IS A WINDOW NEITHER PARTY CAN SEE.
+ *    Between "ordered in" and "opaque" the curtain sits at
+ *    MACVNC_CURTAIN_ARMING_ALPHA, which exists only so that this process owns a
+ *    window ScreenCaptureKit will count (note 1). It must therefore be
+ *    non-zero - a window drawn with alpha 0 is a plausible thing for a window
+ *    server to skip - and small enough to be invisible to BOTH sides, since
+ *    the exclusion is not in place yet and the remote viewer is watching this
+ *    same desktop. 1/255 is the largest value that cannot change an 8-bit
+ *    channel by more than one level: what composites is (1 - a) * L, so the
+ *    worst case is pure white, 255 - 255/255 = 254. One level over one frame
+ *    or two, on both sides, and NO black frame for the remote viewer, which is
+ *    what the ordering exists to avoid.
  */
 
 /* See note 2 above for the derivation. */
 #define MACVNC_CURTAIN_ALPHA 0.999
+
+/* See note 4 above: visible to ScreenCaptureKit, invisible to both humans. */
+#define MACVNC_CURTAIN_ARMING_ALPHA (1.0 / 255.0)
+
+/*
+ * The alpha one occluder window is drawn at in each state - the ONLY place the
+ * two constants above are turned into a window property.
+ *
+ * A one-line function rather than a literal at the call site because that call
+ * site is inside an AppKit NSWindow subclass, which no test can drive without a
+ * window server; published here, the mapping is checkable, and "armed" cannot
+ * quietly come to mean "opaque" - which would blind the local user (and the
+ * remote viewer) BEFORE the exclusion is in place, i.e. exactly the failure the
+ * ordering exists to avoid.
+ */
+double macVNCCurtainOccluderAlpha(bool covering);
 
 /* A filter swap on a running stream is milliseconds of work. This is the point
  * at which we stop believing it will ever answer; the local user is looking at
@@ -128,6 +171,20 @@ typedef void (^MacVNCCurtainCompletion)(BOOL success);
 
 @optional
 /*
+ * Whether the occluders that are ordered in actually COVER anything: YES is
+ * MACVNC_CURTAIN_ALPHA, NO is the armed alpha of note 4. Separate from
+ * visibility because the raise needs a window that exists and is on screen
+ * while still showing the local user their own desktop - that is the whole
+ * reason the exclusion can be armed at all (note 1).
+ *
+ * Optional for the same reason as the focus pair below: an occluder set that
+ * does not implement it models windows but not their opacity, and "ordered in
+ * but not covering" is then indistinguishable from "ordered in" - which is
+ * exactly what a test of the pre-arming bookkeeping wants.
+ */
+- (void)setOccludersCovering:(BOOL)covering;
+
+/*
  * The focus half, optional because it arrived with the event tap and the
  * bookkeeping above is testable without it: an occluder set that does not
  * implement these is one that models windows but not focus, which is what the
@@ -147,14 +204,28 @@ typedef void (^MacVNCCurtainCompletion)(BOOL success);
 /*
  * Reconciles the occluder set with the attached screens: creates what is
  * missing, drops what is gone, re-fits what stayed. When the curtain is up it
- * also re-asserts visibility, so a screen attached mid-curtain is covered by
- * the same call that creates its window - that one call IS the exposure
- * window, because application-level exclusion needs no filter round trip.
+ * also re-asserts the covering alpha and then visibility - in that order, so a
+ * window created for a newly attached screen is already opaque when it is
+ * ordered in rather than showing that screen uncurtained for a frame. That one
+ * call IS the exposure window, because application-level exclusion already
+ * covers whatever this process creates.
  */
 - (void)synchronizeWithAttachedScreens;
 
-/** Shows or hides every occluder. Idempotent. */
+/*
+ * Orders every occluder in or out. Idempotent, and INDEPENDENT of -setCovering:
+ * below: "visible" here means "ordered in", which during the raise deliberately
+ * means "on screen and invisible to everyone".
+ */
 - (void)setVisible:(BOOL)visible;
+
+/*
+ * Whether the occluders that are ordered in actually hide the screen. NO is the
+ * armed state - a window that exists for ScreenCaptureKit's benefit and for
+ * nobody else's. Idempotent, and always false while the curtain is DOWN.
+ */
+- (void)setCovering:(BOOL)covering;
+@property (nonatomic, readonly) BOOL covering;
 
 /*
  * Whether the curtain windows may become key, and who receives what is typed
@@ -224,19 +295,21 @@ typedef NS_ENUM(NSInteger, MacVNCCurtainState) {
 + (instancetype)curtainWithDefaultSeams;
 
 /*
- * Swap the filter, then show the windows. `completion` runs on the main thread
- * with NO on any failure, including the swap timing out - and after a failure
- * the curtain is DOWN, never half-raised. Raising an already-up curtain
- * succeeds without doing anything; a raise while another transition is in
- * flight fails rather than queueing.
+ * Arm the windows (invisible, note 4), swap the filter, and only then make the
+ * windows opaque. `completion` runs on the main thread with NO on any failure,
+ * including the swap timing out - and after a failure the curtain is DOWN with
+ * its windows ordered out again, never half-raised and never having been
+ * visible to either party. Raising an already-up curtain succeeds without doing
+ * anything; a raise while another transition is in flight fails rather than
+ * queueing.
  */
 - (void)raiseWithCompletion:(MacVNCCurtainCompletion)completion;
 
 /*
- * Hide the windows, then restore the filter - the exact reverse. The windows
- * are already down by the time the filter request is issued, so a failing or
- * timing-out restore still leaves the local user seeing their screen; that is
- * the direction this asymmetry deliberately fails in.
+ * Make the windows transparent and order them out, then restore the filter -
+ * the exact reverse. The windows are gone by the time the filter request is
+ * issued, so a failing or timing-out restore still leaves the local user seeing
+ * their screen; that is the direction this asymmetry deliberately fails in.
  */
 - (void)liftWithCompletion:(MacVNCCurtainCompletion)completion;
 
