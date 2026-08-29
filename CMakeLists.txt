@@ -57,6 +57,8 @@ set(SOURCE_FILES
     src/MacVNCCurtainPolicy.c
     src/MacVNCCurtainWindow.h
     src/MacVNCCurtainWindow.m
+    src/MacVNCCurtainController.h
+    src/MacVNCCurtainController.m
     src/PointerState.h
     src/PointerState.c
     src/KeyboardModifierState.h
@@ -272,6 +274,28 @@ if(BUILD_TESTING)
         ${SCREEN_CAPTURE_KIT} ${CORE_MEDIA} ${CORE_VIDEO}
         ${FOUNDATION} ${APPKIT_LIBRARY} ${CMAKE_THREAD_LIBS_INIT})
     add_test(NAME curtain_window COMMAND test_curtain_window)
+
+    # "Should the curtain be up": every raise and lift transition above the
+    # curtain, tap, capture-health, secret and clock seams, so no test here
+    # needs a display, a tap or real time. It links the capture session and the
+    # curtain window because the shipped default seams call them; the test
+    # itself drives fakes only.
+    add_executable(test_curtain_controller tests/test_curtain_controller.m
+                   src/MacVNCCurtainController.m
+                   src/MacVNCCurtainPolicy.c
+                   src/MacVNCCurtainWindow.m
+                   src/MacVNCCaptureSession.m
+                   src/MacVNCEncryptionPolicy.c
+                   src/MacVNCImageProfile.c
+                   src/MacVNCSweepSchedule.c
+                   src/ScreenCapturer.m
+                   src/FrameMailbox.c
+                   src/FirstFrameBudget.c)
+    target_include_directories(test_curtain_controller PRIVATE src)
+    target_link_libraries(test_curtain_controller
+        ${SCREEN_CAPTURE_KIT} ${CORE_MEDIA} ${CORE_VIDEO}
+        ${FOUNDATION} ${APPKIT_LIBRARY} ${CMAKE_THREAD_LIBS_INIT})
+    add_test(NAME curtain_controller COMMAND test_curtain_controller)
 
     add_executable(test_compositor tests/test_compositor.c src/CompositeFramebuffer.c)
     target_include_directories(test_compositor PRIVATE src)

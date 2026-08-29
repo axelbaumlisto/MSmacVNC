@@ -150,6 +150,15 @@ typedef void (^MacVNCCurtainCompletion)(BOOL success);
 - (void)afterNanoseconds:(uint64_t)nanoseconds performBlock:(dispatch_block_t)block;
 @end
 
+/*
+ * The production scheduler: dispatch_after on the main queue. Published rather
+ * than private because the controller that decides when a curtain should be up
+ * needs the same seam, and two copies of "dispatch_after on the main queue"
+ * is one too many.
+ */
+@interface MacVNCCurtainMainQueueScheduler : NSObject <MacVNCCurtainScheduler>
+@end
+
 typedef NS_ENUM(NSInteger, MacVNCCurtainState) {
     MacVNCCurtainStateDown = 0,
     MacVNCCurtainStateRaising,

@@ -6,6 +6,7 @@
 #import "ScreenCapturer.h"
 #import "FirstFrameBudget.h"
 
+#include <assert.h>
 #include <stdatomic.h>
 #include <pthread.h>
 
@@ -13,19 +14,41 @@
 static NSMutableArray<ScreenCapturer *> *gCapturers;
 
 /*
- * Guards gCapturers for Build, Reset and SetSelfExcluded - and for NOTHING
- * else. The client-thread readers (Start, StopAndWait, WaitForFirstFrames,
- * Count) stay lock-free on the argument the header makes: they are joined
- * before a writer runs. SetSelfExcluded is not, because the curtain calls it
- * from the MAIN thread, which rfbShutdownServer never joins, so "lift the
- * curtain" can overlap "stop the server" - and [gCapturers copy] racing
- * [gCapturers release] is a retain of freed memory.
+ * Guards gCapturers, and EVERY function here takes it.
+ *
+ * It used to guard only Build, Reset and SetSelfExcluded, on the argument that
+ * the other readers run on client threads which rfbShutdownServer(screen, TRUE)
+ * joins before any writer runs. That argument was FALSE and its counter-example
+ * ships: mac.m's capture keep-warm timer fires on gCaptureStopQueue - a queue
+ * nothing joins - and calls StopAndWait() and Count() after dropping
+ * captureControlMutex, so it can overlap the Reset inside vncServerStopLocked,
+ * which nils and releases the very list those two were enumerating. The main
+ * thread is the other unjoined caller, through the curtain's seams.
+ *
+ * So the rule has no per-caller reasoning left to keep true: readers snapshot
+ * under the lock (the copy retains every stream for the duration of the call)
+ * and work on the snapshot; writers swap the pointer under the lock and release
+ * the old list outside it.
  *
  * A leaf lock: taken after serverLifecycleMutex, never held while messaging a
  * capturer, and never held across -[ScreenCapturer dealloc], which can wait
  * (bounded) for a sample queue to drain.
  */
 static pthread_mutex_t gCapturersMutex = PTHREAD_MUTEX_INITIALIZER;
+
+/*
+ * Whether the CURRENT session's streams are excluding this application, and
+ * which session that answer belongs to.
+ *
+ * The exclusion is state on an SCStream, so a rebuilt session silently drops
+ * it - "windows up while the stream no longer excludes us" is exactly the
+ * state the raise/lift ordering forbids, and nothing reports it. The flag
+ * exists so the curtain's controller can ask, and the generation exists so a
+ * swap that confirms AFTER a rebuild cannot answer for the session that
+ * replaced it.
+ */
+static bool gSelfExcluded;
+static uint64_t gSessionGeneration;
 
 /*
  * Moves the list out of the global under the lock and hands ownership to the
@@ -38,6 +61,8 @@ static NSMutableArray<ScreenCapturer *> *detachCapturers(void)
     pthread_mutex_lock(&gCapturersMutex);
     NSMutableArray<ScreenCapturer *> *detached = gCapturers;   /* +1 moves out */
     gCapturers = nil;
+    gSelfExcluded = false;
+    ++gSessionGeneration;
     pthread_mutex_unlock(&gCapturersMutex);
     return detached;
 }
@@ -45,18 +70,48 @@ static NSMutableArray<ScreenCapturer *> *detachCapturers(void)
 static void installCapturers(NSMutableArray<ScreenCapturer *> *capturers)
 {
     pthread_mutex_lock(&gCapturersMutex);
+    /* Build drops the previous session FIRST; overwriting a live list here
+       would leak every stream in it, and "the caller happens to reset first"
+       was enforced nowhere. */
+    assert(gCapturers == nil);
     gCapturers = [capturers retain];
+    gSelfExcluded = false;
+    ++gSessionGeneration;
     pthread_mutex_unlock(&gCapturersMutex);
 }
 
 /* A snapshot that keeps every stream alive for as long as the caller holds it,
-   so a Reset running concurrently cannot free a capturer mid-request. */
-static NSArray<ScreenCapturer *> *copyCapturers(void)
+   so a Reset running concurrently cannot free a capturer mid-request. Every
+   reader goes through this - see the header's THREADING note for why "the
+   client threads are joined before a writer runs" was not an argument that
+   covered them all. */
+static NSArray<ScreenCapturer *> *copyCapturers(uint64_t *outGeneration)
 {
     pthread_mutex_lock(&gCapturersMutex);
     NSArray<ScreenCapturer *> *snapshot = [gCapturers copy];   /* +1 */
+    if (outGeneration)
+        *outGeneration = gSessionGeneration;
     pthread_mutex_unlock(&gCapturersMutex);
     return snapshot;
+}
+
+/* Records the outcome of one exclusion request against the session it was
+   issued for. A late answer from a session that has since been rebuilt is
+   dropped rather than describing the new one. */
+static void noteExclusionOutcome(uint64_t generation, bool excluded, bool success)
+{
+    pthread_mutex_lock(&gCapturersMutex);
+    if (generation == gSessionGeneration)
+        gSelfExcluded = (success && excluded);
+    pthread_mutex_unlock(&gCapturersMutex);
+}
+
+bool macVNCCaptureSessionSelfExcluded(void)
+{
+    pthread_mutex_lock(&gCapturersMutex);
+    bool excluded = gSelfExcluded && gCapturers.count > 0;
+    pthread_mutex_unlock(&gCapturersMutex);
+    return excluded;
 }
 
 /*
@@ -226,7 +281,10 @@ bool macVNCCaptureSessionBuild(const MacVNCDisplayLayout *layout,
 
 size_t macVNCCaptureSessionCount(void)
 {
-    return gCapturers.count;
+  @autoreleasepool {
+    NSArray<ScreenCapturer *> *capturers = [copyCapturers(NULL) autorelease];
+    return capturers.count;
+  }
 }
 
 void macVNCCaptureSessionStart(void)
@@ -235,7 +293,8 @@ void macVNCCaptureSessionStart(void)
        pool; anything autoreleased below (NSLog formatting, error.description)
        would leak permanently with "autoreleased with no pool in place". */
     @autoreleasepool {
-    for (ScreenCapturer *capturer in gCapturers)
+    NSArray<ScreenCapturer *> *capturers = [copyCapturers(NULL) autorelease];
+    for (ScreenCapturer *capturer in capturers)
         [capturer startCapture];
     }
 }
@@ -246,7 +305,11 @@ void macVNCCaptureSessionStopAndWait(void)
        pool; anything autoreleased below (NSLog formatting, error.description)
        would leak permanently with "autoreleased with no pool in place". */
     @autoreleasepool {
-    for (ScreenCapturer *capturer in gCapturers)
+    /* Snapshotted, not read in place: this also runs on the capture STOP QUEUE
+       (mac.m's keep-warm timer), which rfbShutdownServer never joins, so it can
+       overlap the Reset a server stop performs. */
+    NSArray<ScreenCapturer *> *capturers = [copyCapturers(NULL) autorelease];
+    for (ScreenCapturer *capturer in capturers)
         [capturer stopCaptureAndWait];
     }
 }
@@ -268,14 +331,20 @@ void macVNCCaptureSessionStopAndWait(void)
     MacVNCCaptureExclusionCompletion _completion;
     void *_context;
     _Atomic bool _anyFailed;
+    bool _excluded;
+    uint64_t _generation;
 }
 
 - (instancetype)initWithCompletion:(MacVNCCaptureExclusionCompletion)completion
                            context:(void *)context
+                          excluded:(bool)excluded
+                        generation:(uint64_t)generation
 {
     if ((self = [super init])) {
         _completion = completion;
         _context = context;
+        _excluded = excluded;
+        _generation = generation;
         atomic_init(&_anyFailed, false);
     }
     return self;
@@ -296,8 +365,12 @@ void macVNCCaptureSessionStopAndWait(void)
  */
 - (void)reportCompletion
 {
+    bool success = !atomic_load(&_anyFailed);
+    /* Published BEFORE the answer, so a caller that re-checks the invariant
+       inside its own completion sees the state its request just established. */
+    noteExclusionOutcome(_generation, _excluded, success);
     if (_completion)
-        _completion(_context, !atomic_load(&_anyFailed));
+        _completion(_context, success);
 }
 
 @end
@@ -310,7 +383,9 @@ void macVNCCaptureSessionSetSelfExcluded(bool excluded,
     /* Snapshot under the lock, then work on it unlocked: the copy retains every
        stream, so a concurrent Reset can free the LIST without freeing anything
        this request is about to message. */
-    NSArray<ScreenCapturer *> *capturers = [copyCapturers() autorelease];
+    uint64_t generation = 0;
+    NSArray<ScreenCapturer *> *capturers =
+        [copyCapturers(&generation) autorelease];
     if (capturers.count == 0) {
         /* No live stream is a FAILURE for this request, not a vacuous success:
            see the header. Still on the main queue, like every other outcome. */
@@ -323,7 +398,9 @@ void macVNCCaptureSessionSetSelfExcluded(bool excluded,
 
     MacVNCCaptureExclusionRequest *request =
         [[MacVNCCaptureExclusionRequest alloc] initWithCompletion:completion
-                                                         context:context];
+                                                          context:context
+                                                         excluded:excluded
+                                                       generation:generation];
     dispatch_group_t group = dispatch_group_create();
     for (ScreenCapturer *capturer in capturers) {
         dispatch_group_enter(group);
@@ -350,7 +427,8 @@ bool macVNCCaptureSessionWaitForFirstFrames(uint64_t timeoutNanoseconds)
     MacVNCFirstFrameBudget budget =
         macVNCFirstFrameBudgetStart(macVNCMonotonicNow(), timeoutNanoseconds);
 
-    for (ScreenCapturer *capturer in gCapturers) {
+    NSArray<ScreenCapturer *> *capturers = [copyCapturers(NULL) autorelease];
+    for (ScreenCapturer *capturer in capturers) {
         uint64_t remaining =
             macVNCFirstFrameBudgetRemaining(&budget, macVNCMonotonicNow());
         if (remaining == 0)
