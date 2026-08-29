@@ -35,7 +35,16 @@
 /* Screens that report attached but refuse creation - the display that is
    unplugged between being listed and being covered. */
 @property (nonatomic, retain) NSMutableSet<NSNumber *> *refuseCreation;
+/* What the MEASUREMENT says, as opposed to what the bookkeeping believes: nil
+   means "this occluder really is covering its screen". Non-nil is the state
+   that started all this - windows that exist, are ordered in, and hide
+   nothing. Only a real window server can produce it, so here it is injected. */
+@property (nonatomic, retain) NSString *coverageFailure;
+/* Every screen the audit actually asked about, in order: an audit that skips a
+   screen is an audit that would miss the display left uncovered. */
+@property (nonatomic, retain) NSMutableArray<NSNumber *> *reportedScreens;
 - (BOOL)everCovered;
+- (NSNumber *)lastCoveringCall;
 - (NSUInteger)lastIndexOfEvent:(NSString *)event;
 @end
 
@@ -51,6 +60,7 @@
         _coveringCalls = [[NSMutableArray alloc] init];
         _log = [[NSMutableArray alloc] init];
         _refuseCreation = [[NSMutableSet alloc] init];
+        _reportedScreens = [[NSMutableArray alloc] init];
     }
     return self;
 }
@@ -92,9 +102,26 @@
     [_log addObject:covering ? @"cover:1" : @"cover:0"];
 }
 
+- (NSString *)occluderReportForScreen:(NSNumber *)identifier
+                        failureReason:(NSString **)reason
+{
+    [_reportedScreens addObject:identifier];
+    /* In the ordered log too: the audit is only evidence if it happens AFTER
+       the change it is auditing, and "after" is an order, not a count. */
+    [_log addObject:[NSString stringWithFormat:@"audit:%@", identifier]];
+    if (reason)
+        *reason = _coverageFailure;
+    return [NSString stringWithFormat:@"fake occluder for screen %@", identifier];
+}
+
 - (BOOL)everCovered
 {
     return [_coveringCalls containsObject:@YES];
+}
+
+- (NSNumber *)lastCoveringCall
+{
+    return _coveringCalls.lastObject;
 }
 
 - (NSUInteger)lastIndexOfEvent:(NSString *)event
@@ -116,6 +143,8 @@
     [_coveringCalls release];
     [_log release];
     [_refuseCreation release];
+    [_reportedScreens release];
+    [_coverageFailure release];
     [super dealloc];
 }
 
@@ -819,6 +848,234 @@ static void testDroppedCurtainAnswersAndUndoesItself(void)
     [upOccluders release];
 }
 
+/*
+ * THE REGRESSION THIS FILE EXISTS FOR NOW: a raise that reports SUCCESS while
+ * covering NOTHING.
+ *
+ * Measured live, on two displays: with the curtain "up", a second server that
+ * does NOT exclude this application sampled the same framebuffer region as the
+ * curtained one and got an identical, non-black picture - and the app had
+ * logged no failure at all. Everything above the occluder seam is bookkeeping,
+ * and bookkeeping cannot be wrong about itself: -setCovering: and -setVisible:
+ * over an empty or partial occluder set succeed at nothing and say so to
+ * nobody.
+ *
+ * So success now means MEASURED, and each way of covering nothing is a
+ * separate refusal here.
+ */
+static void testRaiseRefusesWhenNothingIsActuallyCovered(void)
+{
+    /* (a) No screen at all: every call succeeds over an empty set, which is
+       the purest form of the failure. */
+    FakeOccluders *headless = [[[FakeOccluders alloc] init] autorelease];
+    FakeExclusion *headlessExclusion = [[[FakeExclusion alloc] init] autorelease];
+    ManualScheduler *headlessScheduler = [[[ManualScheduler alloc] init] autorelease];
+    MacVNCCurtainWindowSet *headlessSet = nil;
+    MacVNCCurtain *headlessCurtain = makeCurtain(headless, headlessExclusion,
+                                                 headlessScheduler, &headlessSet);
+    __block int headlessOutcomes = 0;
+    [headlessCurtain raiseWithCompletion:^(BOOL success) {
+        assert(!success);
+        ++headlessOutcomes;
+    }];
+    assert(headlessOutcomes == 1);
+    assert(headlessCurtain.state == MacVNCCurtainStateDown);
+    assert(!headlessSet.visible);
+    assert(!headlessSet.covering);
+    /* Fail-safe on the capture side too: the stream is not left hiding an
+       application whose curtain never went up. */
+    assert([headlessExclusion.requests isEqualToArray:(@[ @YES, @NO ])]);
+
+    /* (b) One screen listed, its window refused: the display the local user is
+       sitting in front of has no occluder, so the raise must not claim one. */
+    FakeOccluders *refused = [[[FakeOccluders alloc] init] autorelease];
+    [refused.attached addObject:@1];
+    [refused.refuseCreation addObject:@1];
+    FakeExclusion *refusedExclusion = [[[FakeExclusion alloc] init] autorelease];
+    ManualScheduler *refusedScheduler = [[[ManualScheduler alloc] init] autorelease];
+    MacVNCCurtainWindowSet *refusedSet = nil;
+    MacVNCCurtain *refusedCurtain = makeCurtain(refused, refusedExclusion,
+                                                refusedScheduler, &refusedSet);
+    __block int refusedOutcomes = 0;
+    [refusedCurtain raiseWithCompletion:^(BOOL success) {
+        assert(!success);
+        ++refusedOutcomes;
+    }];
+    assert(refusedOutcomes == 1);
+    assert(refusedCurtain.state == MacVNCCurtainStateDown);
+
+    /* (c) PARTIAL coverage is still a failure: one screen curtained and one
+       showing the remote party's work is exactly what this feature exists to
+       prevent, and "most displays" is not the promise. */
+    FakeOccluders *partial = [[[FakeOccluders alloc] init] autorelease];
+    [partial.attached addObjectsFromArray:@[ @1, @2 ]];
+    [partial.refuseCreation addObject:@2];
+    FakeExclusion *partialExclusion = [[[FakeExclusion alloc] init] autorelease];
+    ManualScheduler *partialScheduler = [[[ManualScheduler alloc] init] autorelease];
+    MacVNCCurtainWindowSet *partialSet = nil;
+    MacVNCCurtain *partialCurtain = makeCurtain(partial, partialExclusion,
+                                                partialScheduler, &partialSet);
+    __block int partialOutcomes = 0;
+    [partialCurtain raiseWithCompletion:^(BOOL success) {
+        assert(!success);
+        ++partialOutcomes;
+    }];
+    assert(partialOutcomes == 1);
+    assert(partialCurtain.state == MacVNCCurtainStateDown);
+    assert(![partialSet.screenIdentifiers containsObject:@2]);
+    assert(!partialSet.visible);
+    assert(!partialSet.covering);
+    assert([partialExclusion.requests isEqualToArray:(@[ @YES, @NO ])]);
+
+    /* (d) The windows exist, are ordered in, and STILL hide nothing - the case
+       only a window server can produce, and the one the live measurement
+       found. The refusal must undo the opacity as well as the visibility, or
+       the next raise inherits a state this one was refused for. */
+    FakeOccluders *blind = [[[FakeOccluders alloc] init] autorelease];
+    [blind.attached addObject:@1];
+    blind.coverageFailure = @"window 42 composites at alpha 0.00392";
+    FakeExclusion *blindExclusion = [[[FakeExclusion alloc] init] autorelease];
+    ManualScheduler *blindScheduler = [[[ManualScheduler alloc] init] autorelease];
+    MacVNCCurtainWindowSet *blindSet = nil;
+    MacVNCCurtain *blindCurtain = makeCurtain(blind, blindExclusion,
+                                              blindScheduler, &blindSet);
+    __block int blindOutcomes = 0;
+    [blindCurtain raiseWithCompletion:^(BOOL success) {
+        assert(!success);
+        ++blindOutcomes;
+    }];
+    assert(blindOutcomes == 1);
+    assert(blindCurtain.state == MacVNCCurtainStateDown);
+    assert(!blindSet.visible);
+    assert(!blindSet.covering);
+    assert([blind.lastCoveringCall isEqualToNumber:@NO]);
+    assert(blind.hideCalls >= 1);
+    assert([blindExclusion.requests isEqualToArray:(@[ @YES, @NO ])]);
+    /* The audit asked about the screen it was given, rather than deciding
+       without looking. */
+    assert([blind.reportedScreens isEqualToArray:@[ @1 ]]);
+
+    /* (e) The control: nothing about a healthy raise changes. A measurement
+       that agrees with the bookkeeping still raises the curtain, and still
+       asks the stream exactly once. */
+    FakeOccluders *healthy = [[[FakeOccluders alloc] init] autorelease];
+    [healthy.attached addObjectsFromArray:@[ @1, @2 ]];
+    FakeExclusion *healthyExclusion = [[[FakeExclusion alloc] init] autorelease];
+    ManualScheduler *healthyScheduler = [[[ManualScheduler alloc] init] autorelease];
+    MacVNCCurtainWindowSet *healthySet = nil;
+    MacVNCCurtain *healthyCurtain = makeCurtain(healthy, healthyExclusion,
+                                                healthyScheduler, &healthySet);
+    __block int healthyOutcomes = 0;
+    [healthyCurtain raiseWithCompletion:^(BOOL success) {
+        assert(success);
+        ++healthyOutcomes;
+    }];
+    assert(healthyOutcomes == 1);
+    assert(healthyCurtain.state == MacVNCCurtainStateUp);
+    assert(healthySet.visible && healthySet.covering);
+    assert([healthyExclusion.requests isEqualToArray:@[ @YES ]]);
+    /* EVERY attached screen was measured, not just the first. */
+    assert([healthy.reportedScreens isEqualToArray:(@[ @1, @2 ])]);
+
+    /* The audit happens AFTER the windows were told to cover and after they
+       were ordered in - measuring the intent instead of the result is how a
+       curtain comes to believe itself. */
+    assert([healthy lastIndexOfEvent:@"cover:1"] <
+           [healthy lastIndexOfEvent:@"audit:1"]);
+    assert([healthy lastIndexOfEvent:@"show"] <
+           [healthy lastIndexOfEvent:@"audit:1"]);
+
+    /* And the lift measures the same windows again, so the raised interval is
+       bracketed at both ends: a sample taken in the middle of it has two
+       timestamped measurements to sit between, instead of one claim. */
+    [healthyCurtain liftWithCompletion:nil];
+    assert(healthyCurtain.state == MacVNCCurtainStateDown);
+    assert([healthy.reportedScreens isEqualToArray:(@[ @1, @2, @1, @2 ])]);
+}
+
+/*
+ * THE CAUSE ITSELF, once the audit had named it.
+ *
+ * The live log, with the curtain "up" and the local screen showing its desktop:
+ *
+ *   alpha=0.99900 visible=1 onActiveSpace=1 level=1000 ...
+ *   | window server: onscreen=1 layer=1000 alpha=0.00392
+ *
+ * AppKit had the covering alpha and the compositor still had the arming one.
+ * `-[NSWindow setAlphaValue:]` records the value on the object and leaves the
+ * window-server half to the implicit CoreAnimation transaction, which commits
+ * at the END of a run-loop pass - and a raise arms, swaps, covers and measures
+ * inside ONE pass. Measured on this machine, on a borderless non-opaque window
+ * at NSScreenSaverWindowLevel, reading the alpha back with
+ * CGWindowListCopyWindowInfo:
+ *
+ *   after -setAlphaValue:0.999   AppKit 0.99900  server 0.00392
+ *   after -displayIfNeeded       AppKit 0.99900  server 0.00392   (drawing is
+ *                                                                  not it)
+ *   after [CATransaction flush]  AppKit 0.99900  server 0.99900
+ *   after a run-loop turn        AppKit 0.99900  server 0.99900
+ *
+ * ...and identically inside a dispatch_async main-QUEUE block, which is how a
+ * raise resolves - so "it runs off the main thread" was NOT the cause; the
+ * capture session delivers on the main queue and this reproduces there too.
+ *
+ * A test cannot read the window server without a window on somebody's screen,
+ * so what is pinned here is the rule that produced the fix: the occluder set
+ * COMMITS after every change it makes, and the commit is a published seam so
+ * that rule is observable without one.
+ */
+static void testEveryOccluderChangeIsCommittedToTheWindowServer(void)
+{
+    __block NSUInteger commits = 0;
+    macVNCCurtainSetWindowCommit(^{ ++commits; });
+
+    /* The bookkeeping half of the module commits nothing by itself: it owns no
+       window, and a commit per bookkeeping call would be a claim it cannot
+       make. */
+    FakeOccluders *fakes = [[[FakeOccluders alloc] init] autorelease];
+    [fakes.attached addObject:@1];
+    MacVNCCurtainWindowSet *fakeSet =
+        [[[MacVNCCurtainWindowSet alloc] initWithOccluders:fakes] autorelease];
+    [fakeSet synchronizeWithAttachedScreens];
+    [fakeSet setCovering:YES];
+    assert(commits == 0);
+
+    /* The AppKit half does, on every change. The occluder set here is the
+       SHIPPED one, driven with no screen synchronised: it therefore owns no
+       NSWindow, nothing can reach anybody's screen, and the assertions below
+       are about the rule rather than about this machine's displays. (Driving
+       -synchronizeWithAttachedScreens instead would build real windows, which
+       works but drags AppKit's LaunchServices XPC machinery into a test whose
+       `leaks` count is part of the verification.) */
+    MacVNCCurtain *curtain = [MacVNCCurtain curtainWithDefaultSeams];
+    MacVNCCurtainWindowSet *real = curtain.windowSet;
+
+    commits = 0;
+    [real setCovering:YES];
+    assert(commits == 1);      /* THE fix: the covering alpha is committed */
+    commits = 0;
+    [real setCovering:NO];
+    assert(commits == 1);      /* and so is the way back to armed */
+
+    commits = 0;
+    [real setVisible:NO];
+    assert(commits == 1);      /* ordering out is a window-server change too */
+
+    /* Unconditional on purpose, and asserted as such: the commit happens even
+       with no window to commit, so a curtain that owns windows on ONE call and
+       none on the next cannot have a silent path. The create and re-fit paths
+       commit for the same reason (a window ordered in before its armed alpha
+       reached the window server appears at the default 1.0 - a full black
+       frame for both parties); those need a real display, so what guards them
+       live is the audit above, which reads the window server back. */
+
+    macVNCCurtainSetWindowCommit(nil);
+
+    /* Installing nil restores the real commit, and calling it with no window
+       to commit must be harmless - the lift path does exactly that. */
+    macVNCCurtainCommitWindowChanges();
+}
+
 static void testAlphaLeaksNoVisibleLevel(void)
 {
     /* The "looks black" criterion, stated as arithmetic rather than as an
@@ -855,6 +1112,8 @@ int main(void)
         testLiftKeepsWindowsDownWhenRestoreTimesOut();
         testStaleAnswerCannotResolveTheNextTransition();
         testScreenParameterChangeCoversNewDisplay();
+        testRaiseRefusesWhenNothingIsActuallyCovered();
+        testEveryOccluderChangeIsCommittedToTheWindowServer();
         testDroppedCurtainAnswersAndUndoesItself();
         testAlphaLeaksNoVisibleLevel();
         printf("curtain window: all assertions passed\n");

@@ -16,6 +16,10 @@
  *
  * A fixed sub-region rather than the whole 15 Mpx screen: it keeps a sweep
  * quick, and text-heavy content is exactly what the quality question is about.
+ *
+ * Password: PROBE_PASSWORD in the environment, never an argv word, so it does
+ * not sit in `ps` output for every user on the machine (the server side takes
+ * the same care with MACVNC_PASSWORD_FILE).
  */
 #include <rfb/rfbclient.h>
 
@@ -25,6 +29,21 @@
 #include <time.h>
 
 static int REGION_X = 0, REGION_Y = 0, REGION_W = 1200, REGION_H = 800;
+
+/* Sampling stride and the black threshold are printed with the numbers: a
+   verdict whose definition is invisible is not a measurement. A pixel counts
+   as non-black when its luma exceeds this, which tolerates the few units of
+   ringing JPEG leaves on a genuinely black curtain. */
+#define SAMPLE_STRIDE 3
+#define BLACK_LUMA 8
+
+struct regionStats {
+    long long samples;  /* pixels actually examined */
+    long long nonblack; /* of those, how many exceed BLACK_LUMA */
+    long long sum;      /* luma sum, for the mean */
+    int max;            /* brightest luma seen */
+    int levels;         /* occupied buckets of a 64-bin luma histogram */
+};
 
 static double gArrivals[200000];
 static int gCount;
@@ -55,11 +74,65 @@ onFinished(rfbClient *cl)
         gArrivals[gCount++] = now_seconds();
 }
 
+/*
+ * libvncclient asks here, once, during the VNC auth handshake.
+ *
+ * The password arrives through the environment, not argv: an argument is world
+ * readable through ps for as long as the probe runs. Returning NULL makes
+ * libvncclient fail the handshake cleanly instead of sending an empty password
+ * and reporting the confusing "authentication failed".
+ *
+ * Note VNC auth is DES-based: only the first 8 characters of the password are
+ * significant, on this client and on every server.
+ */
 static char *
 onPassword(rfbClient *cl)
 {
     (void)cl;
-    return strdup(getenv("VNCPASS") ? getenv("VNCPASS") : "");
+    const char *pw = getenv("PROBE_PASSWORD");
+    if (!pw || !*pw)
+        pw = getenv("VNCPASS"); /* the older name, still honoured */
+    if (!pw || !*pw) {
+        fprintf(stderr,
+                "vnc_probe: server asked for a password; "
+                "set PROBE_PASSWORD in the environment\n");
+        return NULL;
+    }
+    return strdup(pw);
+}
+
+/*
+ * Sample the region and say what is in it in numbers.
+ *
+ * "I sampled nothing" and "I sampled a black screen" are different failures and
+ * must not look alike: the first leaves samples == 0, the second leaves
+ * samples > 0 with nonblack == 0.
+ */
+static void
+sampleRegion(rfbClient *cl, struct regionStats *st)
+{
+    int histogram[64] = {0};
+    memset(st, 0, sizeof(*st));
+
+    const int bpp = cl->format.bitsPerPixel / 8;
+    for (int y = REGION_Y; y < REGION_Y + REGION_H; y += SAMPLE_STRIDE) {
+        for (int x = REGION_X; x < REGION_X + REGION_W; x += SAMPLE_STRIDE) {
+            const uint8_t *p = (const uint8_t *)cl->frameBuffer +
+                               ((size_t)y * cl->width + x) * bpp;
+            /* BGRA in the framebuffer; Rec.601 luma. */
+            int luma = (77 * p[2] + 150 * p[1] + 29 * p[0]) >> 8;
+            histogram[luma / 4]++;
+            st->sum += luma;
+            if (luma > BLACK_LUMA)
+                st->nonblack++;
+            if (luma > st->max)
+                st->max = luma;
+            st->samples++;
+        }
+    }
+    for (int i = 0; i < 64; ++i)
+        if (histogram[i])
+            st->levels++;
 }
 
 static int
@@ -98,7 +171,22 @@ main(int argc, char **argv)
     if (argc < 4) {
         fprintf(stderr,
                 "usage: %s host port frame <quality> <compress> <jpeg> <out.ppm>\n"
-                "       %s host port stream <seconds>\n", argv[0], argv[0]);
+                "       %s host port stream <seconds> [quality compress jpeg]\n"
+                "\n"
+                "environment:\n"
+                "  PROBE_PASSWORD  VNC password, for a server that requires one.\n"
+                "                  Kept out of argv so it never shows up in ps.\n"
+                "                  VNC auth is DES: only the first 8 characters\n"
+                "                  count. Unset means \"expect no password\".\n"
+                "  PROBE_REGION    x,y,w,h of the region to fetch and sample\n"
+                "                  (default %d,%d,%d,%d), clamped to the server\n"
+                "                  framebuffer.\n"
+                "\n"
+                "frame mode prints samples/nonblack/mean_luma/max_luma for the\n"
+                "region it sampled: nonblack=0 with samples>0 is a BLACK screen,\n"
+                "samples=0 means nothing was examined at all, and a desktop puts\n"
+                "nonblack near 100%% with mean_luma in the tens or hundreds.\n",
+                argv[0], argv[0], REGION_X, REGION_Y, REGION_W, REGION_H);
         return 64;
     }
     const char *host = argv[1];
@@ -158,6 +246,25 @@ main(int argc, char **argv)
     }
 
     if (out) {
+        /* Clamp to the framebuffer we actually got: sampling past its end reads
+           other people's memory and reports whatever it finds as "content". */
+        if (REGION_X < 0)
+            REGION_X = 0;
+        if (REGION_Y < 0)
+            REGION_Y = 0;
+        if (REGION_W <= 0 || REGION_H <= 0 || REGION_X >= cl->width ||
+            REGION_Y >= cl->height) {
+            printf("region %d,%d,%d,%d lies outside the %dx%d framebuffer: "
+                   "samples=0 nonblack=0 *** NO SAMPLES ***\n",
+                   REGION_X, REGION_Y, REGION_W, REGION_H, cl->width,
+                   cl->height);
+            return 2;
+        }
+        if (REGION_X + REGION_W > cl->width)
+            REGION_W = cl->width - REGION_X;
+        if (REGION_Y + REGION_H > cl->height)
+            REGION_H = cl->height - REGION_Y;
+
         double t0 = now_seconds();
         SendFramebufferUpdateRequest(cl, REGION_X, REGION_Y, REGION_W, REGION_H,
                                      FALSE);
@@ -179,29 +286,32 @@ main(int argc, char **argv)
         }
         writeRegionPPM(cl, out);
         /* Content signature, printed by the TOOL: a measurement that silently
-           captured nothing must be impossible to mistake for a good run. */
-        int histogram[64] = {0};
-        long long sum = 0, samples = 0;
-        const int bpp = cl->format.bitsPerPixel / 8;
-        for (int y = REGION_Y; y < REGION_Y + REGION_H; y += 3) {
-            for (int x = REGION_X; x < REGION_X + REGION_W; x += 3) {
-                const uint8_t *p = (const uint8_t *)cl->frameBuffer +
-                                   ((size_t)y * cl->width + x) * bpp;
-                int v = (p[0] + p[1] + p[2]) / 3;
-                histogram[v / 4]++;
-                sum += v;
-                samples++;
-            }
-        }
-        int occupied = 0;
-        for (int i = 0; i < 64; ++i)
-            if (histogram[i])
-                ++occupied;
-        printf("q=%d c=%d jpeg=%d region=%dx%d px=%lld saved=%s elapsed=%.2fs "
-               "mean=%.1f levels=%d %s\n",
-               quality, compress, jpeg, REGION_W, REGION_H, gPixels, out,
-               now_seconds() - t0, samples ? (double)sum / samples : 0.0,
-               occupied, occupied >= 8 ? "CONTENT" : "*** EMPTY/FLAT ***");
+           captured nothing must be impossible to mistake for a good run, and a
+           black curtain must be impossible to mistake for a desktop. */
+        struct regionStats st;
+        sampleRegion(cl, &st);
+        const char *verdict = "CONTENT";
+        if (st.samples == 0)
+            verdict = "*** NO SAMPLES ***";
+        else if (st.nonblack == 0)
+            verdict = "*** BLACK ***";
+        else if (st.nonblack * 200 < st.samples)
+            /* A black screen still carries the mouse cursor the server paints
+               into the framebuffer: a handful of white pixels in 100k is not a
+               desktop. Under half a percent, say that, not "flat". */
+            verdict = "*** NEARLY BLACK (<0.5% lit) ***";
+        else if (st.levels < 8)
+            verdict = "*** EMPTY/FLAT ***";
+        printf("q=%d c=%d jpeg=%d region=%dx%d+%d+%d px=%lld saved=%s "
+               "elapsed=%.2fs stride=%d samples=%lld nonblack(>%d)=%lld (%.1f%%) "
+               "mean_luma=%.1f max_luma=%d levels=%d %s\n",
+               quality, compress, jpeg, REGION_W, REGION_H, REGION_X, REGION_Y,
+               gPixels, out, now_seconds() - t0, SAMPLE_STRIDE, st.samples,
+               BLACK_LUMA, st.nonblack,
+               st.samples ? 100.0 * (double)st.nonblack / (double)st.samples
+                          : 0.0,
+               st.samples ? (double)st.sum / (double)st.samples : 0.0, st.max,
+               st.levels, verdict);
         rfbClientCleanup(cl);
         return 0;
     }
