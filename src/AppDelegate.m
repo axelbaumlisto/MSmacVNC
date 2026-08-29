@@ -1,3 +1,8 @@
+/* memset_s, so the wipe of the stack copy of the password below cannot be
+   optimised away as a dead store. Must precede every include: <string.h>
+   declares it only when this is already defined. */
+#define __STDC_WANT_LIB_EXT1__ 1
+
 #import "AppDelegate.h"
 #import "mac.h"
 #import "MacVNCPermissions.h"
@@ -11,8 +16,112 @@
 #import "MacVNCListenMode.h"
 #import "MacVNCLoginItem.h"
 #import "MacVNCStartupConfig.h"
+#import "MacVNCCurtainController.h"
+#import "MacVNCCurtainInput.h"
+#import "MacVNCCurtainWindow.h"
 #include <string.h>
 #include <unistd.h>
+
+/* -----------------------------------------------------------------------
+ * Curtain mode: the glue that finally constructs it.
+ *
+ * Every decision about WHEN the curtain may be up lives in
+ * MacVNCCurtainController, every decision about the screen in
+ * MacVNCCurtainWindow and every decision about local input in
+ * MacVNCCurtainInput. What is left here is the part only this file can do:
+ * saying which secret, which clients, which session events - and doing so
+ * WITHOUT changing anything while the preference is off, which is the shipped
+ * default. With it off, the objects below exist and answer questions; no tap
+ * is created, no window is allocated, no capture filter is touched, and the
+ * server behaves exactly as it did before this file grew this section.
+ * ----------------------------------------------------------------------- */
+
+/*
+ * The secret the escape hatch is armed with.
+ *
+ * It is deliberately the password the RUNNING server authenticates against,
+ * read back from the core, and not the one in NSUserDefaults: the two differ
+ * whenever the password came from MACVNC_PASSWORD_FILE, and whenever it was
+ * changed in Preferences without a restart. Arming the curtain
+ * with a password the server does not accept would mean the curtain the remote
+ * party raised could not be typed away - the exact lockout this whole feature
+ * is shaped around avoiding.
+ */
+@interface MacVNCRunningServerSecret : NSObject <MacVNCCurtainSecretSource>
+@end
+
+@implementation MacVNCRunningServerSecret
+
+- (NSData *)copyCurtainSecret
+{
+    /* Comfortably larger than anything a VNC password can usefully be (DES
+       keys itself from 8 bytes); an over-long one is refused by the core
+       rather than truncated here. */
+    char password[256];
+    size_t length = vncServerCopyPassword(password, sizeof(password));
+    /* MUTABLE on purpose: this is a cleartext copy of the password, made once
+       per heartbeat while the curtain is up, and macVNCCurtainDiscardSecret()
+       wipes it before releasing it. Handing back an immutable NSData would
+       leave a readable copy in the heap for the allocator to recycle. */
+    NSMutableData *secret = length > 0
+                                ? [[NSMutableData alloc] initWithBytes:password
+                                                                length:length]
+                                : nil;
+    /* memset_s, NOT memset: nothing reads `password` after this point, so a
+       plain memset is a dead store the optimiser is free to delete - leaving
+       the cleartext password in a stack frame that the next call reuses.
+       memset_s is the one form the standard forbids eliding. (The heap copy
+       needs no such care: macVNCCurtainDiscardSecret writes through
+       -mutableBytes, an opaque pointer the compiler cannot prove is dead.) */
+    memset_s(password, sizeof(password), 0, sizeof(password));
+    return secret;    /* +1: the `copy` in the selector is the ownership rule */
+}
+
+@end
+
+/*
+ * The one-way back reference that keeps the tap and the controller from owning
+ * each other.
+ *
+ * The controller RETAINS its input suppression, and MacVNCCurtainInput retains
+ * its observer - so wiring the controller in as the observer directly would be
+ * a retain cycle, and the tap would outlive the app's ability to tear it down.
+ * The construction order forces the same shape anyway: the input has to exist
+ * before the controller can be built with it, and the controller has to exist
+ * before it can be observed.
+ *
+ * That the observer forwards to the controller is not a detail. Rule 7 of
+ * MacVNCCurtainInput.h hands the keyboard focus to the curtain window when
+ * secure input turns on, and that hand-over LATCHES; it is safe only because
+ * the observer LIFTS synchronously in the same main-queue block, ending
+ * suppression and giving the focus straight back. An observer that kept the
+ * curtain up across secure input would leave the curtain window key, where
+ * -keyDown: drops self-injected events - the REMOTE viewer's keyboard would go
+ * dead while their mouse kept working. -setSecureInputActive: on the
+ * controller lifts, and so does -noteInputSuppressionUnavailable.
+ */
+@interface MacVNCCurtainObserverBridge : NSObject <MacVNCCurtainInputObserver>
+@property (nonatomic, assign) MacVNCCurtainController *controller;  /* not retained */
+@end
+
+@implementation MacVNCCurtainObserverBridge
+
+- (void)noteLocalUnlockAccepted
+{
+    [_controller noteLocalUnlockAccepted];
+}
+
+- (void)setSecureInputActive:(BOOL)active
+{
+    [_controller setSecureInputActive:active];
+}
+
+- (void)noteInputSuppressionUnavailable
+{
+    [_controller noteInputSuppressionUnavailable];
+}
+
+@end
 
 static BOOL macVNCAllowsTestPermissionGateBypass(void)
 {
@@ -43,6 +152,19 @@ static BOOL macVNCAllowsTestPermissionGateBypass(void)
    macVNCShouldActOnCaptureFailure). */
 @property (nonatomic, assign) uint64_t handledFailureGeneration;
 
+/* Curtain mode. The controller owns the curtain, the tap and the clock; this
+   object owns the controller and the bridge that lets the tap talk back. */
+@property (nonatomic, retain) MacVNCCurtainController *curtainController;
+@property (nonatomic, retain) MacVNCCurtainObserverBridge *curtainObserver;
+/* The three ways the local session stops being a place the curtain may cover,
+   tracked separately because they start and stop independently: the screens
+   can wake while the screensaver is still running, and a session can be
+   switched away from and back with neither of the other two moving. The
+   controller wants one answer, and it is the AND of all three. */
+@property (nonatomic, assign) BOOL screensaverActive;
+@property (nonatomic, assign) BOOL screensAsleep;
+@property (nonatomic, assign) BOOL sessionResigned;
+
 @end
 
 
@@ -60,6 +182,24 @@ static bool macVNCCaptureAllowed_(void)
 static BOOL macVNCServerIsRunning_(void)
 {
     return vncServerGetPort() > 0;
+}
+
+/* The authenticated client count moved. Raised on client threads (and from the
+   stop path, with the lifecycle lock held), so it must do nothing but hand the
+   question to the main queue, which is where every curtain decision is made.
+   A nil delegate makes this a no-op, which is what a server running without
+   the app around wants. */
+static void macVNCAuthenticatedClientsChanged_(void)
+{
+    /* The LibVNCServer client threads are plain pthreads with no pool of their
+       own - this hook is the first thing on that path to enter the Objective-C
+       runtime, and anything it autoreleases would otherwise be leaked (and
+       announced as "autoreleased with no pool in place"). */
+    @autoreleasepool {
+        [gSharedAppDelegate performSelectorOnMainThread:@selector(refreshCurtainState)
+                                             withObject:nil
+                                          waitUntilDone:NO];
+    }
 }
 
 static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t generation)
@@ -91,8 +231,10 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
     [q release]; /* the property holds its own retain */
     macVNCScreenCaptureFailureHandler = macVNCScreenCaptureFailed;
     macVNCCaptureAllowed = macVNCCaptureAllowed_;
+    macVNCAuthenticatedClientsChangedHandler = macVNCAuthenticatedClientsChanged_;
     macVNCPermissionUIServerRunningProvider = macVNCServerIsRunning_;
     macVNCRegisterDefaults();
+    [self setupCurtainMode];
     [self setupStatusBarItem];
 
 
@@ -121,6 +263,14 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
     [self.updateTimer invalidate];
     self.updateTimer = nil;
 
+    /* FIRST, and before anything that can block: this is what takes the black
+       windows off every display and stops swallowing local input. The stop
+       below waits up to 8 s, and spending those 8 s behind a curtain would be
+       8 s in which the person at the Mac has neither screen nor keyboard while
+       the app is on its way out. */
+    [self.curtainController noteApplicationWillTerminate];
+    self.curtainObserver.controller = nil;
+
     /* Stop OFF the main thread, then wait bounded: vncServerStop() joins client
        threads and waits for capture work that may sit behind a prompt (up to 5 s
        per display). Blocking the main thread here re-introduced exactly the
@@ -138,6 +288,12 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
 
 - (void)dealloc
 {
+    [NSNotificationCenter.defaultCenter removeObserver:self];
+    [NSWorkspace.sharedWorkspace.notificationCenter removeObserver:self];
+    [NSDistributedNotificationCenter.defaultCenter removeObserver:self];
+    _curtainObserver.controller = nil;
+    [_curtainObserver release];
+    [_curtainController release];
     [_updateTimer invalidate];
     [_statusItem release];
     [_statusMenuItem release];
@@ -151,6 +307,178 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
     if (gSharedAppDelegate == self)
         gSharedAppDelegate = nil;
     [super dealloc];
+}
+
+/* -----------------------------------------------------------------------
+ * Curtain mode
+ * ----------------------------------------------------------------------- */
+
+/*
+ * Builds the three objects and subscribes to everything that can lift.
+ *
+ * Nothing here starts anything: MacVNCCurtain allocates no window until it is
+ * raised, MacVNCCurtainInput creates no event tap until suppression begins,
+ * and the controller cannot raise while the preference is off - which is the
+ * default. So with curtain mode switched off this method costs three
+ * allocations and a handful of notification registrations, and changes no
+ * observable behaviour of the server.
+ */
+- (void)setupCurtainMode
+{
+    /* ONE curtain object, because its window set is also the tap's focus seam:
+       the window the local user may type into while the tap path is
+       unavailable has to be a window somebody actually shows. */
+    MacVNCCurtain *curtain = [MacVNCCurtain curtainWithDefaultSeams];
+    MacVNCRunningServerSecret *secret =
+        [[[MacVNCRunningServerSecret alloc] init] autorelease];
+    MacVNCCurtainObserverBridge *observer =
+        [[[MacVNCCurtainObserverBridge alloc] init] autorelease];
+    self.curtainObserver = observer;
+
+    MacVNCCurtainInput *input =
+        [MacVNCCurtainInput inputWithDefaultSeamsFocus:curtain.windowSet
+                                             observer:observer
+                                         secretSource:secret];
+    self.curtainController =
+        [MacVNCCurtainController controllerWithDefaultSeamsCurtain:curtain
+                                                 inputSuppression:input
+                                                     secretSource:secret];
+    observer.controller = self.curtainController;
+
+    /* Saving in Preferences writes defaults, so this is how "switched off"
+       reaches the curtain WITHOUT waiting for a restart - the one setting in
+       this app that must take effect at once, because the person it affects
+       cannot see their screen while it is on. */
+    [NSNotificationCenter.defaultCenter
+        addObserver:self
+           selector:@selector(defaultsChanged:)
+               name:NSUserDefaultsDidChangeNotification
+             object:nil];
+
+    /* Display sleep and fast user switching. Both mean the local half of the
+       curtain is no longer covering what the local user is looking at. */
+    NSNotificationCenter *workspace = NSWorkspace.sharedWorkspace.notificationCenter;
+    [workspace addObserver:self selector:@selector(screensDidSleep:)
+                      name:NSWorkspaceScreensDidSleepNotification object:nil];
+    [workspace addObserver:self selector:@selector(screensDidWake:)
+                      name:NSWorkspaceScreensDidWakeNotification object:nil];
+    [workspace addObserver:self selector:@selector(sessionDidResignActive:)
+                      name:NSWorkspaceSessionDidResignActiveNotification object:nil];
+    [workspace addObserver:self selector:@selector(sessionDidBecomeActive:)
+                      name:NSWorkspaceSessionDidBecomeActiveNotification object:nil];
+
+    /* The screensaver announces itself only on the distributed centre; there is
+       no NSWorkspace equivalent. Observing it needs no permission and raises no
+       dialog. */
+    [NSDistributedNotificationCenter.defaultCenter
+        addObserver:self selector:@selector(screensaverDidStart:)
+               name:@"com.apple.screensaver.didstart" object:nil];
+    [NSDistributedNotificationCenter.defaultCenter
+        addObserver:self selector:@selector(screensaverDidStop:)
+               name:@"com.apple.screensaver.didstop" object:nil];
+
+    [self refreshCurtainState];
+}
+
+/*
+ * Everything the curtain's decision depends on that this object can observe,
+ * re-stated as it is right now.
+ *
+ * Deliberately level-triggered and idempotent: the controller turns it into
+ * the ONE edge that raises (0 -> non-zero authenticated clients) and treats
+ * everything else as a reason to lift, so re-asserting the same values costs
+ * nothing and a missed notification is corrected by the next call. Called from
+ * the client-count hook, from the 2 s menu timer and after a start.
+ *
+ * ORDER MATTERS: the preference and the server flag can only refuse, and the
+ * client count carries the raise edge, so the count goes last - against
+ * conditions that have already been brought up to date.
+ */
+- (void)refreshCurtainState
+{
+    MacVNCCurtainController *controller = self.curtainController;
+    if (!controller)
+        return;
+    [controller setCurtainPreferenceEnabled:
+        [NSUserDefaults.standardUserDefaults boolForKey:MacVNCKeyCurtain]];
+    [controller setServerRunning:vncServerGetPort() > 0];
+    /* The NARROWER count, not vncConnectedClients: this method is called on a
+       2 s timer as well as on the core's notification, so reading the count
+       that moves at password-accept time would raise the curtain DURING the
+       first-frame wait - the local screen black while the remote viewer still
+       has a placeholder, which is exactly what waiting for frames exists to
+       prevent. */
+    int clients = vncAuthenticatedClientsReceivingUpdates;
+    [controller setAuthenticatedClientCount:clients > 0 ? (NSUInteger)clients : 0];
+}
+
+- (void)defaultsChanged:(NSNotification *)notification
+{
+    (void)notification;
+    /* Posted synchronously on whichever thread wrote a default; every curtain
+       method is main-thread only. */
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self defaultsChanged:nil];
+        });
+        return;
+    }
+    [self refreshCurtainState];
+    /* A saved password does not change what the RUNNING server accepts, so
+       this usually decides nothing - but a server restarted in between
+       installs a new one, and a curtain armed with the old secret must come
+       down rather than stay up with an escape hatch that no longer opens it. */
+    [self.curtainController noteSecretMayHaveChanged];
+}
+
+/* One answer out of three independent facts (see the properties). */
+- (void)refreshCurtainLocalSession
+{
+    BOOL usable = !(self.screensaverActive || self.screensAsleep ||
+                    self.sessionResigned);
+    [self.curtainController setLocalSessionActive:usable];
+}
+
+- (void)screensDidSleep:(NSNotification *)notification
+{
+    (void)notification;
+    self.screensAsleep = YES;
+    [self refreshCurtainLocalSession];
+}
+
+- (void)screensDidWake:(NSNotification *)notification
+{
+    (void)notification;
+    self.screensAsleep = NO;
+    [self refreshCurtainLocalSession];
+}
+
+- (void)sessionDidResignActive:(NSNotification *)notification
+{
+    (void)notification;
+    self.sessionResigned = YES;
+    [self refreshCurtainLocalSession];
+}
+
+- (void)sessionDidBecomeActive:(NSNotification *)notification
+{
+    (void)notification;
+    self.sessionResigned = NO;
+    [self refreshCurtainLocalSession];
+}
+
+- (void)screensaverDidStart:(NSNotification *)notification
+{
+    (void)notification;
+    self.screensaverActive = YES;
+    [self refreshCurtainLocalSession];
+}
+
+- (void)screensaverDidStop:(NSNotification *)notification
+{
+    (void)notification;
+    self.screensaverActive = NO;
+    [self refreshCurtainLocalSession];
 }
 
 /* -----------------------------------------------------------------------
@@ -401,6 +729,13 @@ static NSMenuItem *addRow(NSMenu *menu, NSString *title, SEL action,
        one stops the server and opens a modal, and by the time the rest are
        delivered the user may already have started a new run — which must not be
        killed by a stale report. */
+    /* BEFORE the generation filter, and unconditionally: this is the capture
+       side reporting that a stream stopped or errored, and a curtain over a
+       dead stream is a local user staring at black while the remote party sees
+       nothing. Lifting is safe for a stale report too - the worst it can do is
+       take down a curtain the next connection puts back up. */
+    [self.curtainController noteCaptureStreamStopped];
+
     uint64_t reportedGeneration = [info[@"generation"] unsignedLongLongValue];
     if (!macVNCShouldActOnCaptureFailure(reportedGeneration,
                                          vncServerCurrentGeneration(),
@@ -545,6 +880,11 @@ static NSMenuItem *addRow(NSMenu *menu, NSString *title, SEL action,
     self.accessibilityPermissionMenuItem.hidden = !ui.shouldShowPermissionRows;
     self.screenPermissionMenuItem.title = ui.screenChipTitle;
     self.accessibilityPermissionMenuItem.title = ui.accessibilityChipTitle;
+
+    /* The backstop for the curtain's conditions: the client-count hook and the
+       defaults notification are what make it prompt, this 2 s tick is what
+       makes a missed one temporary rather than permanent. */
+    [self refreshCurtainState];
 }
 
 - (void)copyVNCAddress:(id)sender

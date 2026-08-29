@@ -57,6 +57,17 @@ void (*macVNCScreenCaptureFailureHandler)(bool likelyPermissionDenial,
 /* Injected permission gate; see mac.h. NULL means unrestricted. */
 bool (*macVNCCaptureAllowed)(void) = NULL;
 
+/* Set by AppDelegate; see mac.h. Says only "the authenticated client count may
+   have moved", never how far, so two notifications cannot be reordered into a
+   connection that never happened. */
+void (*macVNCAuthenticatedClientsChangedHandler)(void) = NULL;
+
+static void notifyAuthenticatedClientsChanged(void)
+{
+    if (macVNCAuthenticatedClientsChangedHandler)
+        macVNCAuthenticatedClientsChangedHandler();
+}
+
 #if defined(MACVNC_ENABLE_TEST_HOOKS)
 static _Atomic unsigned gCaptureStartCount = 0;
 static _Atomic unsigned gCaptureStopCount = 0;
@@ -82,14 +93,41 @@ static MacVNCNetworkAccessList clientAccessList;
 /* Password handed to LibVNCServer; must outlive rfbScreen. Zeroized + freed on
  * every (re)start and on server stop so cleartext does not linger. */
 static char *gPasswdList[2] = {NULL, NULL};
+/* Guards gPasswdList[0] against vncServerCopyPassword(), which curtain mode
+   calls from the MAIN thread while a start or a stop may be replacing it.
+   Deliberately NOT serverLifecycleMutex: that one is held across client-thread
+   joins and bounded capture waits, i.e. for seconds, and the curtain asks this
+   question once per heartbeat. A leaf lock held for a strlen and a memcpy
+   cannot stall anything. LibVNCServer's own reads of authPasswdData are
+   unchanged and unaffected: the list is only ever replaced while no client
+   thread exists. */
+static pthread_mutex_t passwordMutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void macVNCClearStoredPassword(void)
 {
+    pthread_mutex_lock(&passwordMutex);
     if (gPasswdList[0]) {
         memset(gPasswdList[0], 0, strlen(gPasswdList[0]));
         free(gPasswdList[0]);
         gPasswdList[0] = NULL;
     }
+    pthread_mutex_unlock(&passwordMutex);
+}
+
+size_t
+vncServerCopyPassword(char *buffer, size_t size)
+{
+    if (!buffer || size == 0)
+        return 0;
+    pthread_mutex_lock(&passwordMutex);
+    size_t length = gPasswdList[0] ? strlen(gPasswdList[0]) : 0;
+    if (length == 0 || length >= size)
+        length = 0;   /* none, or it would not fit: see mac.h on truncation */
+    else
+        memcpy(buffer, gPasswdList[0], length);
+    pthread_mutex_unlock(&passwordMutex);
+    buffer[length] = '\0';
+    return length;
 }
 static MacVNCDisplayLayout displayLayout;
 static rfbBool rfbServerInitialized = FALSE;
@@ -126,12 +164,17 @@ static void macVNCEnsureStopQueue(void)
     });
 }
 
-/* Per-client bookkeeping. Only one fact needs remembering: whether this client
-   has been counted towards vncConnectedClients, so a disconnect decrements
-   exactly once. A three-state readiness machine used to live here too; every
-   one of its transitions produced nothing but a log line. */
+/* Per-client bookkeeping: which counters this client has been added to, so a
+   disconnect subtracts from each exactly once. There are TWO because the two
+   answers are needed at different moments - captures must start the instant a
+   password is accepted (they are what produces the first frame), while the
+   curtain may only hide a viewer that is already RECEIVING frames. A client
+   that disconnects during the first-frame wait was never added to the second.
+   A three-state readiness machine used to live here too; every one of its
+   transitions produced nothing but a log line. */
 typedef struct {
     rfbBool captureCounted;
+    rfbBool updatesCounted;
 } MacVNCClientState;
 
 static rfbBool macVNCPasswordCheck(rfbClientPtr client,
@@ -156,6 +199,9 @@ void macVNCTLSHandleVeNCrypt(rfbClientPtr cl);
 
 /* Number of currently connected clients (read by AppDelegate for status display) */
 _Atomic int vncConnectedClients = 0;
+
+/* The narrower count: clients past the first-frame wait. See mac.h. */
+_Atomic int vncAuthenticatedClientsReceivingUpdates = 0;
 
 
 
@@ -260,7 +306,9 @@ installPassword(const char *password)
       return FALSE;
   }
   macVNCClearStoredPassword();
+  pthread_mutex_lock(&passwordMutex);
   gPasswdList[0] = strdup(password);
+  pthread_mutex_unlock(&passwordMutex);
   if (!gPasswdList[0]) {
       rfbErr("Out of memory storing the VNC password\n");
       return FALSE;
@@ -644,11 +692,67 @@ static void reconcileCaptureState(void)
 }
 
 /*
+ * The two counters' bookkeeping, in ONE place.
+ *
+ * Both production paths and the test hooks at the bottom of this file go
+ * through these three functions, so a test cannot end up asserting against a
+ * re-implementation of the rules it is meant to protect. clientLifecycleMutex
+ * must be held by the caller - these touch per-client state as well as the
+ * atomics, and the pair has to move together.
+ */
+static bool
+countClientForCaptureLocked(MacVNCClientState *state)
+{
+    if (!state || state->captureCounted)
+        return false;
+    state->captureCounted = TRUE;
+    atomic_fetch_add(&vncConnectedClients, 1);
+    return true;
+}
+
+static void
+countClientReceivingUpdatesLocked(MacVNCClientState *state)
+{
+    if (!state || state->updatesCounted)
+        return;
+    state->updatesCounted = TRUE;
+    atomic_fetch_add(&vncAuthenticatedClientsReceivingUpdates, 1);
+}
+
+/* Returns how many authenticated clients remain (for the disconnect log). */
+static int
+uncountClientLocked(MacVNCClientState *state)
+{
+    /* Subtracted only if this client was ever added: one that left during the
+       first-frame wait never reached the increment, and decrementing for it
+       would drive the count negative - or, once clamped, drop the count to
+       zero while another viewer IS watching, lifting a curtain that should
+       have stayed up. */
+    if (state && state->updatesCounted) {
+        if (atomic_fetch_sub(&vncAuthenticatedClientsReceivingUpdates, 1) - 1 <= 0)
+            atomic_store(&vncAuthenticatedClientsReceivingUpdates, 0);
+    }
+    if (state && state->captureCounted) {
+        int remaining = atomic_fetch_sub(&vncConnectedClients, 1) - 1;
+        if (remaining <= 0) {
+            remaining = 0;
+            atomic_store(&vncConnectedClients, 0);
+        }
+        return remaining;
+    }
+    /* Un-counted client (never authenticated): report the current count. */
+    return atomic_load(&vncConnectedClients);
+}
+
+/*
  * Runs once per client, right after its password is accepted.
  *
  * Waits (bounded) for the first frame of every display so the auth OK is not
- * followed by a black screen. The wait is the point; nothing is remembered
- * about its outcome, because nothing acted on it.
+ * followed by a black screen. The wait is the point; its OUTCOME is logged but
+ * never branched on - a viewer whose displays are slow is still a viewer, and
+ * refusing to count it would silently disable curtain mode for exactly those
+ * viewers. See vncAuthenticatedClientsReceivingUpdates in mac.h for why that
+ * trade is the right way round, and what covers the genuinely broken case.
  */
 static void
 prepareAuthenticatedClient(rfbClientPtr cl)
@@ -656,12 +760,7 @@ prepareAuthenticatedClient(rfbClientPtr cl)
     bool counted = false;
 
     pthread_mutex_lock(&clientLifecycleMutex);
-    MacVNCClientState *state = cl->clientData;
-    if (state && !state->captureCounted) {
-        state->captureCounted = TRUE;
-        atomic_fetch_add(&vncConnectedClients, 1);
-        counted = true;
-    }
+    counted = countClientForCaptureLocked(cl->clientData);
     pthread_mutex_unlock(&clientLifecycleMutex);
 
     if (!counted)
@@ -677,6 +776,24 @@ prepareAuthenticatedClient(rfbClientPtr cl)
         rfbLog("Initial display readiness timed out after %.2f s; the viewer will "
                "show a placeholder until frames arrive\n",
                (double)(macVNCMonotonicNow() - waitStart) / 1e9);
+
+    /* COUNTED here, not at the moment the password was accepted, and this is
+       the count the curtain reads: what it may hide behind is a viewer that is
+       RECEIVING UPDATES, and between those two points the streams are still
+       warming up. Publishing it earlier would black the local screen out while
+       the remote party was still looking at a placeholder - and the reader is
+       LEVEL-triggered (it re-reads this atomic on a timer as well as on the
+       notification below), so the increment itself has to be here. Announcing
+       it late while incrementing early would have made the notification
+       decorative and the timer authoritative.
+
+       NOT gated on the wait SUCCEEDING - see mac.h: a viewer whose displays
+       are slow is still a viewer. */
+    pthread_mutex_lock(&clientLifecycleMutex);
+    countClientReceivingUpdatesLocked(cl->clientData);
+    pthread_mutex_unlock(&clientLifecycleMutex);
+
+    notifyAuthenticatedClientsChanged();
 }
 
 static rfbBool
@@ -725,22 +842,14 @@ static void clientGone(rfbClientPtr cl)
 
     pthread_mutex_lock(&clientLifecycleMutex);
     MacVNCClientState *state = cl->clientData;
-    if (state && state->captureCounted) {
-        remaining = atomic_fetch_sub(&vncConnectedClients, 1) - 1;
-        if (remaining <= 0) {
-            remaining = 0;
-            atomic_store(&vncConnectedClients, 0);
-        }
-    } else {
-        /* Un-counted client (never authenticated): report the current count. */
-        remaining = atomic_load(&vncConnectedClients);
-    }
+    remaining = uncountClientLocked(state);
     cl->clientData = NULL;
     free(state);
     pthread_mutex_unlock(&clientLifecycleMutex);
 
     reconcileCaptureState();
     rfbLog("Client %s disconnected (%d authenticated remaining)\n", cl->host, remaining);
+    notifyAuthenticatedClientsChanged();
 }
 
 /* Classic VNC auth INSIDE the TLS channel for the VeNCrypt security type:
@@ -972,6 +1081,8 @@ vncServerStopLocked(void)
     macVNCCaptureSessionStopAndWait();
     macVNCCaptureSessionReset();
     atomic_store(&vncConnectedClients, 0);
+    atomic_store(&vncAuthenticatedClientsReceivingUpdates, 0);
+    notifyAuthenticatedClientsChanged();
     if (rfbScreen) {
         /* Detach the compositor FIRST: SetScreen(NULL) takes the compositor
            lock, so it blocks until any in-flight composite has finished, and
@@ -1189,12 +1300,58 @@ macVNCCaptureStopCountForTesting(void)
     return atomic_load(&gCaptureStopCount);
 }
 
+/*
+ * A synthetic client, so the window between "authenticated" and "receiving
+ * updates" - in production the first-frame wait, which can be seconds - can be
+ * driven without a socket, a display or a viewer.
+ *
+ * These go through the SAME countClient*Locked/uncountClientLocked functions
+ * the real client paths use, which is the whole point: a hook that
+ * re-implemented the counting would let the rules it is protecting be deleted
+ * while the test stayed green.
+ *
+ * Deliberately does NOT reconcile captures - that is the caller's job in
+ * production and is a different rule - so a test of the counters needs no
+ * ScreenCaptureKit at all.
+ */
+void *
+macVNCBeginClientForTesting(bool receivingUpdates)
+{
+    MacVNCClientState *state = calloc(1, sizeof(*state));
+    if (!state)
+        return NULL;
+    pthread_mutex_lock(&clientLifecycleMutex);
+    countClientForCaptureLocked(state);
+    if (receivingUpdates)
+        countClientReceivingUpdatesLocked(state);
+    pthread_mutex_unlock(&clientLifecycleMutex);
+    return state;
+}
+
+void
+macVNCClientReceivedFirstFramesForTesting(void *client)
+{
+    pthread_mutex_lock(&clientLifecycleMutex);
+    countClientReceivingUpdatesLocked(client);
+    pthread_mutex_unlock(&clientLifecycleMutex);
+}
+
+void
+macVNCEndClientForTesting(void *client)
+{
+    pthread_mutex_lock(&clientLifecycleMutex);
+    (void)uncountClientLocked(client);
+    pthread_mutex_unlock(&clientLifecycleMutex);
+    free(client);
+}
+
 /* Drives the real reconciler, so a test exercises the decision the server
    actually makes rather than a re-implementation of it. */
 void
 macVNCResetCaptureStateForTesting(void)
 {
     atomic_store(&vncConnectedClients, 0);
+    atomic_store(&vncAuthenticatedClientsReceivingUpdates, 0);
     reconcileCaptureState();
     atomic_store(&gCaptureStartCount, 0);
     atomic_store(&gCaptureStopCount, 0);

@@ -31,6 +31,7 @@ modules**, and keep the Objective-C layer as thin glue to macOS frameworks
                  │   MacVNCInput (kbd/ptr)  MacVNCPowerMgmt      │
                  │   MacVNCDisplayWake      ScreenCapturer (SCK) │
                  │   MacVNCCurtainWindow (black locally only)    │
+                 │   MacVNCCurtainInput (local keys and clicks)  │
                  │   MacVNCCurtainController (when, and only when)│
                  └───────────────┬──────────────────────────────┘
                                  │ function-pointer / block seams
@@ -219,8 +220,12 @@ Objective-C glue:
   black screen with a live keyboard. It also refuses without a usable password
   (`macVNCCurtainPolicyArm`) and lifts when the secret changes in the 8 bytes
   the server can actually see (`macVNCCurtainPolicySecretChanged`). Raised
-  state is never persisted and nothing raises at launch. Nothing constructs it
-  in production yet: the preference and the wiring are the next task.
+  state is never persisted and nothing raises at launch. **AppDelegate**
+  constructs it at launch and feeds it: the preference (`MacVNCKeyCurtain`,
+  off by default), the server's running state, the authenticated client count,
+  the capture-failure report, and the local session's usability. The CURTAIN is
+  passed in rather than built by the factory, because its window set is also
+  the tap's focus seam and there must be exactly one of it.
 - **MacVNCCurtainInput** — the curtain's input half: the event tap that
   swallows what the person standing at the Mac types and clicks, and the only
   path back in (it feeds **MacVNCCurtainPolicy** and reports the unlock). Six
@@ -274,7 +279,17 @@ Objective-C glue:
   the SCREEN from outside a wedged main thread. Everything above the tap seam is exercised by
   `tests/test_curtain_input.m` with real `CGEvent`s and no tap at all; the tap
   itself, the thread, the watchdog's abort and the AppKit key window need a
-  device. Nothing constructs it in production yet.
+  device. **AppDelegate** constructs it as the controller's suppression seam,
+  with the controller as its observer through a one-way bridge (the controller
+  retains the input, so a direct back-reference would be a cycle). That
+  observer is load-bearing rather than decorative: the focus hand-over on
+  secure input latches, and it is safe only because the controller LIFTS
+  synchronously inside the same main-queue block, ending suppression and giving
+  the focus back. An observer that kept the curtain up would leave the curtain
+  window key, where `-keyDown:` drops self-injected events - the REMOTE
+  viewer's keyboard would die while their mouse kept working.
+  `tests/test_curtain_controller.m` exercises that composition with the real
+  input module above a fake tap.
 
 ### The dirty hint is an optimisation, never the source of truth
 
@@ -316,7 +331,10 @@ pixels rather than points.
   granted permission needs a fresh process. Both permissions bind at launch.
 - **MacVNCDefaultsKeys** — defaults keys *and* their registered fallbacks, so a
   new key without a default cannot slip through (an absent allowlist default
-  would mean an empty allowlist, not loopback-only).
+  would mean an empty allowlist, not loopback-only). `MacVNCKeyCurtain` is off
+  by default, and that value is a safety decision: the curtain is raised by
+  whoever connects with the VNC password, so shipping it on would let the
+  remote party blind the person standing at the Mac.
 - **MacVNCStartupConfig** — pure builder: `NSUserDefaults` + environment →
   `MacVNCServerConfig` (owns backing storage; unit-tested).
 - **MacVNCPreferences** — the Preferences dialog (view build / policy resolve /
@@ -350,12 +368,29 @@ pixels rather than points.
   capture failures without depending on AppKit/UI.
 - `macVNCCaptureAllowed` — the core asks whether it may touch capture and never
   reads TCC itself.
+- `macVNCAuthenticatedClientsChangedHandler` — the core says only "the
+  authenticated client count may have moved", never how far: notifications are
+  raised on client threads, and two of them delivered out of order with a count
+  attached could invent a connection that never happened. The reader hops to
+  the main queue and asks `vncAuthenticatedClientsReceivingUpdates`, which is
+  atomic and current. That is the NARROWER of the two client counts on purpose:
+  it moves only after a client's first frames arrived, while
+  `vncConnectedClients` moves at password-accept time because captures have to
+  start before any frame can exist. A curtain raised on the earlier number
+  would black the local screen out for up to the readiness timeout while the
+  remote viewer still had a placeholder.
+- `vncServerCopyPassword` — the password the RUNNING server authenticates
+  against, whatever it was configured from. Curtain mode arms its escape hatch
+  with THAT secret and no other: one read from defaults instead would arm the
+  curtain with a password the server does not accept whenever it came from
+  `MACVNC_PASSWORD_FILE`, i.e. a curtain nobody can type away. A password that would not fit the caller's buffer is refused rather
+  than truncated, because a truncated secret is a different secret.
 - `FrameMailbox` / `CompositeFramebuffer` callbacks — producers are agnostic to
   how frames are freed and how dirty regions are consumed.
 
 ## Tests
 
-`ctest` runs 40 targets (the number is enforced: `architecture_doc` compares
+`ctest` runs 41 targets (the number is enforced: `architecture_doc` compares
 this sentence against CMakeLists.txt's `add_test` count, so a target added or
 commented out fails the suite until this line is updated deliberately). Every
 assertion added here is checked by mutating the source and confirming the test
@@ -374,8 +409,24 @@ must not be counted as automated coverage.
 
 - `serverLifecycleMutex` serialises start/stop; `compositorMutex` (owned by
   **MacVNCCompositor**) guards the shared canvas; `clientLifecycleMutex` guards
-  per-client state and the connected-client count; `vncConnectedClients` /
-  `publishedServerPort` are `_Atomic`.
+  per-client state and BOTH client counts; `vncConnectedClients` /
+  `vncAuthenticatedClientsReceivingUpdates` / `publishedServerPort` are
+  `_Atomic`. The two counts differ by the first-frame wait, and each client's
+  per-client state records which of them it was added to, so a viewer that
+  leaves during that wait subtracts from exactly the ones it joined. Both
+  counts move through one set of functions that the production paths AND the
+  test hooks call, so `tests/test_client_counts.m` asserts the rules rather
+  than a copy of them; `tests/test_curtain_controller.m` pins the other half,
+  which count the wiring feeds the curtain. The narrow count moves when the
+  wait ENDS, not when it succeeds - a timed-out wait still counts, because
+  gating on success would disable curtain mode for viewers that are merely
+  slow, and the controller's live-stream invariant covers the broken case.
+- `passwordMutex` is a LEAF taken only around the `strdup`/`free`/`memcpy` of
+  the installed password: the curtain reads it from the main thread
+  (`vncServerCopyPassword`) while a start or stop may be replacing it, and
+  `serverLifecycleMutex` - the other candidate - is held across client-thread
+  joins for seconds. It is only ever nested INSIDE the lifecycle lock, never
+  the reverse, and nothing is called while it is held.
 - **MacVNCCaptureSession** holds ONE lock, and EVERY function takes it. It used
   to be only three, on the argument that the other readers run on client
   threads which `rfbShutdownServer(screen, TRUE)` joins before any writer runs.
