@@ -59,6 +59,8 @@ set(SOURCE_FILES
     src/MacVNCCurtainWindow.m
     src/MacVNCCurtainController.h
     src/MacVNCCurtainController.m
+    src/MacVNCCurtainInput.h
+    src/MacVNCCurtainInput.m
     src/PointerState.h
     src/PointerState.c
     src/KeyboardModifierState.h
@@ -262,6 +264,8 @@ if(BUILD_TESTING)
     # exclusion seam calls it - the test itself drives fakes.
     add_executable(test_curtain_window tests/test_curtain_window.m
                    src/MacVNCCurtainWindow.m
+                   src/MacVNCCurtainInput.m
+                   src/MacVNCCurtainPolicy.c
                    src/MacVNCCaptureSession.m
                    src/MacVNCEncryptionPolicy.c
                    src/MacVNCImageProfile.c
@@ -272,7 +276,8 @@ if(BUILD_TESTING)
     target_include_directories(test_curtain_window PRIVATE src)
     target_link_libraries(test_curtain_window
         ${SCREEN_CAPTURE_KIT} ${CORE_MEDIA} ${CORE_VIDEO}
-        ${FOUNDATION} ${APPKIT_LIBRARY} ${CMAKE_THREAD_LIBS_INIT})
+        ${FOUNDATION} ${APPKIT_LIBRARY} ${CARBON_LIBRARY}
+        ${APPLICATION_SERVICES} ${CMAKE_THREAD_LIBS_INIT})
     add_test(NAME curtain_window COMMAND test_curtain_window)
 
     # "Should the curtain be up": every raise and lift transition above the
@@ -283,6 +288,7 @@ if(BUILD_TESTING)
     add_executable(test_curtain_controller tests/test_curtain_controller.m
                    src/MacVNCCurtainController.m
                    src/MacVNCCurtainPolicy.c
+                   src/MacVNCCurtainInput.m
                    src/MacVNCCurtainWindow.m
                    src/MacVNCCaptureSession.m
                    src/MacVNCEncryptionPolicy.c
@@ -294,8 +300,32 @@ if(BUILD_TESTING)
     target_include_directories(test_curtain_controller PRIVATE src)
     target_link_libraries(test_curtain_controller
         ${SCREEN_CAPTURE_KIT} ${CORE_MEDIA} ${CORE_VIDEO}
-        ${FOUNDATION} ${APPKIT_LIBRARY} ${CMAKE_THREAD_LIBS_INIT})
+        ${FOUNDATION} ${APPKIT_LIBRARY} ${CARBON_LIBRARY}
+        ${APPLICATION_SERVICES} ${CMAKE_THREAD_LIBS_INIT})
     add_test(NAME curtain_controller COMMAND test_curtain_controller)
+
+    # The input half of the curtain: the three preconditions, the pass-through
+    # of our own injection, both tap-disable reasons, the secure-input
+    # transition, the focus policy and the watchdog's latency-not-silence rule -
+    # all above the tap seam, so nothing here creates a tap or needs a device.
+    # It links the curtain window because the focus seam IS the window set.
+    add_executable(test_curtain_input tests/test_curtain_input.m
+                   src/MacVNCCurtainInput.m
+                   src/MacVNCCurtainPolicy.c
+                   src/MacVNCCurtainWindow.m
+                   src/MacVNCCaptureSession.m
+                   src/MacVNCEncryptionPolicy.c
+                   src/MacVNCImageProfile.c
+                   src/MacVNCSweepSchedule.c
+                   src/ScreenCapturer.m
+                   src/FrameMailbox.c
+                   src/FirstFrameBudget.c)
+    target_include_directories(test_curtain_input PRIVATE src)
+    target_link_libraries(test_curtain_input
+        ${SCREEN_CAPTURE_KIT} ${CORE_MEDIA} ${CORE_VIDEO}
+        ${FOUNDATION} ${APPKIT_LIBRARY} ${CARBON_LIBRARY}
+        ${APPLICATION_SERVICES} ${CMAKE_THREAD_LIBS_INIT})
+    add_test(NAME curtain_input COMMAND test_curtain_input)
 
     add_executable(test_compositor tests/test_compositor.c src/CompositeFramebuffer.c)
     target_include_directories(test_compositor PRIVATE src)
@@ -438,6 +468,9 @@ if(BUILD_TESTING)
     )
     add_test(NAME startup_config COMMAND test_startup_config)
 
+    # MacVNCInput.m uses only the curtain tag CONSTANT (a #define), so this
+    # target still needs no curtain sources: the injection side stays free of
+    # any link dependency on the tap.
     add_executable(test_input_context
         tests/test_input_context.m
         src/MacVNCInput.m
