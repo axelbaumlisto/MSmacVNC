@@ -5,6 +5,13 @@
 #import "MacVNCCurtainPolicy.h"
 
 #include <assert.h>
+#include <string.h>
+
+/* The one refusal reason that is not worth a log line (see
+   -raiseOnFirstClientEdge). Named rather than repeated, so the test for "is
+   this THAT reason" cannot drift from the string the reason is built with. */
+static NSString * const MacVNCCurtainReasonPreferenceOff =
+    @"curtain mode is switched off";
 
 /* ------------------------------------------------------------------------- */
 /* The production seams.                                                      */
@@ -128,8 +135,9 @@
     return self;
 }
 
-+ (instancetype)controllerWithDefaultSeamsInputSuppression:(id<MacVNCCurtainInputSuppression>)suppression
-                                              secretSource:(id<MacVNCCurtainSecretSource>)secretSource
++ (instancetype)controllerWithDefaultSeamsCurtain:(MacVNCCurtain *)curtain
+                                 inputSuppression:(id<MacVNCCurtainInputSuppression>)suppression
+                                     secretSource:(id<MacVNCCurtainSecretSource>)secretSource
 {
     MacVNCCurtainSessionHealth *health =
         [[MacVNCCurtainSessionHealth alloc] init];
@@ -138,7 +146,7 @@
     MacVNCCurtainMonotonicClock *clock =
         [[MacVNCCurtainMonotonicClock alloc] init];
     MacVNCCurtainController *controller =
-        [[self alloc] initWithCurtain:[MacVNCCurtain curtainWithDefaultSeams]
+        [[self alloc] initWithCurtain:curtain
                      inputSuppression:suppression
                         captureHealth:health
                          secretSource:secretSource
@@ -199,7 +207,7 @@
     if (_terminating)
         return @"the application is terminating";
     if (!_preferenceEnabled)
-        return @"curtain mode is switched off";
+        return MacVNCCurtainReasonPreferenceOff;
     if (!_serverRunning)
         return @"the server is not running";
     if (_authenticatedClients == 0)
@@ -234,7 +242,7 @@
     bool changed = macVNCCurtainPolicySecretChanged(&_policy,
                                                     (const char *)secret.bytes,
                                                     secret.length);
-    [secret release];
+    macVNCCurtainDiscardSecret(secret);
     return changed ? YES : NO;
 }
 
@@ -256,7 +264,13 @@
 
     NSString *blocked = [self reasonCurtainMayNotBeUp];
     if (blocked) {
-        NSLog(@"macVNC: curtain stays down - %@", blocked);
+        /* Every refusal is logged EXCEPT the one that means "nobody asked for
+           this feature": with curtain mode off - the shipped default - that
+           line would be one log entry per client connection on every server
+           running, forever, describing a decision nobody is debugging. The
+           other reasons are exactly the ones somebody has to diagnose. */
+        if (![blocked isEqualToString:MacVNCCurtainReasonPreferenceOff])
+            NSLog(@"macVNC: curtain stays down - %@", blocked);
         return;
     }
 
@@ -280,7 +294,7 @@
     NSData *secret = _secretSource ? [_secretSource copyCurtainSecret] : nil;
     bool armed = macVNCCurtainPolicyArm(&_policy, (const char *)secret.bytes,
                                         secret.length);
-    [secret release];
+    macVNCCurtainDiscardSecret(secret);
     if (!armed) {
         NSLog(@"macVNC: curtain stays down - no VNC password to type to lift it");
         return;

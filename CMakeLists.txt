@@ -298,6 +298,17 @@ if(BUILD_TESTING)
                    src/FrameMailbox.c
                    src/FirstFrameBudget.c)
     target_include_directories(test_curtain_controller PRIVATE src)
+    # One assertion pins WHICH client count the wiring feeds the controller,
+    # and that line lives in AppDelegate.m - glue no test target compiles - so
+    # the test reads the source, exactly as test_defaults reads its header.
+    target_compile_definitions(test_curtain_controller PRIVATE
+        MACVNC_APP_DELEGATE_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/src/AppDelegate.m")
+    # ...and that makes the file a real input of this test, even though it is
+    # not compiled into it: without the dependency an edit to AppDelegate.m
+    # leaves a binary older than the source it judges, which is exactly the
+    # stale-build state tests/mutate.sh refuses to draw conclusions from.
+    set_property(SOURCE tests/test_curtain_controller.m APPEND PROPERTY
+        OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/AppDelegate.m")
     target_link_libraries(test_curtain_controller
         ${SCREEN_CAPTURE_KIT} ${CORE_MEDIA} ${CORE_VIDEO}
         ${FOUNDATION} ${APPKIT_LIBRARY} ${CARBON_LIBRARY}
@@ -549,6 +560,13 @@ if(BUILD_TESTING)
     add_executable(test_capture_gate tests/test_capture_gate.m)
     target_link_libraries(test_capture_gate macvnc_core_testable)
     add_test(NAME capture_gate COMMAND test_capture_gate)
+
+    # The two client counts and the first-frame wait between them - the window
+    # curtain mode must not raise inside. Needs no display: the hooks drive the
+    # real counting functions with a synthetic client.
+    add_executable(test_client_counts tests/test_client_counts.m)
+    target_link_libraries(test_client_counts macvnc_core_testable)
+    add_test(NAME client_counts COMMAND test_client_counts)
 
     add_executable(test_server_generation tests/test_server_generation.c)
     target_link_libraries(test_server_generation macvnc_core_testable)

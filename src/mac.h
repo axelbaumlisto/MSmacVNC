@@ -38,6 +38,35 @@ typedef struct {
 /* Number of VNC clients currently connected. */
 extern _Atomic int vncConnectedClients;
 
+/*
+ * The narrower count: authenticated clients that are past the first-frame wait
+ * and therefore RECEIVING UPDATES.
+ *
+ * Two counters exist because the two answers are wanted at different moments.
+ * `vncConnectedClients` moves the instant a password is accepted, because that
+ * is what has to start the captures that produce the first frame. This one
+ * moves only after the first-frame wait has ENDED, which is the only count
+ * curtain mode may act on: a curtain raised on the earlier number would hide
+ * the local screen for up to the readiness timeout while the remote viewer was
+ * still looking at a placeholder.
+ *
+ * "ENDED", NOT "SUCCEEDED", AND THAT IS A DECISION. When the wait times out
+ * (INITIAL_READINESS_TIMEOUT_NANOSECONDS, currently 8 s) the client is counted
+ * anyway, so a curtain can go up over a viewer that is still holding a
+ * placeholder - the same failure shape as counting at password-accept time,
+ * bounded to that timeout. The alternative was worse: gating on success would
+ * silently disable curtain mode for every viewer whose displays are merely
+ * SLOW rather than broken, and the timeout is a ceiling that a healthy warm
+ * reconnect never reaches. The genuinely broken case is covered from the other
+ * side - the controller re-checks that a capture stream is live on every
+ * event and on its heartbeat, and lifts when it is not.
+ *
+ * Read it rather than the notification below when the question is "is anybody
+ * watching right now": the reader is level-triggered, so the notification is
+ * only a prompt to look again.
+ */
+extern _Atomic int vncAuthenticatedClientsReceivingUpdates;
+
 /* Optional handler invoked when screen capture cannot proceed, e.g. Screen
  * Recording is not effectively granted or ScreenCaptureKit failed at runtime.
  * The server shows no UI itself; AppDelegate owns the permission popup.
@@ -53,6 +82,39 @@ extern _Atomic int vncConnectedClients;
  * a permanent "permission missing" state on a transient/topology error. */
 extern void (*macVNCScreenCaptureFailureHandler)(bool likelyPermissionDenial,
                                                  uint64_t serverGeneration);
+
+/*
+ * Optional handler invoked whenever `vncAuthenticatedClientsReceivingUpdates`
+ * may have changed: after a client's first frames are ready (not merely after
+ * its password was accepted), after one disconnects, and after a stop zeroes
+ * the count.
+ *
+ * It carries no count on purpose. Notifications are raised on client threads
+ * and the handler is expected to hop to its own queue, where two of them could
+ * otherwise arrive in the opposite order to the events that raised them and
+ * invent a connect that never happened. `vncAuthenticatedClientsReceivingUpdates`
+ * is atomic and is the authoritative answer at the moment the handler reads
+ * it, so the notification says only "look again".
+ *
+ * THREAD: any, including with the server lifecycle lock held. The handler must
+ * therefore not block and must not call back into the server core.
+ */
+extern void (*macVNCAuthenticatedClientsChangedHandler)(void);
+
+/*
+ * The password the RUNNING server actually authenticates against, whatever it
+ * was configured from - Preferences or MACVNC_PASSWORD_FILE.
+ *
+ * Exists because curtain mode's way back in must be armed with THAT secret and
+ * no other: a curtain raised against one password and unlockable with another
+ * is a lockout, and only the core knows which one is installed right now.
+ *
+ * Writes the password into `buffer` NUL-terminated and returns its length. A
+ * server that is not running has none (0). A password that would not fit is
+ * refused with 0 rather than truncated, because a truncated secret is a
+ * DIFFERENT secret and would arm an escape hatch that does not open.
+ */
+size_t vncServerCopyPassword(char *buffer, size_t size);
 
 
 /*
@@ -191,4 +253,22 @@ void macVNCResetCaptureStateForTesting(void);
 void macVNCReconcileCaptureForTesting(void);
 
 bool macVNCServerHasLifecycleResourcesForTesting(void);
+
+/*
+ * A synthetic client, for the ONE window that has no other way of being
+ * observed: between "this client authenticated" and "this client is receiving
+ * updates" there is a wait of up to INITIAL_READINESS_TIMEOUT_NANOSECONDS, and
+ * what the two counters do inside it is exactly what curtain mode depends on.
+ *
+ * `macVNCBeginClientForTesting(false)` is a client still inside that wait;
+ * -ReceivedFirstFrames ends it; -End is the disconnect. All three run the same
+ * bookkeeping the real client paths run, so deleting a rule there cannot leave
+ * a test asserting against a private copy of it.
+ *
+ * The returned handle is opaque and is freed by macVNCEndClientForTesting().
+ * No capture reconciliation happens, so none of this needs a display.
+ */
+void *macVNCBeginClientForTesting(bool receivingUpdates);
+void macVNCClientReceivedFirstFramesForTesting(void *client);
+void macVNCEndClientForTesting(void *client);
 #endif

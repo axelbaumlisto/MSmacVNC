@@ -24,6 +24,15 @@ extern NSString * const MacVNCKeyImageProfile;
 /* "optional" or "required": whether a viewer may connect without TLS.
  * See MacVNCEncryptionPolicy.h for why refusing is the only reliable lever. */
 extern NSString * const MacVNCKeyEncryption;
+/* Curtain mode: while a viewer is connected, hide this Mac's screen and
+ * swallow local keyboard and pointer input until the VNC password is typed
+ * locally. OFF by default, and that default is a safety decision rather than a
+ * taste one: the curtain is raised by whoever holds the VNC password, so
+ * shipping it on would let the REMOTE party blind the person standing at the
+ * Mac without anyone here having asked for it. It never locks the Mac.
+ * See MacVNCCurtainController.h for when it goes up and every way it comes
+ * back down. */
+extern NSString * const MacVNCKeyCurtain;
 
 extern NSString * const MacVNCBundleID;
 

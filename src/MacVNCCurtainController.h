@@ -2,6 +2,7 @@
 
 #import <Foundation/Foundation.h>
 #include <stdint.h>
+#include <string.h>
 
 #import "MacVNCCurtainWindow.h"   /* MacVNCCurtainCompletion, ...Scheduler */
 
@@ -158,6 +159,44 @@
 @end
 
 /*
+ * The counterpart of -copyCurtainSecret: release it, and WIPE it first.
+ *
+ * Every reader of the secret makes a fresh cleartext copy - the controller
+ * does it on every heartbeat while the curtain is up - so plain -release would
+ * leave a readable password in freed heap for the allocator to hand to
+ * somebody else. The wipe happens only when the source handed back storage the
+ * caller owns outright (NSMutableData, which the production source returns);
+ * an immutable object may be shared with the source itself and is not ours to
+ * scribble on, so it is released untouched rather than corrupted.
+ *
+ * nil is accepted, because "there is no password" is a normal answer here.
+ *
+ * Inline, next to the protocol whose contract it completes: both readers of a
+ * secret (this controller and the event tap) need it, and they are
+ * deliberately independent modules - the tap never links the controller - so a
+ * shared definition would otherwise have to invent a link edge between them.
+ *
+ * NS_RELEASES_ARGUMENT states the ownership transfer in the type system rather
+ * than in this comment: without it the static analyzer sees a +1 from
+ * -copyCurtainSecret going into a function and reports every call site as a
+ * leak, which would train the reader to ignore analyzer output on exactly the
+ * paths that handle the password.
+ */
+static inline void macVNCCurtainDiscardSecret(NSData *NS_RELEASES_ARGUMENT secret)
+{
+    if (!secret)
+        return;
+    /* The length test is not an optimisation: -mutableBytes may answer NULL
+       for an empty NSMutableData, and memset(NULL, 0, 0) is undefined by the
+       letter of the standard even though every implementation ignores it. An
+       empty secret cannot occur in production (the core refuses to arm without
+       a password) which is exactly why it would never be noticed here. */
+    if (secret.length > 0 && [secret isKindOfClass:[NSMutableData class]])
+        memset([(NSMutableData *)secret mutableBytes], 0, secret.length);
+    [secret release];
+}
+
+/*
  * A monotonic clock, injected so "the heartbeat arrived five seconds late" is
  * a test rather than a wait. Nanoseconds, same base as macVNCMonotonicNow().
  */
@@ -175,13 +214,28 @@
                           clock:(id<MacVNCCurtainClock>)clock;
 
 /*
- * Production wiring: the real curtain, the running capture session's health,
- * the main queue and the monotonic clock. The suppression and the secret stay
- * caller-supplied - the first because the tap is a later task and a nil one
- * means "never raise" (rule 4), the second for the reason on the protocol.
+ * Production wiring: the running capture session's health, the main queue and
+ * the monotonic clock. Three things stay caller-supplied, each for its own
+ * reason.
+ *
+ * THE CURTAIN, because its window set is ALSO the event tap's focus seam and
+ * there must be exactly ONE of it. A factory that built its own would give the
+ * tap a window set whose windows nobody ever shows, so the one path the local
+ * user has while the tap is unavailable - typing into the curtain window -
+ * would lead nowhere.
+ *
+ * THE SUPPRESSION, because a nil one means "never raise" (rule 4) and because
+ * the object that implements it must be constructed with THIS controller as
+ * its observer: it reports secure input, and this controller lifting on that
+ * report is what makes the tap's focus hand-over safe.
+ *
+ * THE SECRET, for the reason on MacVNCCurtainSecretSource: only the caller
+ * knows whether the running server's password came from defaults, from the
+ * environment or from MACVNC_PASSWORD_FILE.
  */
-+ (instancetype)controllerWithDefaultSeamsInputSuppression:(id<MacVNCCurtainInputSuppression>)suppression
-                                              secretSource:(id<MacVNCCurtainSecretSource>)secretSource;
++ (instancetype)controllerWithDefaultSeamsCurtain:(MacVNCCurtain *)curtain
+                                 inputSuppression:(id<MacVNCCurtainInputSuppression>)suppression
+                                     secretSource:(id<MacVNCCurtainSecretSource>)secretSource;
 
 /* ------------------------------------------------------------------ */
 /* Conditions. Any of them turning false lifts; none of them raises.   */
