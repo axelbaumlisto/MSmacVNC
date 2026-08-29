@@ -23,9 +23,20 @@
 @property (nonatomic, retain) NSMutableArray<NSNumber *> *refitted;
 @property (nonatomic, assign) NSUInteger showCalls;
 @property (nonatomic, assign) NSUInteger hideCalls;
+/* @YES / @NO per -setOccludersCovering:, in order. "Ordered in" and "actually
+   hides the screen" are two different things now: the raise puts an INVISIBLE
+   window on screen so ScreenCaptureKit will list this process at all, and only
+   the swap's success turns it opaque. */
+@property (nonatomic, retain) NSMutableArray<NSNumber *> *coveringCalls;
+/* Every occluder event in one ordered list ("create:1", "cover:1", "show",
+   "hide", ...), because the rules under test are about ORDER between two
+   different calls, which two counters cannot express. */
+@property (nonatomic, retain) NSMutableArray<NSString *> *log;
 /* Screens that report attached but refuse creation - the display that is
    unplugged between being listed and being covered. */
 @property (nonatomic, retain) NSMutableSet<NSNumber *> *refuseCreation;
+- (BOOL)everCovered;
+- (NSUInteger)lastIndexOfEvent:(NSString *)event;
 @end
 
 @implementation FakeOccluders
@@ -37,6 +48,8 @@
         _created = [[NSMutableArray alloc] init];
         _removed = [[NSMutableArray alloc] init];
         _refitted = [[NSMutableArray alloc] init];
+        _coveringCalls = [[NSMutableArray alloc] init];
+        _log = [[NSMutableArray alloc] init];
         _refuseCreation = [[NSMutableSet alloc] init];
     }
     return self;
@@ -49,12 +62,14 @@
     if ([_refuseCreation containsObject:identifier])
         return NO;
     [_created addObject:identifier];
+    [_log addObject:[NSString stringWithFormat:@"create:%@", identifier]];
     return YES;
 }
 
 - (void)removeOccluderForScreen:(NSNumber *)identifier
 {
     [_removed addObject:identifier];
+    [_log addObject:[NSString stringWithFormat:@"remove:%@", identifier]];
 }
 
 - (void)updateOccluderGeometryForScreen:(NSNumber *)identifier
@@ -68,6 +83,28 @@
         ++_showCalls;
     else
         ++_hideCalls;
+    [_log addObject:visible ? @"show" : @"hide"];
+}
+
+- (void)setOccludersCovering:(BOOL)covering
+{
+    [_coveringCalls addObject:@(covering)];
+    [_log addObject:covering ? @"cover:1" : @"cover:0"];
+}
+
+- (BOOL)everCovered
+{
+    return [_coveringCalls containsObject:@YES];
+}
+
+- (NSUInteger)lastIndexOfEvent:(NSString *)event
+{
+    NSUInteger found = NSNotFound;
+    for (NSUInteger i = 0; i < _log.count; ++i) {
+        if ([_log[i] isEqualToString:event])
+            found = i;
+    }
+    return found;
 }
 
 - (void)dealloc
@@ -76,6 +113,8 @@
     [_created release];
     [_removed release];
     [_refitted release];
+    [_coveringCalls release];
+    [_log release];
     [_refuseCreation release];
     [super dealloc];
 }
@@ -91,6 +130,12 @@
    made: this is how the ORDER of "swap the filter" against "show the windows"
    is observed rather than assumed. */
 @property (nonatomic, retain) NSMutableArray<NSNumber *> *visibleAtRequest;
+/* ...and whether they were COVERING then. The two together are the whole rule:
+   the windows must already be on screen when the exclusion is asked for (or
+   ScreenCaptureKit does not list this process and the swap can only refuse),
+   and they must not yet hide anything (or the local user is blinded before the
+   stream stopped carrying them). */
+@property (nonatomic, retain) NSMutableArray<NSNumber *> *coveringAtRequest;
 @property (nonatomic, assign) MacVNCCurtainWindowSet *windowSet;   /* not owned */
 /* NO: hold the completion instead of answering, so a test can answer late or
    never. */
@@ -108,6 +153,7 @@
     if ((self = [super init])) {
         _requests = [[NSMutableArray alloc] init];
         _visibleAtRequest = [[NSMutableArray alloc] init];
+        _coveringAtRequest = [[NSMutableArray alloc] init];
         _held = [[NSMutableArray alloc] init];
         _answersImmediately = YES;
         _answerValue = YES;
@@ -120,6 +166,7 @@
 {
     [_requests addObject:@(excluded)];
     [_visibleAtRequest addObject:@(_windowSet.visible)];
+    [_coveringAtRequest addObject:@(_windowSet.covering)];
     if (_answersImmediately) {
         if (completion)
             completion(_answerValue);
@@ -144,6 +191,7 @@
 {
     [_requests release];
     [_visibleAtRequest release];
+    [_coveringAtRequest release];
     [_held release];
     [super dealloc];
 }
@@ -232,14 +280,22 @@ static void testWindowSetBookkeeping(void)
     assert(occluders.refitted.count == 2);
 
     /* Hot-plug WHILE the curtain is up: the new screen is covered and shown by
-       the same call, because that one window creation is the whole exposure. */
+       the same call, because that one window creation is the whole exposure -
+       and the opacity is re-asserted BEFORE the window is ordered in, or that
+       screen shows its own desktop for a frame. */
+    [set setCovering:YES];
     [set setVisible:YES];
+    assert(set.covering);
     NSUInteger showsBefore = occluders.showCalls;
     [occluders.attached addObject:@3];
     [set synchronizeWithAttachedScreens];
     assert([occluders.created containsObject:@3]);
     assert(occluders.showCalls == showsBefore + 1);
     assert(set.screenIdentifiers.count == 3);
+    assert([occluders lastIndexOfEvent:@"create:3"] <
+           [occluders lastIndexOfEvent:@"cover:1"]);
+    assert([occluders lastIndexOfEvent:@"cover:1"] <
+           [occluders lastIndexOfEvent:@"show"]);
 
     /* Detach: the window goes away and is not counted as covered any more. */
     [occluders.attached removeObject:@2];
@@ -260,9 +316,108 @@ static void testWindowSetBookkeeping(void)
 
     /* Hiding is a set-wide operation and does not forget the screens. */
     [set setVisible:NO];
+    [set setCovering:NO];
     assert(!set.visible);
+    assert(!set.covering);
     assert(occluders.hideCalls == 1);
     assert(set.screenIdentifiers.count == 3);
+
+    /* A set that is not covering does not re-assert opacity on every
+       synchronise. */
+    NSUInteger coveringCallsBefore = occluders.coveringCalls.count;
+    [set synchronizeWithAttachedScreens];
+    assert(occluders.coveringCalls.count == coveringCallsBefore);
+}
+
+/*
+ * Hot-plug DURING the arming window - the state that only exists because the
+ * exclusion cannot be armed before a window is on screen.
+ *
+ * A display attached while the swap is still in flight gets an occluder, and
+ * that occluder must be ARMED like the others: opacity follows the covering
+ * flag, never "is anything ordered in". Deriving it from visibility would black
+ * out the new display while the stream is still carrying this application -
+ * blinding the local user on a raise that may yet be refused.
+ */
+static void testHotPlugWhileArmedStaysArmed(void)
+{
+    FakeOccluders *occluders = [[[FakeOccluders alloc] init] autorelease];
+    [occluders.attached addObject:@1];
+    MacVNCCurtainWindowSet *set =
+        [[[MacVNCCurtainWindowSet alloc] initWithOccluders:occluders] autorelease];
+
+    [set synchronizeWithAttachedScreens];
+    [set setCovering:NO];
+    [set setVisible:YES];        /* armed: on screen, hiding nothing */
+    assert(set.visible && !set.covering);
+
+    [occluders.attached addObject:@2];
+    [set synchronizeWithAttachedScreens];
+    assert([occluders.created containsObject:@2]);
+    assert(set.visible && !set.covering);
+    assert(!occluders.everCovered);
+
+    /* And the alpha the real AppKit occluder would use in each state, which is
+       otherwise reachable only with a window server. */
+    assert(macVNCCurtainOccluderAlpha(false) == MACVNC_CURTAIN_ARMING_ALPHA);
+    assert(macVNCCurtainOccluderAlpha(true) == MACVNC_CURTAIN_ALPHA);
+    assert(macVNCCurtainOccluderAlpha(false) * 255.0 <= 1.0);
+    assert(macVNCCurtainOccluderAlpha(false) < macVNCCurtainOccluderAlpha(true));
+}
+
+/*
+ * THE REGRESSION THIS FILE EXISTS FOR NOW.
+ *
+ * The previous order - swap the filter, then show the windows - is impossible
+ * on the platform, and a live run proved it: ScreenCaptureKit lists an
+ * application only while it owns a window, this app is an LSUIElement whose
+ * only UI is a status item, and so every raise refused with "application no"
+ * however the discovery was phrased. The windows must be on screen BEFORE the
+ * exclusion is requested.
+ *
+ * What makes that safe is that they go up ARMED: ordered in, but transparent
+ * enough (MACVNC_CURTAIN_ARMING_ALPHA) that neither the local user nor the
+ * remote viewer - who is still being shown this same desktop, since the
+ * exclusion is not in place yet - can see anything. Opacity comes last.
+ *
+ * Written against the old code, the `visibleAtRequest` assertion below fails.
+ */
+static void testRaiseArmsWindowsBeforeRequestingExclusion(void)
+{
+    FakeOccluders *occluders = [[[FakeOccluders alloc] init] autorelease];
+    [occluders.attached addObject:@1];
+    FakeExclusion *exclusion = [[[FakeExclusion alloc] init] autorelease];
+    exclusion.answersImmediately = NO;   /* hold the swap open mid-raise */
+    ManualScheduler *scheduler = [[[ManualScheduler alloc] init] autorelease];
+    MacVNCCurtainWindowSet *set = nil;
+    MacVNCCurtain *curtain = makeCurtain(occluders, exclusion, scheduler, &set);
+
+    __block int outcomes = 0;
+    [curtain raiseWithCompletion:^(BOOL success) { assert(success); ++outcomes; }];
+
+    /* Mid-raise: the window exists and is on screen - that is what makes this
+       process discoverable at all - and it hides nothing. */
+    assert(curtain.state == MacVNCCurtainStateRaising);
+    assert(outcomes == 0);
+    assert(occluders.created.count == 1);
+    assert(set.visible);
+    assert(!set.covering);
+    assert(!occluders.everCovered);
+    assert([exclusion.requests isEqualToArray:@[ @YES ]]);
+    assert([exclusion.visibleAtRequest isEqualToArray:@[ @YES ]]);
+    assert([exclusion.coveringAtRequest isEqualToArray:@[ @NO ]]);
+    /* Ordered in before the request, and the request before any opacity. */
+    assert([occluders lastIndexOfEvent:@"show"] != NSNotFound);
+    assert([occluders lastIndexOfEvent:@"cover:1"] == NSNotFound);
+
+    /* The swap confirms: only now does the screen actually go black. */
+    [exclusion answerHeldWith:YES];
+    assert(outcomes == 1);
+    assert(curtain.state == MacVNCCurtainStateUp);
+    assert(set.visible && set.covering);
+    assert(occluders.everCovered);
+    assert([occluders lastIndexOfEvent:@"cover:1"] >
+           [occluders lastIndexOfEvent:@"create:1"]);
 }
 
 static void testRaiseSwapsFilterBeforeShowingWindows(void)
@@ -280,11 +435,15 @@ static void testRaiseSwapsFilterBeforeShowingWindows(void)
 
     assert(outcomes == 1 && raised);
     assert(curtain.state == MacVNCCurtainStateUp);
-    /* THE ordering assertion: the exclusion was requested while the windows
-       were still hidden. Showing first would blank the remote viewer. */
+    /* THE ordering assertion: the exclusion was requested with the windows on
+       screen but COVERING NOTHING. On screen, because otherwise this process is
+       in no discovery result and the swap can only refuse; covering nothing,
+       because the stream still carries them at that instant. */
     assert([exclusion.requests isEqualToArray:@[ @YES ]]);
-    assert([exclusion.visibleAtRequest isEqualToArray:@[ @NO ]]);
+    assert([exclusion.visibleAtRequest isEqualToArray:@[ @YES ]]);
+    assert([exclusion.coveringAtRequest isEqualToArray:@[ @NO ]]);
     assert(set.visible);
+    assert(set.covering);
     assert(occluders.created.count == 1);
 
     /* Raising an up curtain changes nothing and asks the stream nothing. */
@@ -299,8 +458,12 @@ static void testRaiseSwapsFilterBeforeShowingWindows(void)
     assert(outcomes == 3 && lifted);
     assert(curtain.state == MacVNCCurtainStateDown);
     assert([exclusion.requests isEqualToArray:(@[ @YES, @NO ])]);
-    assert([exclusion.visibleAtRequest isEqualToArray:(@[ @NO, @NO ])]);
+    /* The restore is asked for with the windows already out and already
+       transparent - the exact reverse. */
+    assert([exclusion.visibleAtRequest isEqualToArray:(@[ @YES, @NO ])]);
+    assert([exclusion.coveringAtRequest isEqualToArray:(@[ @NO, @NO ])]);
     assert(!set.visible);
+    assert(!set.covering);
     assert(occluders.hideCalls >= 1);
 
     /* Lifting a down curtain is a no-op, not a second filter swap. */
@@ -323,8 +486,13 @@ static void testFailedSwapDoesNotRaise(void)
     [curtain raiseWithCompletion:^(BOOL success) { assert(!success); ++outcomes; }];
     assert(outcomes == 1);
     assert(curtain.state == MacVNCCurtainStateDown);
+    /* The armed window was ordered in (it had to be) and is ordered out again,
+       having NEVER covered anything: a refused raise is invisible to the local
+       user and to the remote viewer alike. */
     assert(!set.visible);
-    assert(occluders.showCalls == 0);
+    assert(!set.covering);
+    assert(!occluders.everCovered);
+    assert(occluders.hideCalls >= 1);
     /* And the exclusion is taken back, so a stream does not keep hiding an
        application whose curtain never went up. */
     assert([exclusion.requests isEqualToArray:(@[ @YES, @NO ])]);
@@ -343,16 +511,19 @@ static void testSwapTimeoutIsAFailure(void)
     __block int outcomes = 0;
     __block BOOL raised = YES;
     [curtain raiseWithCompletion:^(BOOL success) { raised = success; ++outcomes; }];
-    /* Nothing has happened yet: no answer, no windows. */
+    /* No answer yet, and nothing that either party can see: the window is on
+       screen only so the discovery can find this process. */
     assert(outcomes == 0);
     assert(curtain.state == MacVNCCurtainStateRaising);
-    assert(!set.visible);
+    assert(set.visible);
+    assert(!set.covering);
 
     [scheduler fire];
     assert(outcomes == 1 && !raised);
     assert(curtain.state == MacVNCCurtainStateDown);
     assert(!set.visible);
-    assert(occluders.showCalls == 0);
+    assert(!set.covering);
+    assert(!occluders.everCovered);
 
     /* A late success from the swap we gave up on must not raise the curtain
        behind the caller's back. */
@@ -360,6 +531,8 @@ static void testSwapTimeoutIsAFailure(void)
     assert(outcomes == 1);
     assert(curtain.state == MacVNCCurtainStateDown);
     assert(!set.visible);
+    assert(!set.covering);
+    assert(!occluders.everCovered);
 }
 
 static void testTimeoutAfterSuccessIsIgnored(void)
@@ -381,6 +554,7 @@ static void testTimeoutAfterSuccessIsIgnored(void)
     assert(outcomes == 1);
     assert(curtain.state == MacVNCCurtainStateUp);
     assert(set.visible);
+    assert(set.covering);
 }
 
 static void testLiftDuringRaiseAbandonsIt(void)
@@ -413,10 +587,14 @@ static void testLiftDuringRaiseAbandonsIt(void)
     assert(liftCalls == 1);
     assert(curtain.state == MacVNCCurtainStateDown);
     assert(!set.visible);
+    assert(!set.covering);
+    /* The abandoned raise had armed its windows; they never covered anything. */
+    assert(!occluders.everCovered);
 
     [exclusion answerHeldWith:YES];
     assert(curtain.state == MacVNCCurtainStateDown);
     assert(!set.visible);
+    assert(!occluders.everCovered);
 }
 
 static void testLiftKeepsWindowsDownWhenRestoreTimesOut(void)
@@ -430,6 +608,7 @@ static void testLiftKeepsWindowsDownWhenRestoreTimesOut(void)
 
     [curtain raiseWithCompletion:nil];
     assert(set.visible);
+    assert(set.covering);
 
     exclusion.answersImmediately = NO;
     __block int outcomes = 0;
@@ -437,8 +616,10 @@ static void testLiftKeepsWindowsDownWhenRestoreTimesOut(void)
     [curtain liftWithCompletion:^(BOOL success) { lifted = success; ++outcomes; }];
     /* The windows are down BEFORE the filter answers - that asymmetry is the
        point: a restore that never completes still gives the local user their
-       screen back. */
+       screen back. Transparent too, so the next raise arms from a known
+       state instead of inheriting this one's opacity. */
     assert(!set.visible);
+    assert(!set.covering);
     assert(outcomes == 0);
 
     [scheduler fire];
@@ -496,13 +677,18 @@ static void testStaleAnswerCannotResolveTheNextTransition(void)
     [exclusion answerHeldAtIndex:0 with:YES];
     assert(secondOutcomes == 0);
     assert(curtain.state == MacVNCCurtainStateRaising);
-    assert(!set.visible);
+    /* Armed, because the second raise armed it - but nothing is hidden on the
+       strength of an answer nobody is waiting for. */
+    assert(set.visible);
+    assert(!set.covering);
+    assert(!occluders.everCovered);
 
     /* The answer that IS being waited for resolves it. */
     [exclusion answerHeldAtIndex:1 with:YES];
     assert(secondOutcomes == 1);
     assert(curtain.state == MacVNCCurtainStateUp);
     assert(set.visible);
+    assert(set.covering);
 }
 
 static void testScreenParameterChangeCoversNewDisplay(void)
@@ -592,6 +778,9 @@ static void testDroppedCurtainAnswersAndUndoesItself(void)
         [exclusion.held removeAllObjects];
     }
     assert(outcomes == 1 && !raised);
+    /* Dropped mid-raise: the armed windows never covered anything, so nobody
+       is left in front of a black screen that nothing can lift. */
+    assert(!occluders.everCovered);
     [windowSet release];
     [scheduler release];
     [exclusion release];
@@ -622,6 +811,7 @@ static void testDroppedCurtainAnswersAndUndoesItself(void)
         [upScheduler.pending removeAllObjects];   /* the resolved timeout */
     }
     assert(!upWindowSet.visible);
+    assert(!upWindowSet.covering);
     assert([upExclusion.requests isEqualToArray:(@[ @YES, @NO ])]);
     [upWindowSet release];
     [upScheduler release];
@@ -638,12 +828,25 @@ static void testAlphaLeaksNoVisibleLevel(void)
     double leaked = (1.0 - MACVNC_CURTAIN_ALPHA) * 255.0;
     assert(leaked < 0.5);
     assert(MACVNC_CURTAIN_ALPHA < 1.0);
+
+    /* The ARMED alpha has the mirrored criterion, and it is two-sided.
+       Non-zero, because the armed window exists for one reason only - to make
+       ScreenCaptureKit list this process - and a window drawn at alpha 0 is
+       exactly the kind of thing a window server may decline to composite. And
+       at most one 8-bit level of dimming over pure white, because at that
+       moment the exclusion is NOT yet in place: whatever this window costs, it
+       costs the remote viewer too. */
+    assert(MACVNC_CURTAIN_ARMING_ALPHA > 0.0);
+    assert(MACVNC_CURTAIN_ARMING_ALPHA * 255.0 <= 1.0);
+    assert(MACVNC_CURTAIN_ARMING_ALPHA < MACVNC_CURTAIN_ALPHA);
 }
 
 int main(void)
 {
     @autoreleasepool {
         testWindowSetBookkeeping();
+        testHotPlugWhileArmedStaysArmed();
+        testRaiseArmsWindowsBeforeRequestingExclusion();
         testRaiseSwapsFilterBeforeShowingWindows();
         testFailedSwapDoesNotRaise();
         testSwapTimeoutIsAFailure();

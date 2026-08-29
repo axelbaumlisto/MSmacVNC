@@ -160,16 +160,20 @@ Objective-C glue:
   (`macVNCCaptureSessionSetSelfExcluded`): every stream's filter is rebuilt to
   exclude THIS APPLICATION and swapped onto the RUNNING stream with
   `-updateContentFilter:completionHandler:`. Excluding by application rather
-  than by window is what makes the swap order-independent — a window filter
-  would need the window to be on screen to be enumerable, forcing the curtain
-  to be shown BEFORE the stream stops carrying it, i.e. showing the remote
-  viewer black. A session with no live stream reports FAILURE, because
+  than by window is what makes the exclusion survive window recreation, so
+  display hot-plug is a pure window-creation problem — but it is NOT
+  order-independent, as this document claimed until a live run said otherwise:
+  naming ourselves needs an `SCRunningApplication`, and a discovery lists only
+  the owners of shareable WINDOWS, so the caller must already have a window on
+  screen when it asks. A session with no live stream reports FAILURE, because
   "nothing to exclude" must not read as "the curtain may go up".
+  WHICH application the filter names is resolved by `ScreenCapturer`, and that
+  resolution is the one thing 41 green test targets did not cover: see below.
 - **MacVNCCurtainWindow** — the curtain's screen half: one borderless black
   window per `NSScreen` at `NSScreenSaverWindowLevel` (joining all Spaces, and
   auxiliary to full-screen apps, because the level alone covers neither),
   ordered in with `orderFrontRegardless` so the LSUIElement app never activates
-  or takes focus. Two rules are load-bearing. (1) The window is `setOpaque:NO`
+  or takes focus. Three rules are load-bearing. (1) The window is `setOpaque:NO`
   with `MACVNC_CURTAIN_ALPHA` = 0.999: an opaque occluder would make every
   window under it report `NSWindowOcclusionState` "not visible", well-behaved
   apps would stop drawing, and the REMOTE viewer would get a frozen desktop
@@ -178,13 +182,26 @@ Objective-C glue:
   quantises to 0 even over pure white — stated for 8-BIT output, since the same
   arithmetic yields level 1 of 1023 on a 10-bit panel (the header says so, and
   the on-device luminance check is what would justify changing the value). (2)
-  Raise and lift are MIRRORED orders —
-  swap the filter, then show the windows; hide the windows, then restore the
-  filter — and a swap that never answers is a FAILURE, bounded by
-  `MACVNC_CURTAIN_FILTER_SWAP_TIMEOUT_NANOSECONDS`, after which the windows
-  stay down and the exclusion is taken back. The window set, the ordering and
+  The raise ARMS before it asks: the windows are ordered in at
+  `MACVNC_CURTAIN_ARMING_ALPHA` = 1/255 FIRST, because ScreenCaptureKit lists
+  an application only while it owns a window and this LSUIElement app owns none
+  — a live run with 797 delivered frames proved the previous "filter first"
+  order impossible, not merely slow. 1/255 is the mirrored luminance criterion:
+  non-zero, since a window at alpha 0 is a plausible thing for a window server
+  not to composite at all, and at most ONE 8-bit level of dimming over pure
+  white, since at that instant the exclusion is not yet in place and whatever
+  the armed window costs, it costs the REMOTE viewer too. The mapping from the
+  two states to the two alphas is a published pure function
+  (`macVNCCurtainOccluderAlpha`) so it is checkable without a window server.
+  (3) Raise and lift are MIRRORED orders — arm the windows, swap the filter,
+  then make them opaque; make them transparent and order them out, then restore
+  the filter — and a swap that never answers is a FAILURE, bounded by
+  `MACVNC_CURTAIN_FILTER_SWAP_TIMEOUT_NANOSECONDS`, after which the windows are
+  ordered out WHILE STILL INVISIBLE and the exclusion is taken back, so a
+  refused raise leaked nothing to either party. The window set, the ordering and
   the timeout sit above injected seams (occluders, exclusion, scheduler), so
-  `tests/test_curtain_window.m` exercises hot-plug, both orders, the timeout
+  `tests/test_curtain_window.m` exercises hot-plug (including hot-plug WHILE
+  armed, which must stay armed), both orders, the timeout
   and the late-answer race with no display attached, plus the rule that a
   curtain which is DOWN answers `NSApplicationDidChangeScreenParameters` with
   nothing at all — a resolution change or a display sleep must not quietly
@@ -356,7 +373,39 @@ pixels rather than points.
 - **MacVNCDisplayWake** — one-shot display wake (no persistent assertion).
 - **MacVNCPassword** — password load/store (plaintext in defaults, by request)
   and the hardened `MACVNC_PASSWORD_FILE` reader.
-- **ScreenCapturer** — one display's SCStream lifecycle + readiness.
+- **ScreenCapturer** — one display's SCStream lifecycle + readiness, and the
+  resolution of THIS process's own `SCRunningApplication` — the object the
+  curtain's filter excludes.
+  `applications` lists the owners of shareable CONTENT, and content means
+  WINDOWS — so a menu-bar app that owns none is ABSENT from every discovery
+  result. TWO live runs were needed to establish that. The first showed
+  "application no" for every display with the plain
+  `+[SCShareableContent getShareableContentWithCompletionHandler:]`; the fix
+  that followed — asking
+  `+getShareableContentExcludingDesktopWindows:onScreenWindowsOnly:completionHandler:`
+  with `onScreenWindowsOnly:NO` — printed the SAME line on the same hardware.
+  So the variant was never the cause, and the ordering was: the curtain now
+  arms an invisible window BEFORE the request (see **MacVNCCurtainWindow**),
+  and the application is resolved when it is NEEDED
+  (`-resolveOwnApplicationWithCompletionHandler:`, one round trip per stream,
+  then cached) rather than only at stream start — but ONLY behind a running
+  stream, because a discovery is what can raise a Screen Recording prompt and a
+  live stream is the proof the permission is already granted. Because that was
+  twice guessed and twice wrong, it is now MEASURED: every discovery is
+  censused (`macVNCTakeShareableContentCensus`) and logged
+  (`macVNCLogShareableContentCensus`) at stream start, when this process owns no
+  curtain window, and again at the exclusion request, when it does — so one run
+  of the app decides whether owning a window is what makes us listed, and the
+  log says outright when it is not ("SCK lists N window(s) of this process but
+  not the process itself"), which is the only evidence that would justify
+  excluding by window instead. Unresolved still fails CLOSED:
+  `macVNCCaptureExclusionMayProceed` refuses an exclusion that
+  can name nobody, since a filter excluding nothing would report success and
+  hand the remote viewer a black screen. The discovery is an injected seam
+  (`macVNCSetOwnApplicationDiscovery`, applications AND windows), so
+  `tests/test_capture_exclusion.m` feeds it each of the three census states —
+  including "we own windows and are still not listed", the one that would refute
+  the design — without reaching ScreenCaptureKit.
 
 ## Key seams (dependency inversion)
 

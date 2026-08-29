@@ -5,6 +5,11 @@
 #import "MacVNCCaptureSession.h"
 #import "MacVNCCurtainInput.h"   /* macVNCCurtainInputEventIsSelfInjected */
 
+double macVNCCurtainOccluderAlpha(bool covering)
+{
+    return covering ? MACVNC_CURTAIN_ALPHA : MACVNC_CURTAIN_ARMING_ALPHA;
+}
+
 /* ------------------------------------------------------------------------- */
 /* The window set: bookkeeping only, over the occluder seam.                  */
 /* ------------------------------------------------------------------------- */
@@ -13,6 +18,7 @@
     id<MacVNCCurtainOccluders> _occluders;   /* retained */
     NSMutableArray<NSNumber *> *_identifiers;
     BOOL _visible;
+    BOOL _covering;
     BOOL _acceptsKeyboardFocus;
     id<MacVNCCurtainKeyboardSink> _keyboardSink;   /* NOT retained: the input
                                                       module owns this set's
@@ -59,7 +65,11 @@
     }
 
     /* Re-assert, so a window created a moment ago is shown rather than waiting
-       for the next setVisible: nobody would call. */
+       for the next setVisible: nobody would call. Opacity BEFORE visibility: a
+       window created for a screen attached mid-curtain must already be covering
+       when it is ordered in, or that screen shows its desktop for a frame. */
+    if (_covering)
+        [self applyCovering:YES];
     if (_visible)
         [_occluders setOccludersVisible:YES];
 }
@@ -73,6 +83,26 @@
 - (BOOL)visible
 {
     return _visible;
+}
+
+/* The optional seam, in one place: an occluder set that models no opacity is
+   one for which "ordered in" and "covering" are the same thing, and the
+   bookkeeping above must still be exact for it. */
+- (void)applyCovering:(BOOL)covering
+{
+    if ([_occluders respondsToSelector:@selector(setOccludersCovering:)])
+        [_occluders setOccludersCovering:covering];
+}
+
+- (void)setCovering:(BOOL)covering
+{
+    _covering = covering;
+    [self applyCovering:covering];
+}
+
+- (BOOL)covering
+{
+    return _covering;
 }
 
 - (void)setAcceptsKeyboardFocus:(BOOL)accepts
@@ -126,6 +156,9 @@
  */
 @interface MacVNCCurtainKeyWindow : NSWindow
 @property (nonatomic, assign) BOOL acceptsKeyboardFocus;
+/* NO is the armed alpha of header note 4: on screen for ScreenCaptureKit,
+   invisible to the local user and to the remote viewer alike. */
+@property (nonatomic, assign) BOOL covering;
 @property (nonatomic, assign) id<MacVNCCurtainKeyboardSink> keyboardSink;  /* not retained */
 @end
 
@@ -134,6 +167,12 @@
 - (BOOL)canBecomeKeyWindow
 {
     return _acceptsKeyboardFocus;
+}
+
+- (void)setCovering:(BOOL)covering
+{
+    _covering = covering;
+    [self setAlphaValue:macVNCCurtainOccluderAlpha(covering ? true : false)];
 }
 
 - (void)keyDown:(NSEvent *)event
@@ -168,6 +207,7 @@
 
 @implementation MacVNCCurtainScreenOccluders {
     NSMutableDictionary<NSNumber *, MacVNCCurtainKeyWindow *> *_windows;
+    BOOL _covering;
     BOOL _acceptsKeyboardFocus;
     id<MacVNCCurtainKeyboardSink> _keyboardSink;   /* not retained */
 }
@@ -232,11 +272,13 @@ static NSNumber *screenIdentifier(NSScreen *screen)
                                   NSWindowCollectionBehaviorStationary |
                                   NSWindowCollectionBehaviorIgnoresCycle];
     [window setBackgroundColor:[NSColor blackColor]];
-    /* NOT opaque, and alpha just under 1: see MACVNC_CURTAIN_ALPHA in the
-       header for the luminance argument and for why an opaque curtain freezes
-       the remote picture. */
+    /* NOT opaque, and alpha just under 1 once it covers: see
+       MACVNC_CURTAIN_ALPHA in the header for the luminance argument and for why
+       an opaque curtain freezes the remote picture. Created ARMED (or covering,
+       if this window is joining a curtain that is already up), never at an
+       alpha the local user could notice before the filter swap. */
     [window setOpaque:NO];
-    [window setAlphaValue:MACVNC_CURTAIN_ALPHA];
+    window.covering = _covering;
     [window setHasShadow:NO];
     [window setHidesOnDeactivate:NO];
     [window setExcludedFromWindowsMenu:YES];
@@ -255,6 +297,13 @@ static NSNumber *screenIdentifier(NSScreen *screen)
     _windows[identifier] = window;
     [window release];
     return YES;
+}
+
+- (void)setOccludersCovering:(BOOL)covering
+{
+    _covering = covering;
+    for (NSNumber *identifier in _windows)
+        _windows[identifier].covering = covering;
 }
 
 - (void)setOccludersKeyboardSink:(id<MacVNCCurtainKeyboardSink>)sink
@@ -324,6 +373,13 @@ static NSNumber *screenIdentifier(NSScreen *screen)
                curtain window may become key is a decision the input task owns;
                a borderless window cannot, by default. */
             [window orderFrontRegardless];
+            /* Drawn NOW rather than at the end of this run-loop pass. What
+               follows a show during a raise is a shareable-content discovery
+               in ANOTHER process, and the whole point of showing first is that
+               the discovery finds a window of ours; an ordered-in window whose
+               content has not been drawn yet is the one thing that could make
+               that measurement lie. */
+            [window displayIfNeeded];
         } else {
             [window orderOut:nil];
         }
@@ -519,8 +575,18 @@ static void curtainExclusionCompleted(void *context, bool success)
     _state = MacVNCCurtainStateRaising;
     NSUInteger token = [self beginTransitionWithCompletion:completion];
 
-    /* Filter FIRST. Only when the running stream confirms it is no longer
-       showing this application do the windows come up. */
+    /* WINDOWS FIRST, INVISIBLY - and this order is not a preference, it is the
+       platform's (header note 1). ScreenCaptureKit lists an application only
+       while it owns a window, so until these are ordered in there is no
+       SCRunningApplication to name and the swap below can only refuse. They go
+       up ARMED: on screen for the discovery, invisible to the local user and
+       carrying no black frame to the remote viewer. */
+    [_windowSet synchronizeWithAttachedScreens];
+    [_windowSet setCovering:NO];
+    [_windowSet setVisible:YES];
+
+    /* Filter SECOND. Only when the running stream confirms it is no longer
+       showing this application does the curtain become opaque. */
     [_exclusion setCaptureExcludesOwnApplication:YES completion:^(BOOL success) {
         [self resolveRaiseWithToken:token success:success];
     }];
@@ -537,6 +603,11 @@ static void curtainExclusionCompleted(void *context, bool success)
 
     if (!success) {
         _state = MacVNCCurtainStateDown;
+        /* The armed windows go away while they are still invisible, so a failed
+           raise leaked nothing to either side - which is the property the live
+           run already confirmed and this reordering must not spend. */
+        [_windowSet setVisible:NO];
+        [_windowSet setCovering:NO];
         /* Best effort: a late success from the swap we gave up on must not
            leave the stream excluding an application whose windows are not even
            shown. Nothing waits for this. */
@@ -545,7 +616,11 @@ static void curtainExclusionCompleted(void *context, bool success)
         return;
     }
 
+    /* The stream confirmed it is no longer carrying this application: the
+       windows that are already on screen may now hide it. Re-synchronised
+       first, because a display attached during the swap has no window yet. */
     [_windowSet synchronizeWithAttachedScreens];
+    [_windowSet setCovering:YES];
     [_windowSet setVisible:YES];
     _state = MacVNCCurtainStateUp;
     [self finishWithSuccess:YES];
@@ -574,8 +649,10 @@ static void curtainExclusionCompleted(void *context, bool success)
 
     /* Windows FIRST - the exact reverse of the raise. Everything after this
        point can fail without leaving the local user in front of a black
-       screen. */
+       screen. Both halves: ordered out AND no longer covering, so the next
+       raise arms from a known state rather than inheriting this one's alpha. */
     [_windowSet setVisible:NO];
+    [_windowSet setCovering:NO];
 
     [_exclusion setCaptureExcludesOwnApplication:NO completion:^(BOOL success) {
         [self resolveLiftWithToken:token success:success];
@@ -612,6 +689,7 @@ static void curtainExclusionCompleted(void *context, bool success)
         _state = MacVNCCurtainStateDown;
         _activeToken = 0;
         [_windowSet setVisible:NO];
+        [_windowSet setCovering:NO];
         [_exclusion setCaptureExcludesOwnApplication:NO completion:nil];
     }
     [_scheduler release];

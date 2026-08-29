@@ -7,6 +7,9 @@
 #include <string.h>
 
 #import "MacVNCCaptureSession.h"
+#import "ScreenCapturer.h"
+
+#include <unistd.h>
 
 /*
  * The curtain's capture seam, from the SESSION's side.
@@ -263,9 +266,290 @@ static void testStopQueueReadersSurviveAConcurrentStop(void)
     assert(macVNCCaptureSessionCount() == 0);
 }
 
+/*
+ * ---------------------------------------------------------------------------
+ * The discovery seam: which SCRunningApplication the exclusion names.
+ *
+ * THE BUG THIS PINS, found by a live run and by no test: the own application
+ * was resolved ONCE, at stream start, out of
+ * +[SCShareableContent getShareableContentWithCompletionHandler:] - the
+ * ON-SCREEN variant. macVNC is a menu-bar app with no on-screen window of its
+ * own, so it is not among that call's `applications`, the cache stayed nil, and
+ * every exclusion request refused with "application no" - the curtain could
+ * never raise on real hardware while 41 test targets passed.
+ *
+ * A SECOND live run then falsified the first fix: asking with
+ * `onScreenWindowsOnly:NO` did NOT list this process either. The remaining
+ * explanation - that `applications` lists the owners of shareable WINDOWS, so a
+ * process owning none is in no result at all - is a claim about the platform,
+ * and the census below is how one run of the app decides it: the same numbers,
+ * taken at stream start and again when the exclusion is requested (by which
+ * time the curtain has armed a window), told apart by a pure function that is
+ * tested here.
+ *
+ * These tests drive the seam with a canned application and window list, so they
+ * reach no ScreenCaptureKit discovery (which can raise a Screen Recording
+ * prompt) and need no display.
+ */
+
+@interface FakeRunningApplication : NSObject
+@property (nonatomic, assign) pid_t processID;
+@end
+
+@implementation FakeRunningApplication
+@end
+
+/* Duck-typed against the two things the census asks an SCWindow. */
+@interface FakeShareableWindow : NSObject
+@property (nonatomic, retain) id owningApplication;
+@property (nonatomic, assign, getter=isOnScreen) BOOL onScreen;
+@end
+
+@implementation FakeShareableWindow
+- (void)dealloc
+{
+    [_owningApplication release];
+    [super dealloc];
+}
+@end
+
+static _Atomic int gDiscoveries;
+
+/* An application list containing `count` strangers, plus this process when
+   `includeSelf`. Strangers only is the on-device state the bug lived in. */
+static NSArray *applicationList(BOOL includeSelf)
+{
+    NSMutableArray *applications = [NSMutableArray array];
+    for (int i = 1; i <= 3; ++i) {
+        FakeRunningApplication *stranger =
+            [[[FakeRunningApplication alloc] init] autorelease];
+        /* Deliberately never this process: pid 1..3 are launchd and friends. */
+        stranger.processID = (pid_t)i;
+        [applications addObject:stranger];
+    }
+    if (includeSelf) {
+        FakeRunningApplication *ours =
+            [[[FakeRunningApplication alloc] init] autorelease];
+        ours.processID = getpid();
+        [applications addObject:ours];
+    }
+    return applications;
+}
+
+/* `count` windows owned by this process, `onScreen` of them on screen, plus one
+   stranger's window so "ours" is a filter and not a count of everything. */
+static NSArray *windowList(NSUInteger ours, NSUInteger onScreen)
+{
+    NSMutableArray *windows = [NSMutableArray array];
+    FakeRunningApplication *stranger =
+        [[[FakeRunningApplication alloc] init] autorelease];
+    stranger.processID = 1;
+    FakeShareableWindow *theirs = [[[FakeShareableWindow alloc] init] autorelease];
+    theirs.owningApplication = stranger;
+    theirs.onScreen = YES;
+    [windows addObject:theirs];
+
+    for (NSUInteger i = 0; i < ours; ++i) {
+        FakeRunningApplication *us =
+            [[[FakeRunningApplication alloc] init] autorelease];
+        us.processID = getpid();
+        FakeShareableWindow *window =
+            [[[FakeShareableWindow alloc] init] autorelease];
+        window.owningApplication = us;
+        window.onScreen = i < onScreen;
+        [windows addObject:window];
+    }
+    return windows;
+}
+
+static void installDiscovery(BOOL includeSelf)
+{
+    macVNCSetOwnApplicationDiscovery(
+        ^(void (^completion)(NSArray<SCRunningApplication *> *applications,
+                             NSArray<SCWindow *> *windows)) {
+            atomic_fetch_add(&gDiscoveries, 1);
+            /* Answers on another thread, like ScreenCaptureKit does - with its
+               own pool, because that thread has none. */
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+              @autoreleasepool {
+                completion(applicationList(includeSelf),
+                           windowList(includeSelf ? 1 : 0, includeSelf ? 1 : 0));
+              }
+            });
+        });
+}
+
+/*
+ * The measurement itself, in the three states that decide the design.
+ *
+ * This is the test that would have made the second live run unnecessary: the
+ * numbers it counts are exactly what the app now prints at stream start and at
+ * the exclusion request, and the difference between those two lines is the
+ * answer to "does owning a window make ScreenCaptureKit list this process".
+ */
+static void testCensusSeparatesTheCandidateRules(void)
+{
+    /* A discovery that failed at all: no numbers, no crash, no exclusion. */
+    MacVNCShareableContentCensus none =
+        macVNCTakeShareableContentCensus(nil, nil, getpid());
+    assert(none.applications == 0 && none.windows == 0);
+    assert(none.ownWindows == 0 && none.ownWindowsOnScreen == 0);
+    assert(!none.ownApplicationPresent);
+
+    /* State 1 - what the live runs printed: strangers only, and this process
+       owns nothing ScreenCaptureKit can see. The exclusion MUST refuse, and
+       the cure is to give it a window first. */
+    MacVNCShareableContentCensus windowless =
+        macVNCTakeShareableContentCensus(applicationList(NO), windowList(0, 0),
+                                         getpid());
+    assert(windowless.applications == 3);
+    assert(windowless.windows == 1);
+    assert(windowless.ownWindows == 0);
+    assert(!windowless.ownApplicationPresent);
+    assert(!macVNCCaptureExclusionMayProceed(true, true,
+                                             windowless.ownApplicationPresent, true));
+
+    /* State 2 - the one that would REFUTE the whole design: we own windows,
+       ScreenCaptureKit sees them, and still does not list us. Nothing about
+       the ORDER of window creation could rescue an exclusion by application
+       then; the counts are what say so, and they are counted separately from
+       the application list for exactly that reason. */
+    MacVNCShareableContentCensus windowedButAbsent =
+        macVNCTakeShareableContentCensus(applicationList(NO), windowList(3, 2),
+                                         getpid());
+    assert(windowedButAbsent.windows == 4);
+    assert(windowedButAbsent.ownWindows == 3);
+    assert(windowedButAbsent.ownWindowsOnScreen == 2);
+    assert(!windowedButAbsent.ownApplicationPresent);
+
+    /* State 3 - the armed curtain window did its job. */
+    MacVNCShareableContentCensus present =
+        macVNCTakeShareableContentCensus(applicationList(YES), windowList(1, 1),
+                                         getpid());
+    assert(present.applications == 4);
+    assert(present.ownWindows == 1);
+    assert(present.ownWindowsOnScreen == 1);
+    assert(present.ownApplicationPresent);
+    assert(macVNCCaptureExclusionMayProceed(true, true,
+                                            present.ownApplicationPresent, true));
+
+    /* Logging one is part of the contract - it is the whole diagnostic - and it
+       must survive a failed discovery. */
+    macVNCLogShareableContentCensus("self test", 0, none);
+    macVNCLogShareableContentCensus("self test", 0, windowedButAbsent);
+}
+
+static ScreenCapturer *makeCapturer(void)
+{
+    /* Never started: nothing here talks to ScreenCaptureKit. */
+    return [[ScreenCapturer alloc]
+        initWithDisplay:CGMainDisplayID()
+        captureFramesPerSecond:30
+        frameHandler:^BOOL(CMSampleBufferRef sampleBuffer) { (void)sampleBuffer; return YES; }
+        errorHandler:^(NSError *error) { (void)error; }];
+}
+
+/* Runs the resolution and returns whether this process was found. */
+static BOOL resolveOwnApplication(ScreenCapturer *capturer, id *outApplication)
+{
+    __block id resolved = nil;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    [capturer resolveOwnApplicationWithCompletionHandler:^(SCRunningApplication *application) {
+        resolved = [application retain];
+        dispatch_semaphore_signal(done);
+    }];
+    assert(dispatch_semaphore_wait(
+               done, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0);
+    dispatch_release(done);
+    if (outApplication)
+        *outApplication = [resolved autorelease];
+    else
+        [resolved release];
+    return resolved != nil;
+}
+
+static void testDiscoveryWithoutThisProcessFailsClosed(void)
+{
+    installDiscovery(NO);
+    ScreenCapturer *capturer = makeCapturer();
+
+    id resolved = nil;
+    assert(!resolveOwnApplication(capturer, &resolved));
+    assert(resolved == nil);
+
+    /* Unresolved MUST refuse: naming nobody would swap in a filter that hides
+       nothing while reporting success - a curtain the remote party cannot see
+       through, which is the one outcome worse than no curtain at all. */
+    assert(!macVNCCaptureExclusionMayProceed(true, true, false, true));
+    /* ...and refusing is specific to EXCLUDING: giving the stream back needs
+       no application, or a failed raise could never be undone. */
+    assert(macVNCCaptureExclusionMayProceed(true, true, false, false));
+
+    [capturer release];
+}
+
+static void testDiscoveryWithThisProcessResolvesAndCaches(void)
+{
+    installDiscovery(YES);
+    ScreenCapturer *capturer = makeCapturer();
+
+    int before = atomic_load(&gDiscoveries);
+    id resolved = nil;
+    assert(resolveOwnApplication(capturer, &resolved));
+    assert(resolved != nil);
+    assert([(FakeRunningApplication *)resolved processID] == getpid());
+    assert(atomic_load(&gDiscoveries) == before + 1);
+
+    /* With an application in hand the request goes on to the swap. */
+    assert(macVNCCaptureExclusionMayProceed(true, true, true, true));
+
+    /* One round trip per stream, not one per raise: the second resolution is
+       answered from the cache. */
+    assert(resolveOwnApplication(capturer, NULL));
+    assert(atomic_load(&gDiscoveries) == before + 1);
+
+    [capturer release];
+}
+
+/*
+ * The permission rule, which is why the resolution sits BEHIND the stream check
+ * and not in front of it: a shareable-content discovery is what can raise a
+ * Screen Recording prompt, and only a running stream proves the permission is
+ * already granted. A capturer that never started must therefore refuse without
+ * discovering anything - the same refusal, and the same silence, as before.
+ */
+static void testExclusionWithoutAStreamNeitherDiscoversNorSucceeds(void)
+{
+    installDiscovery(YES);
+    ScreenCapturer *capturer = makeCapturer();
+
+    int before = atomic_load(&gDiscoveries);
+    __block BOOL answered = NO;
+    __block BOOL reportedSuccess = NO;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    [capturer setExcludesOwnApplication:YES completionHandler:^(BOOL success) {
+        answered = YES;
+        reportedSuccess = success;
+        dispatch_semaphore_signal(done);
+    }];
+    assert(dispatch_semaphore_wait(
+               done, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0);
+    dispatch_release(done);
+    assert(answered);
+    assert(!reportedSuccess);
+    assert(atomic_load(&gDiscoveries) == before);
+
+    [capturer release];
+    macVNCSetOwnApplicationDiscovery(nil);
+}
+
 int main(void)
 {
     @autoreleasepool {
+        testCensusSeparatesTheCandidateRules();
+        testDiscoveryWithoutThisProcessFailsClosed();
+        testDiscoveryWithThisProcessResolvesAndCaches();
+        testExclusionWithoutAStreamNeitherDiscoversNorSucceeds();
         testEmptySessionAnswersFailureOnTheMainThread();
         testBuiltSessionAnswersEveryRequest();
         testRequestsSurviveConcurrentRebuild();
