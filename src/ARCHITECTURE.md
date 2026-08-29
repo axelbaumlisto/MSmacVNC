@@ -31,6 +31,7 @@ modules**, and keep the Objective-C layer as thin glue to macOS frameworks
                  │   MacVNCInput (kbd/ptr)  MacVNCPowerMgmt      │
                  │   MacVNCDisplayWake      ScreenCapturer (SCK) │
                  │   MacVNCCurtainWindow (black locally only)    │
+                 │   MacVNCCurtainController (when, and only when)│
                  └───────────────┬──────────────────────────────┘
                                  │ function-pointer / block seams
                  ┌───────────────▼──────────────────────────────┐
@@ -189,9 +190,37 @@ Objective-C glue:
   allocate a window per screen for a curtain nobody raised.
   `tests/test_capture_exclusion.m` covers the other side of the seam: one
   answer per request, on the main thread, surviving a session rebuilt from
-  another thread. Nothing raises it yet: the controller that decides when a
-  curtain should be up is separate, and so is re-establishing the exclusion
-  after a session rebuild (a rebuilt stream carries the default filter again).
+  another thread. A curtain dropped mid-transition still ANSWERS its pending
+  completion, and one deallocated while Up hides its windows AND gives the
+  stream back — hiding only the windows would leave the remote viewer without
+  this application forever, with nobody left to ask for it back.
+- **MacVNCCurtainController** — the one place that answers "should the curtain
+  be up", above five injected seams (the curtain, the input suppression the tap
+  will provide, the capture health, the secret and the clock), so every raise
+  and lift transition is a unit test with no device, no tap, no window and no
+  real time. Four rules carry the design. (1) The raise is EDGE-triggered, on
+  the transition to a first authenticated client and on nothing else: a
+  level-triggered raise would make the escape hatch a no-op — lift,
+  re-evaluate, re-raise — so every other input can only LIFT. (2) A local lift
+  LATCHES the rest of the app run down; latching only until the next connection
+  would let whoever holds the VNC password re-blind the local user by
+  reconnecting in a loop. (3) A live stream plus an authenticated client is a
+  CONTINUOUSLY enforced invariant, not a raise-time precondition: it is
+  re-checked on every event and on a heartbeat
+  (`MACVNC_CURTAIN_HEARTBEAT_NANOSECONDS`), which is also what catches the two
+  failures nobody reports — a stream that died after the raise, and a session
+  rebuilt by a server stop/start, whose new streams carry the default filter
+  again and no longer exclude us (`macVNCCaptureSessionSelfExcluded`). A beat
+  that arrives more than `MACVNC_CURTAIN_HEARTBEAT_STALL_NANOSECONDS` late means
+  time nobody observed (suspension, sleep, a stalled main queue) and lifts,
+  because input fails open by itself while the SCREEN does not. (4) Without
+  input suppression there is no curtain: a controller with no tap seam, or a
+  tap that reports it cannot be armed, refuses to raise rather than producing a
+  black screen with a live keyboard. It also refuses without a usable password
+  (`macVNCCurtainPolicyArm`) and lifts when the secret changes in the 8 bytes
+  the server can actually see (`macVNCCurtainPolicySecretChanged`). Raised
+  state is never persisted and nothing raises at launch. Nothing constructs it
+  in production yet: the tap it needs is the next task.
 
 ### The dirty hint is an optimisation, never the source of truth
 
@@ -266,7 +295,7 @@ pixels rather than points.
 
 ## Tests
 
-`ctest` runs 38 targets (the number is enforced: `architecture_doc` compares
+`ctest` runs 39 targets (the number is enforced: `architecture_doc` compares
 this sentence against CMakeLists.txt's `add_test` count, so a target added or
 commented out fails the suite until this line is updated deliberately). Every
 assertion added here is checked by mutating the source and confirming the test
@@ -287,20 +316,23 @@ must not be counted as automated coverage.
   **MacVNCCompositor**) guards the shared canvas; `clientLifecycleMutex` guards
   per-client state and the connected-client count; `vncConnectedClients` /
   `publishedServerPort` are `_Atomic`.
-- **MacVNCCaptureSession** holds ONE lock, and only three functions take it.
-  Its set is mutated under `serverLifecycleMutex` at points where no client
-  thread is running, and merely read from client threads — which are joined by
-  `rfbShutdownServer(screen, TRUE)` before a writer runs, so those readers stay
-  lock-free; see the header for that invariant. The exception is
-  `macVNCCaptureSessionSetSelfExcluded`, the curtain's capture seam: it is
-  called from the MAIN thread, which is never joined, so "lift the curtain" and
-  "stop the server" really can overlap and an unlocked `[gCapturers copy]`
-  would retain an array `Reset` had just freed. Build, Reset and SetSelfExcluded
-  therefore share a module-private mutex; it is a LEAF (taken under
-  `serverLifecycleMutex`, never held while messaging a capturer) and is never
-  held across `-[ScreenCapturer dealloc]`, whose bounded sample-queue drain
-  would otherwise stall the main thread for seconds — `Reset` moves the list
-  out under the lock and releases it outside.
+- **MacVNCCaptureSession** holds ONE lock, and EVERY function takes it. It used
+  to be only three, on the argument that the other readers run on client
+  threads which `rfbShutdownServer(screen, TRUE)` joins before any writer runs.
+  That argument was false and the counter-example ships: the capture keep-warm
+  timer fires on `gCaptureStopQueue` — a queue nothing joins — and calls
+  `macVNCCaptureSessionStopAndWait()` and `macVNCCaptureSessionCount()` after
+  dropping `captureControlMutex`, so it can overlap the `Reset` inside
+  `vncServerStopLocked` that nils and releases the list it is enumerating. The
+  main thread is the other unjoined caller (`macVNCCaptureSessionSetSelfExcluded`
+  and `macVNCCaptureSessionSelfExcluded`, the curtain's seams). So the rule is
+  now the one with no per-caller reasoning to keep true: readers snapshot the
+  list under the lock, which retains every stream for the call, and work on the
+  snapshot; writers swap the pointer under the lock and release the old list
+  outside it. The lock is a LEAF (taken under `serverLifecycleMutex`, never held
+  while messaging a capturer) and is never held across
+  `-[ScreenCapturer dealloc]`, whose bounded sample-queue drain would otherwise
+  stall the main thread for seconds.
 - `captureControlMutex` serialises capture start/stop and is **never** held
   together with `clientLifecycleMutex`, so no order can arise between them.
   Captures run iff `vncConnectedClients > 0`; both the connect and disconnect

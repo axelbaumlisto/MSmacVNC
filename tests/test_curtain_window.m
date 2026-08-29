@@ -555,6 +555,80 @@ static void testScreenParameterChangeCoversNewDisplay(void)
     assert([set.screenIdentifiers containsObject:@8]);
 }
 
+static void testDroppedCurtainAnswersAndUndoesItself(void)
+{
+    /* Part 1: an owner that lets go mid-transition still hears an answer.
+
+       The fakes have to DROP the blocks they are holding for this to be
+       reachable: a pending completion and a pending timeout each retain the
+       curtain, so as long as either can still fire, the curtain is alive to
+       resolve itself. Dropping them is what "this answer is never coming"
+       looks like from the inside - and a raise that is neither answered nor
+       failed leaves its caller believing a curtain may still be going up. */
+    FakeOccluders *occluders = [[FakeOccluders alloc] init];
+    [occluders.attached addObject:@1];
+    FakeExclusion *exclusion = [[FakeExclusion alloc] init];
+    exclusion.answersImmediately = NO;
+    ManualScheduler *scheduler = [[ManualScheduler alloc] init];
+    MacVNCCurtainWindowSet *windowSet =
+        [[MacVNCCurtainWindowSet alloc] initWithOccluders:occluders];
+    exclusion.windowSet = windowSet;
+
+    __block int outcomes = 0;
+    __block BOOL raised = YES;
+    @autoreleasepool {
+        MacVNCCurtain *curtain = [[MacVNCCurtain alloc]
+            initWithWindowSet:windowSet
+                    exclusion:exclusion
+                    scheduler:scheduler
+           timeoutNanoseconds:MACVNC_CURTAIN_FILTER_SWAP_TIMEOUT_NANOSECONDS];
+        [curtain raiseWithCompletion:^(BOOL success) { raised = success; ++outcomes; }];
+        assert(outcomes == 0);
+        [curtain release];
+        /* Both fakes hold a block that captured the curtain, so the release
+           above is not the last one: dropping them is what makes this
+           reachable at all. (They are autoreleased copies, hence the pool.) */
+        [scheduler.pending removeAllObjects];
+        [exclusion.held removeAllObjects];
+    }
+    assert(outcomes == 1 && !raised);
+    [windowSet release];
+    [scheduler release];
+    [exclusion release];
+    [occluders release];
+
+    /* Part 2: a curtain deallocated while it is UP takes itself down on BOTH
+       sides. Hiding the windows is not enough - the stream would keep
+       excluding this application forever, with nothing left that could ever
+       ask for it back. */
+    FakeOccluders *upOccluders = [[FakeOccluders alloc] init];
+    [upOccluders.attached addObject:@1];
+    FakeExclusion *upExclusion = [[FakeExclusion alloc] init];
+    ManualScheduler *upScheduler = [[ManualScheduler alloc] init];
+    MacVNCCurtainWindowSet *upWindowSet =
+        [[MacVNCCurtainWindowSet alloc] initWithOccluders:upOccluders];
+    upExclusion.windowSet = upWindowSet;
+
+    @autoreleasepool {
+        MacVNCCurtain *up = [[MacVNCCurtain alloc]
+            initWithWindowSet:upWindowSet
+                    exclusion:upExclusion
+                    scheduler:upScheduler
+           timeoutNanoseconds:MACVNC_CURTAIN_FILTER_SWAP_TIMEOUT_NANOSECONDS];
+        [up raiseWithCompletion:nil];
+        assert(upWindowSet.visible);
+        assert([upExclusion.requests isEqualToArray:@[ @YES ]]);
+        [up release];
+        [upScheduler.pending removeAllObjects];   /* the resolved timeout */
+    }
+    assert(!upWindowSet.visible);
+    assert([upExclusion.requests isEqualToArray:(@[ @YES, @NO ])]);
+    [upWindowSet release];
+    [upScheduler release];
+    [upExclusion release];
+    [upOccluders release];
+}
+
 static void testAlphaLeaksNoVisibleLevel(void)
 {
     /* The "looks black" criterion, stated as arithmetic rather than as an
@@ -578,6 +652,7 @@ int main(void)
         testLiftKeepsWindowsDownWhenRestoreTimesOut();
         testStaleAnswerCannotResolveTheNextTransition();
         testScreenParameterChangeCoversNewDisplay();
+        testDroppedCurtainAnswersAndUndoesItself();
         testAlphaLeaksNoVisibleLevel();
         printf("curtain window: all assertions passed\n");
     }

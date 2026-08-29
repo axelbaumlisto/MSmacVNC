@@ -250,9 +250,6 @@ static void curtainExclusionCompleted(void *context, bool success)
 
 @end
 
-@interface MacVNCCurtainMainQueueScheduler : NSObject <MacVNCCurtainScheduler>
-@end
-
 @implementation MacVNCCurtainMainQueueScheduler
 
 - (void)afterNanoseconds:(uint64_t)nanoseconds performBlock:(dispatch_block_t)block
@@ -480,7 +477,21 @@ static void curtainExclusionCompleted(void *context, bool success)
 - (void)dealloc
 {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
-    [_pendingCompletion release];
+    /* An owner that lets go mid-transition still gets an ANSWER: dropping the
+       completion unheard leaves whoever is waiting for it believing a raise or
+       a lift is still in flight forever, which for a raise means a caller that
+       never learns its curtain did not go up. */
+    [self finishWithSuccess:NO];
+    /* And a curtain that is deallocated while it is UP takes itself down on
+       both sides. The window set hides its occluders on its own dealloc, but
+       the stream would keep excluding this application - windows gone, remote
+       viewer still not seeing us, and nobody left to restore it. */
+    if (_state != MacVNCCurtainStateDown) {
+        _state = MacVNCCurtainStateDown;
+        _activeToken = 0;
+        [_windowSet setVisible:NO];
+        [_exclusion setCaptureExcludesOwnApplication:NO completion:nil];
+    }
     [_scheduler release];
     [_exclusion release];
     [_windowSet release];

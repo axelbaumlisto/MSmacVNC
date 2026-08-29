@@ -178,12 +178,99 @@ static void testRequestsSurviveConcurrentRebuild(void)
     assert(macVNCCaptureSessionCount() == 0);
 }
 
+/*
+ * The exclusion belongs to ONE session, and a session that was rebuilt is not
+ * excluding anything - however many times it was asked before.
+ *
+ * This is the state the curtain's ordering rules otherwise forbid: windows up
+ * while the stream carries them again. Nothing reports it, so it has to be
+ * ASKED, which is what macVNCCaptureSessionSelfExcluded() is for.
+ */
+static void testExclusionDoesNotSurviveARebuild(void)
+{
+    macVNCCaptureSessionReset();
+    assert(!macVNCCaptureSessionSelfExcluded());
+
+    MacVNCDisplayLayout layout;
+    fillLayout(&layout, 1);
+    assert(macVNCCaptureSessionBuild(&layout, 30, acceptFrame, noteFailure));
+    /* Build always constructs the DEFAULT filter. */
+    assert(!macVNCCaptureSessionSelfExcluded());
+
+    int before = atomic_load(&gAnswers);
+    macVNCCaptureSessionSetSelfExcluded(true, noteAnswer, NULL);
+    assert(pumpMainQueueUntilAnswers(before + 1, 5.0));
+    /* Capture was never started, so no stream confirmed the swap - and a swap
+       that was not confirmed must not be reported as an exclusion in place,
+       or a curtain would stay up on the strength of it. */
+    assert(!macVNCCaptureSessionSelfExcluded());
+
+    macVNCCaptureSessionReset();
+    assert(!macVNCCaptureSessionSelfExcluded());
+}
+
+/*
+ * The OTHER unjoined caller, and the reason every reader now snapshots under
+ * the lock: mac.m's capture keep-warm timer runs on gCaptureStopQueue, which
+ * nothing joins, and calls StopAndWait() and Count() after dropping
+ * captureControlMutex - so it can overlap the Reset inside vncServerStopLocked,
+ * which nils and releases the very list those two were enumerating.
+ *
+ * Like the rebuild stress above this is a STRESS, not a proof: it is written
+ * to be meaningful under -fsanitize=thread, while its assertions hold
+ * deterministically either way.
+ */
+static void testStopQueueReadersSurviveAConcurrentStop(void)
+{
+    static const int kCycles = 300;
+    dispatch_queue_t lifecycle =
+        dispatch_queue_create("test.capture-exclusion.lifecycle2", DISPATCH_QUEUE_SERIAL);
+    dispatch_queue_t stopQueue =
+        dispatch_queue_create("test.capture-exclusion.stop", DISPATCH_QUEUE_SERIAL);
+    dispatch_semaphore_t lifecycleDone = dispatch_semaphore_create(0);
+    dispatch_semaphore_t stopDone = dispatch_semaphore_create(0);
+
+    dispatch_async(lifecycle, ^{
+        for (int i = 0; i < kCycles; ++i) {
+            @autoreleasepool {
+                MacVNCDisplayLayout layout;
+                fillLayout(&layout, (i % 2) + 1);
+                macVNCCaptureSessionBuild(&layout, 30, acceptFrame, noteFailure);
+                macVNCCaptureSessionReset();
+            }
+        }
+        dispatch_semaphore_signal(lifecycleDone);
+    });
+
+    dispatch_async(stopQueue, ^{
+        for (int i = 0; i < kCycles; ++i) {
+            macVNCCaptureSessionStopAndWait();
+            /* The count is only ever 0, 1 or 2 here; what matters is that
+               reading it never touches a list another thread just freed. */
+            assert(macVNCCaptureSessionCount() <= 2);
+        }
+        dispatch_semaphore_signal(stopDone);
+    });
+
+    dispatch_semaphore_wait(lifecycleDone, DISPATCH_TIME_FOREVER);
+    dispatch_semaphore_wait(stopDone, DISPATCH_TIME_FOREVER);
+    dispatch_release(lifecycleDone);
+    dispatch_release(stopDone);
+    dispatch_release(stopQueue);
+    dispatch_release(lifecycle);
+
+    macVNCCaptureSessionReset();
+    assert(macVNCCaptureSessionCount() == 0);
+}
+
 int main(void)
 {
     @autoreleasepool {
         testEmptySessionAnswersFailureOnTheMainThread();
         testBuiltSessionAnswersEveryRequest();
         testRequestsSurviveConcurrentRebuild();
+        testExclusionDoesNotSurviveARebuild();
+        testStopQueueReadersSurviveAConcurrentStop();
         printf("capture exclusion: all assertions passed (%d answers)\n",
                atomic_load(&gAnswers));
     }
