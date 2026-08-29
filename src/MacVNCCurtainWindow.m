@@ -111,13 +111,12 @@ void macVNCCurtainCommitWindowChanges(void)
     return _visible;
 }
 
-/* The optional seam, in one place: an occluder set that models no opacity is
-   one for which "ordered in" and "covering" are the same thing, and the
-   bookkeeping above must still be exact for it. */
+/* One place, because two callers set the covering alpha: -setCovering: and the
+   re-assert in -synchronizeWithAttachedScreens, which must apply opacity
+   BEFORE visibility for a window created mid-curtain. */
 - (void)applyCovering:(BOOL)covering
 {
-    if ([_occluders respondsToSelector:@selector(setOccludersCovering:)])
-        [_occluders setOccludersCovering:covering];
+    [_occluders setOccludersCovering:covering];
 }
 
 - (void)setCovering:(BOOL)covering
@@ -134,8 +133,7 @@ void macVNCCurtainCommitWindowChanges(void)
 - (void)setAcceptsKeyboardFocus:(BOOL)accepts
 {
     _acceptsKeyboardFocus = accepts;
-    if ([_occluders respondsToSelector:@selector(setOccludersAcceptKeyboardFocus:)])
-        [_occluders setOccludersAcceptKeyboardFocus:accepts];
+    [_occluders setOccludersAcceptKeyboardFocus:accepts];
 }
 
 - (BOOL)acceptsKeyboardFocus
@@ -146,8 +144,7 @@ void macVNCCurtainCommitWindowChanges(void)
 - (void)setKeyboardSink:(id<MacVNCCurtainKeyboardSink>)sink
 {
     _keyboardSink = sink;
-    if ([_occluders respondsToSelector:@selector(setOccludersKeyboardSink:)])
-        [_occluders setOccludersKeyboardSink:sink];
+    [_occluders setOccludersKeyboardSink:sink];
 }
 
 - (NSArray<NSNumber *> *)screenIdentifiers
@@ -186,8 +183,6 @@ void macVNCCurtainCommitWindowChanges(void)
           (unsigned long)_identifiers.count, _visible ? 1 : 0,
           _covering ? 1 : 0);
 
-    BOOL canMeasure = [_occluders respondsToSelector:
-                          @selector(occluderReportForScreen:failureReason:)];
     for (NSNumber *identifier in attached) {
         if (![_identifiers containsObject:identifier]) {
             /* A display with no occluder is the local user watching the remote
@@ -200,8 +195,6 @@ void macVNCCurtainCommitWindowChanges(void)
                               @"screen %@ has no occluder", identifier];
             continue;
         }
-        if (!canMeasure)
-            continue;
         NSString *reason = nil;
         NSString *report = [_occluders occluderReportForScreen:identifier
                                                  failureReason:&reason];

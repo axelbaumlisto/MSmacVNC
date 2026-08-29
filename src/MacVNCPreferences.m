@@ -20,28 +20,31 @@ static const NSInteger kListenTagRowBase   = 1000; /* + interface row index */
    give a label column and a control column so the magic NSMakeRect numbers read
    as intent, not arbitrary constants. */
 static const CGFloat kFormWidth   = 520;
-static const CGFloat kFormHeight  = 358;
+static const CGFloat kFormHeight  = 402;
 static const CGFloat kColLabelX   = 0;
 static const CGFloat kColCtrlX    = 160;
 static const CGFloat kRowHeight   = 22;
-static const CGFloat kRowPort     = 328;
-static const CGFloat kRowListen   = 292;
-static const CGFloat kRowCustom   = 262;
-static const CGFloat kRowAllowed  = 232;
-static const CGFloat kRowManual   = 198;
-static const CGFloat kRowScroll   = 164;
-static const CGFloat kRowHint     = 140;
+static const CGFloat kRowPort     = 372;
+static const CGFloat kRowListen   = 336;
+static const CGFloat kRowCustom   = 306;
+static const CGFloat kRowAllowed  = 276;
+static const CGFloat kRowManual   = 242;
+static const CGFloat kRowScroll   = 208;
+static const CGFloat kRowHint     = 184;
 /* Performance rows sit below the network block: they are the settings people
    revisit, and they must not push the allowlist off the top of the sheet. */
-static const CGFloat kRowFrameRate = 114;
-static const CGFloat kRowQuality   = 88;
-static const CGFloat kRowEncrypt   = 62;
+static const CGFloat kRowFrameRate = 158;
+static const CGFloat kRowQuality   = 132;
+static const CGFloat kRowEncrypt   = 106;
 /* Curtain mode sits at the bottom, alone, with room for the help text that has
-   to say what it does AND what it does not do (it hides the screen; it does
-   not lock the Mac). A one-line tooltip could not carry that. */
-static const CGFloat kRowCurtain     = 36;
+   to say what it does, what it does NOT do (it hides the screen; it does not
+   lock the Mac), WHEN it starts doing it (the next connection, not this one)
+   and what has not been verified (the blackout on a second display). A
+   one-line tooltip could not carry that, and every one of those sentences is
+   there because leaving it out would leave a false impression. */
+static const CGFloat kRowCurtain     = 80;
 static const CGFloat kRowCurtainHelp = 0;
-static const CGFloat kCurtainHelpHeight = 32;
+static const CGFloat kCurtainHelpHeight = 76;
 
 static const NSInteger kCustomAddressLabelTag = 9101;
 static const NSInteger kCustomAddressFieldTag = 9102;
@@ -360,11 +363,30 @@ typedef struct {
     curtainCheckbox.toolTip = @"Off by default: the curtain goes up when a viewer "
                                "connects, so anyone holding the VNC password can "
                                "hide the screen from the person at this Mac.";
+    /* EDGE-TRIGGERED, AND THE WORDS HAVE TO SAY SO. The controller raises only
+       on the transition to a FIRST authenticated client (rule 1), so ticking
+       this box while somebody is already connected hides nothing until the
+       next connection - "while a viewer is connected" promised a level rule
+       the code deliberately does not implement, because a level rule would
+       re-raise the curtain the instant the local user typed it away. And the
+       local lift latches for the rest of the APP RUN, not "the session": that
+       is what stops whoever holds the password from re-blinding the local user
+       by reconnecting in a loop.
+
+       THE LAST SENTENCE IS THERE BECAUSE A LIVE RUN EARNED IT. On a
+       multi-display desk the raise's own audit reported every screen covered
+       while part of the desktop was still visible on a second display, and
+       that has not been explained or re-measured since. Until it is, this is
+       the one thing about the feature we may not overstate. */
     NSTextField *curtainHelp = [NSTextField wrappingLabelWithString:
-        @"While a viewer is connected, this Mac\u2019s screen is hidden and local "
-        @"keyboard and pointer input are blocked. Typing the VNC password on this "
-        @"Mac lifts it for the rest of the session. The Mac itself stays unlocked, "
-        @"and Accessibility permission is required or the curtain refuses to go up."];
+        @"From the next viewer connection onward, this Mac\u2019s screen is hidden "
+        @"and local keyboard and pointer input are blocked; turning this on while "
+        @"a viewer is already connected changes nothing until they reconnect. "
+        @"Typing the VNC password on this Mac lifts it until macVNC is restarted. "
+        @"The Mac itself stays unlocked, and Accessibility permission is required "
+        @"or the curtain refuses to go up. NOT VERIFIED ON MULTI-DISPLAY SETUPS: "
+        @"a live run showed the curtain reporting every screen covered while part "
+        @"of the desktop was still visible on a second display."];
     curtainHelp.frame = NSMakeRect(kColLabelX, kRowCurtainHelp, kFormWidth, kCurtainHelpHeight);
     curtainHelp.textColor = NSColor.secondaryLabelColor;
     curtainHelp.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];

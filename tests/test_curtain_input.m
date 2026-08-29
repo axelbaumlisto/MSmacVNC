@@ -249,6 +249,18 @@
 - (void)removeOccluderForScreen:(NSNumber *)identifier { (void)identifier; }
 - (void)updateOccluderGeometryForScreen:(NSNumber *)identifier { (void)identifier; }
 - (void)setOccludersVisible:(BOOL)visible { (void)visible; }
+/* Required by the protocol and irrelevant here: this fake models focus and
+   nothing else, so opacity and the coverage measurement are empty. An empty
+   implementation costs a line; the -respondsToSelector: branches they used to
+   need cost the RAISE path four. */
+- (void)setOccludersCovering:(BOOL)covering { (void)covering; }
+- (NSString *)occluderReportForScreen:(NSNumber *)identifier
+                        failureReason:(NSString **)reason
+{
+    if (reason)
+        *reason = nil;      /* nothing modelled is not a failure to cover */
+    return [NSString stringWithFormat:@"screen %@: not modelled", identifier];
+}
 - (void)setOccludersAcceptKeyboardFocus:(BOOL)accepts
 {
     _accepts = accepts;
@@ -909,6 +921,37 @@ static void testWatchdogCatchesACallbackInFlightTooLong(void)
            MacVNCCurtainInputWatchdogHealthy);
 }
 
+/*
+ * ONE RULE, ONE NUMBER: the bound this watchdog judges an unanswered
+ * main-thread heartbeat by IS the controller's own "the main thread has not
+ * answered" bound, and this test says so by using the CONTROLLER's constant to
+ * drive the INPUT's watchdog.
+ *
+ * The two used to be independent literals behind a comment claiming "same
+ * figure, same reason". Tuning one of them silently changes which detector
+ * fires first - the input's abort() or the controller's lift - which is a
+ * behavioural difference nobody would see in review, so it is pinned here
+ * rather than asserted in a comment.
+ */
+static void testTheMainThreadBoundIsTheControllersOwnBound(void)
+{
+    MacVNCCurtainInputWatchdogState state = {
+        .heartbeatSentNanoseconds = 1000,
+        /* A poll that has just completed: this test is about the heartbeat
+           clause, and a stale poll stamp would fire first. */
+        .lastPollCompletedNanoseconds =
+            1000 + MACVNC_CURTAIN_HEARTBEAT_STALL_NANOSECONDS,
+    };
+    /* One nanosecond short of the CONTROLLER's bound: still healthy. */
+    assert(macVNCCurtainInputWatchdogEvaluate(
+               &state, 1000 + MACVNC_CURTAIN_HEARTBEAT_STALL_NANOSECONDS - 1) ==
+           MacVNCCurtainInputWatchdogHealthy);
+    /* Exactly at it: the watchdog fires. */
+    assert(macVNCCurtainInputWatchdogEvaluate(
+               &state, 1000 + MACVNC_CURTAIN_HEARTBEAT_STALL_NANOSECONDS) ==
+           MacVNCCurtainInputWatchdogMainThreadStalled);
+}
+
 static void testWatchdogCatchesAMainThreadThatNeverAnswers(void)
 {
     MacVNCCurtainInputWatchdogState state = {
@@ -1200,6 +1243,7 @@ int main(void)
         testUnobservedTimeIsNotAWedge();
         testWatchdogCatchesACallbackInFlightTooLong();
         testWatchdogCatchesAMainThreadThatNeverAnswers();
+        testTheMainThreadBoundIsTheControllersOwnBound();
         testTheCallbackStampIsVisibleToTheWatchdogWhileItRuns();
         testThePollIsJudgedByItsCompletionStampNotByTheCallbackBound();
         testEndingSuppressionStopsTheTapAndTakesFocusBack();

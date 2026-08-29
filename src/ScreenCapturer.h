@@ -30,10 +30,13 @@ NS_ASSUME_NONNULL_BEGIN
  * raise must order an invisible window in FIRST (see MacVNCCurtainWindow.h).
  *
  * That is a claim about the platform, so it is MEASURED rather than assumed:
- * every discovery is censused (MacVNCShareableContentCensus below) and logged -
- * at stream start, when this process owns no curtain window, and again at the
- * moment the exclusion is requested, when it does. ONE run prints both lines
- * and settles it.
+ * the discovery is censused (MacVNCShareableContentCensus below) and logged -
+ * ONCE PER PROCESS at stream start, when this process owns no curtain window,
+ * and again at every moment the exclusion is requested, when it does. One run
+ * prints both lines and settles it. The stream-start line is once per process
+ * on purpose: captures start on every first-client edge for every user, and a
+ * census that answered the same question on every connection would be a
+ * diagnostic experiment shipped as a permanent log.
  *
  * The block is handed a completion it must call EXACTLY ONCE, on any thread,
  * with the applications AND the windows of a discovery result, or nil/nil for

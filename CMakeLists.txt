@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.3.78 LANGUAGES C)
+project(macVNC VERSION 0.4.0 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -64,6 +64,13 @@ set(SOURCE_FILES
     src/MacVNCCurtainController.m
     src/MacVNCCurtainInput.h
     src/MacVNCCurtainInput.m
+    # The device half of the curtain's input module - the tap, its three
+    # threads and its abort() - plus the production wiring that names them.
+    # Only the app links it: every curtain test target compiles
+    # MacVNCCurtainInput.m and needs no tap at all, which is the whole point of
+    # the split.
+    src/MacVNCCurtainEventTap.h
+    src/MacVNCCurtainEventTap.m
     src/PointerState.h
     src/PointerState.c
     src/KeyboardModifierState.h
