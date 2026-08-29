@@ -1179,6 +1179,28 @@ static void testTheWiringFeedsTheReceivingUpdatesCount(void)
     }
 }
 
+/*
+ * The clock the production wiring uses, PUBLISHED once rather than copied.
+ *
+ * There used to be two of these - one private to this module, one private to
+ * the event tap - both three lines around macVNCMonotonicNow(), which is the
+ * duplication MacVNCCurtainMainQueueScheduler was published to avoid one
+ * header over. This drives the surviving one: it must exist, answer non-zero
+ * (0 is the "never" sentinel everywhere this clock is read) and never go
+ * backwards, because every stall bound in curtain mode is a subtraction of two
+ * of its readings.
+ */
+static void testThePublishedMonotonicClockIsTheOneBothHalvesUse(void)
+{
+    MacVNCCurtainMonotonicClock *clock =
+        [[[MacVNCCurtainMonotonicClock alloc] init] autorelease];
+    assert([clock conformsToProtocol:@protocol(MacVNCCurtainClock)]);
+    uint64_t first = [clock monotonicNanoseconds];
+    assert(first != 0);
+    uint64_t second = [clock monotonicNanoseconds];
+    assert(second >= first);
+}
+
 int main(void)
 {
     @autoreleasepool {
@@ -1210,6 +1232,7 @@ int main(void)
         testTheSecretCopyIsWipedBeforeItIsReleased();
         testSecureInputHandOverIsUndoneByTheControllersLift();
         testTheWiringFeedsTheReceivingUpdatesCount();
+        testThePublishedMonotonicClockIsTheOneBothHalvesUse();
         printf("curtain controller: all assertions passed\n");
     }
     return 0;

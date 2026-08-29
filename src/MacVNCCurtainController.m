@@ -53,9 +53,9 @@ static NSString * const MacVNCCurtainReasonPreferenceOff =
 
 @end
 
-@interface MacVNCCurtainMonotonicClock : NSObject <MacVNCCurtainClock>
-@end
-
+/* Declared in MacVNCCurtainController.h, next to the protocol it implements:
+   the event tap's production wiring needs the same clock, and the alternative
+   was a second copy of this method in MacVNCCurtainEventTap.m. */
 @implementation MacVNCCurtainMonotonicClock
 
 - (uint64_t)monotonicNanoseconds

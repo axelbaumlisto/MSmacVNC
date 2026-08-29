@@ -10,9 +10,9 @@
  * sees.
  *
  * This module owns only the SCREEN half of curtain mode. It suppresses no
- * input, decides nothing about when a curtain should be up, and nothing calls
- * raise/lift yet - the controller that does is a separate task. The API here is
- * deliberately programmatic and idempotent so that controller has one seam.
+ * input and decides nothing about when a curtain should be up: what raises and
+ * lifts it is MacVNCCurtainController, over the one seam this API is
+ * deliberately programmatic and idempotent for.
  *
  * THREADING: every method of MacVNCCurtainWindowSet and MacVNCCurtain must be
  * called on the MAIN thread, because ordering an NSWindow in or out is
@@ -73,7 +73,10 @@
  * 3. RAISE AND LIFT ARE ORDERED, AND THE ORDERS ARE MIRRORS.
  *    Raise: ARM the windows (order them in, invisible - note 4), swap the
  *    filter, and only after the swap reports success make them opaque. Lift:
- *    make them transparent and order them out FIRST, restore the filter after.
+ *    ORDER THEM OUT FIRST and drop them back to the armed alpha, restore the
+ *    filter after. (Ordering out is the step that gives the local user their
+ *    screen back, so it goes first; dropping the alpha behind it is what makes
+ *    the next raise arm from a known state rather than inherit this one's.)
  *    Both orders keep the same invariant - nothing the local user can see is
  *    ever in the stream, and the stream is never excluding an application whose
  *    curtain is not up. The filter is swapped with
@@ -222,26 +225,19 @@ typedef void (^MacVNCCurtainCompletion)(BOOL success);
 /** Orders every occluder in (with orderFrontRegardless) or out. */
 - (void)setOccludersVisible:(BOOL)visible;
 
-@optional
 /*
  * Whether the occluders that are ordered in actually COVER anything: YES is
  * MACVNC_CURTAIN_ALPHA, NO is the armed alpha of note 4. Separate from
  * visibility because the raise needs a window that exists and is on screen
  * while still showing the local user their own desktop - that is the whole
  * reason the exclusion can be armed at all (note 1).
- *
- * Optional for the same reason as the focus pair below: an occluder set that
- * does not implement it models windows but not their opacity, and "ordered in
- * but not covering" is then indistinguishable from "ordered in" - which is
- * exactly what a test of the pre-arming bookkeeping wants.
  */
 - (void)setOccludersCovering:(BOOL)covering;
 
 /*
- * The focus half, optional because it arrived with the event tap and the
- * bookkeeping above is testable without it: an occluder set that does not
- * implement these is one that models windows but not focus, which is what the
- * hot-plug and visibility tests need.
+ * The focus half: who may hold the local keyboard, and where what is typed
+ * into a curtain window goes. The input module owns the decision; this is the
+ * delivery.
  */
 - (void)setOccludersAcceptKeyboardFocus:(BOOL)accepts;
 - (void)setOccludersKeyboardSink:(id<MacVNCCurtainKeyboardSink>)sink;
@@ -256,12 +252,25 @@ typedef void (^MacVNCCurtainCompletion)(BOOL success);
  * half is what makes this evidence: AppKit reports back what this process
  * asked for, and the question is whether the compositor agreed.
  *
- * Optional for the same reason as the covering seam it verifies: an occluder
- * set that models no windows has nothing to measure, and the bookkeeping half
- * of the audit (a screen with no occluder at all) still applies to it.
+ * An implementation that models no real window answers a line and a nil
+ * reason: nothing to measure is not a failure to cover, and the bookkeeping
+ * half of the audit (a screen with no occluder at all) still applies to it.
  */
 - (NSString *)occluderReportForScreen:(NSNumber *)identifier
                         failureReason:(NSString **)reason;
+
+/*
+ * NOTHING HERE IS @optional, AND THAT IS THE POINT.
+ *
+ * The four methods above were optional so that a test fake could model windows
+ * but not opacity, or windows but not focus. The cost was four
+ * -respondsToSelector: branches on the path that RAISES the curtain - four
+ * production branches that are always taken in the field, since the single
+ * shipped implementation (MacVNCCurtainScreenOccluders) implements all four,
+ * and that are exercised in the other direction only by fakes. A fake that
+ * needs to ignore one of these implements it and does nothing, which costs a
+ * test one line and the raise path nothing at all.
+ */
 @end
 
 /*
@@ -365,7 +374,7 @@ typedef NS_ENUM(NSInteger, MacVNCCurtainState) {
 
 /*
  * The curtain: the window set, the capture exclusion, and the ordering between
- * them (note 3 above). Nothing raises it yet.
+ * them (note 3 above). MacVNCCurtainController is what raises and lifts it.
  */
 @interface MacVNCCurtain : NSObject
 - (instancetype)initWithWindowSet:(MacVNCCurtainWindowSet *)windowSet
@@ -394,10 +403,11 @@ typedef NS_ENUM(NSInteger, MacVNCCurtainState) {
 - (void)raiseWithCompletion:(MacVNCCurtainCompletion)completion;
 
 /*
- * Make the windows transparent and order them out, then restore the filter -
- * the exact reverse. The windows are gone by the time the filter request is
- * issued, so a failing or timing-out restore still leaves the local user seeing
- * their screen; that is the direction this asymmetry deliberately fails in.
+ * Order the windows out and drop them back to the armed alpha, then restore
+ * the filter - the reverse of the raise, windows before filter. The windows
+ * are gone by the time the filter request is issued, so a failing or
+ * timing-out restore still leaves the local user seeing their screen; that is
+ * the direction this asymmetry deliberately fails in.
  */
 - (void)liftWithCompletion:(MacVNCCurtainCompletion)completion;
 

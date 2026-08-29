@@ -194,8 +194,10 @@ Objective-C glue:
   two states to the two alphas is a published pure function
   (`macVNCCurtainOccluderAlpha`) so it is checkable without a window server.
   (3) Raise and lift are MIRRORED orders — arm the windows, swap the filter,
-  then make them opaque; make them transparent and order them out, then restore
-  the filter — and a swap that never answers is a FAILURE, bounded by
+  then make them opaque; order them out and drop them back to the armed alpha,
+  then restore the filter (ordering out is what gives the local user their
+  screen back, so it goes first, and the alpha follows so the next raise arms
+  from a known state) — and a swap that never answers is a FAILURE, bounded by
   `MACVNC_CURTAIN_FILTER_SWAP_TIMEOUT_NANOSECONDS`, after which the windows are
   ordered out WHILE STILL INVISIBLE and the exclusion is taken back, so a
   refused raise leaked nothing to either party. (4) A RAISE THAT COVERS NOTHING
@@ -334,10 +336,11 @@ Objective-C glue:
   watchdog measures its OWN observation gap first and re-baselines rather than
   killing a healthy server on lid-open. Its action, when something really is
   stuck, is `abort()`, because process death is the only thing that restores
-  the SCREEN from outside a wedged main thread. Everything above the tap seam is exercised by
+  the SCREEN from outside a wedged main thread. All six rules are decided ABOVE
+  the `MacVNCCurtainInputTap` seam and exercised by
   `tests/test_curtain_input.m` with real `CGEvent`s and no tap at all; the tap
   itself, the thread, the watchdog's abort and the AppKit key window need a
-  device. **AppDelegate** constructs it as the controller's suppression seam,
+  device and live in **MacVNCCurtainEventTap**. **AppDelegate** constructs it as the controller's suppression seam,
   with the controller as its observer through a one-way bridge (the controller
   retains the input, so a direct back-reference would be a cycle). That
   observer is load-bearing rather than decorative: the focus hand-over on
@@ -348,6 +351,24 @@ Objective-C glue:
   viewer's keyboard would die while their mouse kept working.
   `tests/test_curtain_controller.m` exercises that composition with the real
   input module above a fake tap.
+- **MacVNCCurtainEventTap** — the device half of **MacVNCCurtainInput**, and
+  the only part of curtain mode a test cannot reach: `CGEventTapCreate`, the
+  tap's own thread and run loop, the poll timer, the teardown order, the
+  watchdog thread and its `abort()`. It is a separate file precisely because
+  **MacVNCCurtainInput**'s own header lists six things that are ARGUED rather
+  than tested — the monotone refusal latch, publishing setup success only while
+  nobody has given up on it, the handler retained for BOTH threads and released
+  only when both joins succeed, the semaphore lifetimes on every timeout
+  branch, the watchdog's start handshake, and the resume grace window — and
+  every one of them lives here, so the untested surface is a file rather than
+  the bottom half of one. A watchdog whose start handshake times out leaves
+  `_watchdogRunning` set (so the bounded join really runs instead of reporting
+  a thread nobody joined as gone) AND latches `_refuseForever` (so no later
+  arming can be satisfied by that thread), which is the same discipline the tap
+  half already applies to a join that timed out. The production wiring
+  (`+inputWithDefaultSeamsFocus:`) is implemented here too, so linking the
+  device is what pulls it in: the three curtain test targets compile
+  `MacVNCCurtainInput.m` and no tap at all.
 
 ### The dirty hint is an optimisation, never the source of truth
 
@@ -432,10 +453,13 @@ pixels rather than points.
   then cached) rather than only at stream start — but ONLY behind a running
   stream, because a discovery is what can raise a Screen Recording prompt and a
   live stream is the proof the permission is already granted. Because that was
-  twice guessed and twice wrong, it is now MEASURED: every discovery is
-  censused (`macVNCTakeShareableContentCensus`) and logged
-  (`macVNCLogShareableContentCensus`) at stream start, when this process owns no
-  curtain window, and again at the exclusion request, when it does — so one run
+  twice guessed and twice wrong, it is now MEASURED: the discovery is censused
+  (`macVNCTakeShareableContentCensus`) and logged
+  (`macVNCLogShareableContentCensus`) ONCE PER PROCESS at stream start, when
+  this process owns no curtain window, and again at every exclusion request,
+  when it does — the stream-start half is `dispatch_once` because captures
+  start on every first-client edge for every user, curtain mode or not, and an
+  experiment that has an answer must not keep asking in everybody's log — so one run
   of the app decides whether owning a window is what makes us listed, and the
   log says outright when it is not ("SCK lists N window(s) of this process but
   not the process itself"), which is the only evidence that would justify

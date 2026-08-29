@@ -102,6 +102,14 @@
     [_log addObject:covering ? @"cover:1" : @"cover:0"];
 }
 
+/* Required by the protocol, empty here: this fake models windows and their
+   opacity, not focus. The rules about who may hold the keyboard are tested
+   where they are decided (tests/test_curtain_input.m), and the raise path is
+   the poorer for every -respondsToSelector: branch a smaller fake would
+   otherwise buy. */
+- (void)setOccludersAcceptKeyboardFocus:(BOOL)accepts { (void)accepts; }
+- (void)setOccludersKeyboardSink:(id<MacVNCCurtainKeyboardSink>)sink { (void)sink; }
+
 - (NSString *)occluderReportForScreen:(NSNumber *)identifier
                         failureReason:(NSString **)reason
 {

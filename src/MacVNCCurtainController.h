@@ -11,7 +11,7 @@
  *
  * The screen half (MacVNCCurtainWindow) knows how to raise and lift; the way
  * back in (MacVNCCurtainPolicy) knows whether what was typed lifts it; the tap
- * (a later task) knows how to swallow input. NONE of them decides WHEN. That
+ * (MacVNCCurtainInput) knows how to swallow input. NONE of them decides WHEN. That
  * decision is what this module owns, and it owns it above five injected seams -
  * the curtain, the input suppression, the capture health, the secret and the
  * clock - so every rule below is a unit test with no device, no tap, no window,
@@ -119,8 +119,17 @@
  * curtain does NOT go up. That is the whole contract: this module never asks
  * why, it only refuses to blind someone whose keyboard still works.
  *
- * -endSuppressingInput is idempotent and must not block: it is called on every
- * lift, including the ones that happen because something is already wrong.
+ * -endSuppressingInput is idempotent and MUST NOT BLOCK INDEFINITELY - which
+ * is a weaker promise than "does not block", and the weaker one is the true
+ * one. It is called on every lift, including the ones that happen because
+ * something is already wrong, and the production implementation
+ * (MacVNCCurtainInput, over MacVNCCurtainEventTap) joins two threads on the
+ * CALLER'S thread - which is the main one - with a 2 s deadline each, so the
+ * honest bound is about 4 seconds in the worst case and microseconds in every
+ * case that is not already a wedge. What makes that acceptable is the ORDER:
+ * the curtain's windows are ordered out before this is called, so the local
+ * user has their screen back before the wait starts. What it rules out is
+ * calling the lift from anything that must stay responsive within that bound.
  */
 @protocol MacVNCCurtainInputSuppression <NSObject>
 - (BOOL)beginSuppressingInput;
@@ -202,6 +211,18 @@ static inline void macVNCCurtainDiscardSecret(NSData *NS_RELEASES_ARGUMENT secre
  */
 @protocol MacVNCCurtainClock <NSObject>
 - (uint64_t)monotonicNanoseconds;
+@end
+
+/*
+ * The production clock: macVNCMonotonicNow() behind that protocol.
+ *
+ * Published rather than kept private for the same reason
+ * MacVNCCurtainMainQueueScheduler is, one header over: the event tap's own
+ * production wiring needs exactly this seam, and two copies of "return
+ * macVNCMonotonicNow()" is one too many - the second one is where a future
+ * change to what "now" means would silently fail to arrive.
+ */
+@interface MacVNCCurtainMonotonicClock : NSObject <MacVNCCurtainClock>
 @end
 
 @interface MacVNCCurtainController : NSObject

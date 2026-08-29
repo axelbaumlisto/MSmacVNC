@@ -389,11 +389,27 @@ static void endMailboxActivity(void *context)
                    Censused because this is measurement point (a): the state of
                    the discovery while this process owns NO curtain window. Its
                    difference against the census at the exclusion request is the
-                   whole experiment. */
-                macVNCLogShareableContentCensus(
-                    "stream start", self.displayID,
-                    macVNCTakeShareableContentCensus(content.applications,
-                                                     content.windows, getpid()));
+                   whole experiment.
+
+                   ONCE PER PROCESS, AND THAT IS THE POINT. Captures start on
+                   every 0 -> 1 client edge, on every display, for every user,
+                   whether or not curtain mode is switched on - so an
+                   unconditional line here would print internal ScreenCaptureKit
+                   census data into the log of somebody who never asked the
+                   question this measures, once per display per connection,
+                   forever. The experiment needs the answer once: the state of a
+                   discovery taken while this process owns no curtain window
+                   does not change with the connection that triggered it.
+                   Measurement point (b) stays unconditional because it only
+                   runs when a curtain is actually being raised. */
+                static dispatch_once_t censusOnce;
+                dispatch_once(&censusOnce, ^{
+                    macVNCLogShareableContentCensus(
+                        "stream start", self.displayID,
+                        macVNCTakeShareableContentCensus(content.applications,
+                                                         content.windows,
+                                                         getpid()));
+                });
                 self.ownApplication = ownApplicationInList(content.applications);
 
                 [self beginStreamingWithDisplay:content.displays[displayIndex]

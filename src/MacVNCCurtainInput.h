@@ -197,9 +197,16 @@
 
 /* A main-thread heartbeat unacknowledged for this long means the thread that
  * owns every NSWindow cannot answer, so the curtain cannot be taken down by
- * anything short of process death. Same figure as the controller's own stall
- * bound, for the same reason. */
-#define MACVNC_CURTAIN_INPUT_MAIN_STALL_NANOSECONDS (5ull * 1000ull * 1000ull * 1000ull)
+ * anything short of process death.
+ *
+ * DERIVED, NOT REPEATED: it is the SAME rule as the controller's own "the main
+ * thread has not answered" bound, measured the same way and justified by the
+ * same argument - only the action differs (this one aborts, that one lifts).
+ * Two independent literals behind a "same figure, same reason" comment is one
+ * literal too many: tuning one of them silently changes which detector fires
+ * first, which is exactly the kind of drift a shared definition cannot have. */
+#define MACVNC_CURTAIN_INPUT_MAIN_STALL_NANOSECONDS \
+    MACVNC_CURTAIN_HEARTBEAT_STALL_NANOSECONDS
 
 /* The poll is timer-driven every MACVNC_CURTAIN_INPUT_POLL_NANOSECONDS, so
  * twenty missed polls is not an idle user - it is a run loop that is not
@@ -437,29 +444,18 @@ MacVNCCurtainInputWatchdogVerdict macVNCCurtainInputWatchdogEvaluate(
 /*
  * WHAT IS TESTED HERE, AND WHAT IS ONLY ARGUED.
  *
- * Everything above the tap seam - the three preconditions, the pass-through,
- * both disable reasons, the secure-input transition and its corroboration, the
+ * Everything in this module - the three preconditions, the pass-through, both
+ * disable reasons, the secure-input transition and its corroboration, the
  * focus latch, the watchdog's verdicts, the poll's completion stamp - is
  * exercised by tests/test_curtain_input.m against a fake tap, with real
  * CGEvents and no device.
  *
- * NONE of the following is reachable by that suite, because all of it lives
- * inside MacVNCCurtainEventTap's own state machine and its three threads. It
- * is argued from source and reviewed, NOT tested; a device test or a fault
- * injection seam would be needed to cover it, and neither exists yet:
- *
- *   - the monotone refusal latch (_refuseForever): a tap whose teardown never
- *     joined must never arm again, and the tap thread must not be able to
- *     clear that by finishing late;
- *   - publishing setup success only while nobody has given up on it, and
- *     answering "already started" only while a run loop is still live;
- *   - the handler being retained for both the tap and the WATCHDOG thread, and
- *     released only when BOTH joins succeed (leaked otherwise);
- *   - the semaphore lifetimes on every timeout branch;
- *   - the watchdog's own start handshake, and the rule that a watchdog which
- *     does not start is a start FAILURE rather than a degraded success;
- *   - the resume grace window, and abort() itself, which by construction
- *     cannot be observed by a test that must survive it.
+ * NONE of what is only argued lives here any more: it is all inside
+ * MacVNCCurtainEventTap's own state machine and its three threads, which is
+ * now a FILE of its own (MacVNCCurtainEventTap.h/.m) rather than the bottom
+ * half of this one. That header lists the six items and why a device test
+ * would be needed to reach them. The seam between "tested" and "argued" is the
+ * MacVNCCurtainInputTap protocol, and it is now also a file boundary.
  */
 @interface MacVNCCurtainInput : NSObject <MacVNCCurtainInputSuppression,
                                           MacVNCCurtainInputTapHandler,
@@ -471,12 +467,6 @@ MacVNCCurtainInputWatchdogVerdict macVNCCurtainInputWatchdogEvaluate(
                secretSource:(id<MacVNCCurtainSecretSource>)secretSource
                   scheduler:(id<MacVNCCurtainScheduler>)scheduler
                       clock:(id<MacVNCCurtainClock>)clock;
-
-/* Production wiring: the real tap on its own thread, the main queue for the
- * hops, the monotonic clock. */
-+ (instancetype)inputWithDefaultSeamsFocus:(id<MacVNCCurtainInputFocus>)focus
-                                  observer:(id<MacVNCCurtainInputObserver>)observer
-                              secretSource:(id<MacVNCCurtainSecretSource>)secretSource;
 
 /* -curtainWindowDidReceiveCharacters:count: (MacVNCCurtainKeyboardSink) is the
  * other way in: keys that reached the curtain WINDOW instead of the tap, which
@@ -490,4 +480,19 @@ MacVNCCurtainInputWatchdogVerdict macVNCCurtainInputWatchdogEvaluate(
  * and only in which, the curtain window may take the keyboard focus. */
 @property (nonatomic, readonly) BOOL tapPathUnavailable;
 
+@end
+
+/*
+ * Production wiring: the real tap on its own thread, the main queue for the
+ * hops, the monotonic clock.
+ *
+ * A CATEGORY, and implemented in MacVNCCurtainEventTap.m, because it is the
+ * one method of this class that names a device. Linking it in is what pulls
+ * the tap, its three threads and its abort() into a target; everything above
+ * needs none of them, so the test targets compile MacVNCCurtainInput.m alone.
+ */
+@interface MacVNCCurtainInput (MacVNCCurtainDefaultSeams)
++ (instancetype)inputWithDefaultSeamsFocus:(id<MacVNCCurtainInputFocus>)focus
+                                  observer:(id<MacVNCCurtainInputObserver>)observer
+                              secretSource:(id<MacVNCCurtainSecretSource>)secretSource;
 @end

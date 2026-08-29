@@ -173,6 +173,15 @@ one.
 
 What it does not cover, plainly:
 
+- **The local blackout has NOT been verified on a multi-display Mac.** The
+  curtain measures itself on the way up — it asks AppKit and the window server
+  about every attached screen and refuses a raise whose numbers do not add up —
+  and in a live run on a two-display desk that audit reported every screen
+  covered while part of the desktop was still visible on the second display.
+  That has not been explained or re-measured since, so on more than one display
+  assume the curtain may be showing the remote party's work to the room. Turning
+  the setting on is not a substitute for checking, once, what your own second
+  display actually shows.
 - **Assistive-technology overlays and the mouse cursor draw above the curtain.**
   The curtain window sits at the screen-saver window level, and the cursor layer
   and accessibility panels are composited above it.

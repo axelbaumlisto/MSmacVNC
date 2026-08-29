@@ -1,3 +1,70 @@
+# macVNC 0.4.0
+
+## Curtain mode (off by default, and honest about what it does not do)
+
+While a remote viewer works, the Mac's own screen can be hidden and its
+keyboard and pointer blocked, so nobody standing at the desk sees the session.
+Typing the VNC password on that Mac lifts it. The Mac itself stays unlocked —
+this is privacy from onlookers, not a lock, and the interface never claims
+otherwise.
+
+It ships **off**, and it should stay off unless you need it, for one reason
+worth saying plainly: the party who raises the curtain is the REMOTE one, so
+anyone holding your VNC password can blind the person sitting at the machine.
+
+**Not yet verified on multi-display setups.** A live run showed the internal
+coverage check passing while part of the desktop was still visible on a second
+display. Do not rely on it there.
+
+The escape hatch is designed for the person who cannot see. The password is
+compared with the same eight effective bytes VNC authentication itself uses, so
+a password the server accepts always opens the curtain; wrong attempts back off
+to a capped delay rather than an ever-growing one, because an uncapped backoff
+is itself a lockout; and the curtain refuses to rise at all when there is no
+password to lift it with.
+
+It refuses rather than half-works. Without Accessibility trust an event tap can
+be created and still be deaf — macOS silently strips the keyboard bits from the
+mask — which would give a black screen with a live keyboard typing into
+invisible windows. macVNC checks that the keyboard bits survived and stays down
+if they did not. It also stays down if the screen it painted is not actually
+covering: the raise compares what AppKit believes against what the window server
+composites, and a mismatch fails the raise instead of suppressing your keyboard
+on the strength of its own optimism.
+
+It lifts on everything that means the curtain no longer makes sense: the last
+viewer disconnecting, the server stopping, the app quitting, the capture stream
+dying, the password changing, the preference being switched off, secure input
+turning on, the screensaver, display sleep, and fast user switching. Secure
+input matters more than it sounds: while another app holds it, your keystrokes
+bypass the tap entirely, so the password you type to escape would land in
+whatever application the remote party is watching.
+
+If everything goes wrong at once, killing the process restores both the screen
+and the keyboard, because neither survives the process.
+
+## A real race in the capture layer, fixed
+
+The capture session argued its readers needed no lock because every one of them
+is a client thread that `rfbShutdownServer` joins before anything is torn down.
+That argument was false for the keep-warm stop timer, which runs on a queue
+nobody joins and could read the capturer list while it was being freed.
+ThreadSanitizer confirms it. Every reader now takes a snapshot under a leaf
+mutex.
+
+## Smaller things
+
+- The frame-grabbing instrument used to develop this can now authenticate, and
+  reports pixels sampled, non-black count, and mean and maximum luminance, so
+  "the screen is black" is a number instead of an impression.
+- Cleartext copies of the VNC password are wiped before release rather than
+  merely freed.
+- The documentation no longer mentions a `MACVNC_PASSWORD` environment variable,
+  which never existed; the password comes from Preferences or
+  `MACVNC_PASSWORD_FILE`.
+
+---
+
 # macVNC 0.3.78
 
 ## You can now require encryption
