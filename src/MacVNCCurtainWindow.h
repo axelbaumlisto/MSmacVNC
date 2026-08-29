@@ -81,6 +81,19 @@
  *    stream; stopping and restarting it would drop frames and re-run the
  *    permission-sensitive start path.
  *
+ *    A RAISE THAT COVERS NOTHING IS A FAILED RAISE, AND ONLY A MEASUREMENT CAN
+ *    TELL THE DIFFERENCE. Everything above the occluder seam is bookkeeping,
+ *    and bookkeeping cannot be wrong about itself: with no screen attached, or
+ *    with every window creation refused, `-setCovering:` and `-setVisible:`
+ *    are no-ops over an empty set and the state machine still arrives at Up -
+ *    a curtain that reports SUCCESS while covering NOTHING, which is exactly
+ *    what a live differential measurement found. So the last step of a raise
+ *    asks AppKit and the WINDOW SERVER what is actually on the glass
+ *    (`-auditCoverageForPhase:`), logs the numbers, and fails the raise
+ *    through the same fail-safe path as a failed swap when they do not add up.
+ *    The audit runs again at the lift, so the raised interval is bracketed by
+ *    two timestamped measurements rather than by one claim.
+ *
  *    A swap that never reports back is treated as FAILURE: MacVNCCurtain arms
  *    a timeout (MACVNC_CURTAIN_FILTER_SWAP_TIMEOUT_NANOSECONDS) alongside the
  *    request and, whichever arrives first wins, resolves exactly once. On
@@ -120,6 +133,46 @@
  * ordering exists to avoid.
  */
 double macVNCCurtainOccluderAlpha(bool covering);
+
+/*
+ * PUSH EVERY WINDOW CHANGE TO THE WINDOW SERVER, NOW.
+ *
+ * `-[NSWindow setAlphaValue:]` records the value on the NSWindow object at
+ * once and hands the window-server half of the change to the current
+ * (implicit) CoreAnimation transaction, which commits at the END of a main
+ * run-loop pass. Everything this module does happens inside ONE pass - arm,
+ * swap the filter, cover, measure - so without this call the compositor is
+ * still showing the previous alpha when the curtain believes it is up.
+ *
+ * That is not a deduction, it is the measured behaviour, on this machine, on a
+ * borderless non-opaque window at NSScreenSaverWindowLevel (window server
+ * alpha read back with CGWindowListCopyWindowInfo):
+ *
+ *   after -setAlphaValue:0.999          AppKit 0.99900   server 0.00392
+ *   after -displayIfNeeded               AppKit 0.99900   server 0.00392
+ *   after [CATransaction flush]          AppKit 0.99900   server 0.99900
+ *   after a run-loop turn                AppKit 0.99900   server 0.99900
+ *   ...and the same inside a main-QUEUE block, which is how a raise resolves.
+ *
+ * Drawing is NOT the missing step (line two): the pixels were never the
+ * problem, the window's compositing alpha was. And a live run produced exactly
+ * line one - "alpha=0.99900 ... window server alpha=0.00392" - while every
+ * state machine believed the curtain was up, which is the whole reason the
+ * occluder set now commits before it returns from any change.
+ */
+void macVNCCurtainCommitWindowChanges(void);
+
+/*
+ * The commit, as an injectable seam.
+ *
+ * Installing a block replaces the window-server commit; nil restores it. It
+ * exists because the RULE worth testing - "the occluder set commits after
+ * every change it makes" - is otherwise reachable only through a window
+ * server, and a test that needs one is a test that would put a black window on
+ * somebody's screen.
+ */
+typedef void (^MacVNCCurtainWindowCommit)(void);
+void macVNCCurtainSetWindowCommit(MacVNCCurtainWindowCommit commit);
 
 /* A filter swap on a running stream is milliseconds of work. This is the point
  * at which we stop believing it will ever answer; the local user is looking at
@@ -192,6 +245,23 @@ typedef void (^MacVNCCurtainCompletion)(BOOL success);
  */
 - (void)setOccludersAcceptKeyboardFocus:(BOOL)accepts;
 - (void)setOccludersKeyboardSink:(id<MacVNCCurtainKeyboardSink>)sink;
+
+/*
+ * MEASUREMENT, not bookkeeping: what AppKit and the window server say about
+ * this screen's occluder RIGHT NOW, as one loggable line, and - through
+ * `reason` - whether those numbers add up to a covered screen (nil) or not.
+ *
+ * Asked only while the occluders are supposed to be COVERING, so "it sits at
+ * the arming alpha" is a failure here rather than a state. The window server's
+ * half is what makes this evidence: AppKit reports back what this process
+ * asked for, and the question is whether the compositor agreed.
+ *
+ * Optional for the same reason as the covering seam it verifies: an occluder
+ * set that models no windows has nothing to measure, and the bookkeeping half
+ * of the audit (a screen with no occluder at all) still applies to it.
+ */
+- (NSString *)occluderReportForScreen:(NSNumber *)identifier
+                        failureReason:(NSString **)reason;
 @end
 
 /*
@@ -238,6 +308,22 @@ typedef void (^MacVNCCurtainCompletion)(BOOL success);
 - (void)setAcceptsKeyboardFocus:(BOOL)accepts;
 - (void)setKeyboardSink:(id<MacVNCCurtainKeyboardSink>)sink;
 @property (nonatomic, readonly) BOOL acceptsKeyboardFocus;
+
+/*
+ * Says out loud what every occluder IS, and answers whether this curtain is
+ * really covering: nil when every ATTACHED screen has an occluder that AppKit
+ * and the window server both report as on screen, at the covering alpha, over
+ * that screen's whole frame - and otherwise the first reason it does not.
+ *
+ * One line per screen goes to the log under `phase`, because "the state
+ * machine says Up" is not evidence and a single run of the app has to be able
+ * to settle what no amount of reading the code can. Nothing secret is logged:
+ * geometry, alpha, level and window numbers only.
+ *
+ * Call it only when the curtain is supposed to be covering; it is the raise's
+ * last step and the lift's first.
+ */
+- (NSString *)auditCoverageForPhase:(NSString *)phase;
 
 @property (nonatomic, readonly) BOOL visible;
 /** Screens currently carrying an occluder, in attachment order. */
@@ -295,9 +381,11 @@ typedef NS_ENUM(NSInteger, MacVNCCurtainState) {
 + (instancetype)curtainWithDefaultSeams;
 
 /*
- * Arm the windows (invisible, note 4), swap the filter, and only then make the
- * windows opaque. `completion` runs on the main thread with NO on any failure,
- * including the swap timing out - and after a failure the curtain is DOWN with
+ * Arm the windows (invisible, note 4), swap the filter, make the windows
+ * opaque - and only report success once the windows have been MEASURED to be
+ * covering every attached screen (note 3). `completion` runs on the main
+ * thread with NO on any failure, including the swap timing out and the
+ * measurement disagreeing with the bookkeeping - and after a failure the curtain is DOWN with
  * its windows ordered out again, never half-raised and never having been
  * visible to either party. Raising an already-up curtain succeeds without doing
  * anything; a raise while another transition is in flight fails rather than

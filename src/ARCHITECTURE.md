@@ -198,10 +198,51 @@ Objective-C glue:
   the filter — and a swap that never answers is a FAILURE, bounded by
   `MACVNC_CURTAIN_FILTER_SWAP_TIMEOUT_NANOSECONDS`, after which the windows are
   ordered out WHILE STILL INVISIBLE and the exclusion is taken back, so a
-  refused raise leaked nothing to either party. The window set, the ordering and
+  refused raise leaked nothing to either party. (4) A RAISE THAT COVERS NOTHING
+  IS A FAILED RAISE, and only a MEASUREMENT can tell the difference: everything
+  above the occluder seam is bookkeeping, and bookkeeping is never wrong about
+  itself — with no screen attached, or with every window creation refused,
+  `-setCovering:` and `-setVisible:` iterate an empty set, succeed at nothing,
+  and the state machine still arrives at Up. A live differential measurement
+  caught exactly that: with the curtain "up", a second server that does NOT
+  exclude this application sampled the same framebuffer region as the curtained
+  one and got an identical non-black picture, while the app logged no failure at
+  all. So the last step of a raise is `-auditCoverageForPhase:`, which asks
+  AppKit AND the window server (`CGWindowListCopyWindowInfo`, reading no window
+  NAME, so it can raise no TCC prompt) what is on the glass — frame against
+  screen frame, alpha, ordered-in, active Space, level, opacity, occlusion
+  state, window number, and the compositor's own alpha and bounds — logs one
+  line per screen, and fails the raise through the same fail-safe path as a
+  failed swap when the numbers disagree: a curtain that does not cover must not
+  report success while local input is already suppressed. It found the cause on
+  its first live run — `alpha=0.99900 | window server alpha=0.00392`, the
+  arming alpha — which is rule (5). (5) A WINDOW CHANGE IS NOT MADE UNTIL THE
+  WINDOW SERVER HAS IT: `-[NSWindow setAlphaValue:]` records the value on the
+  object and leaves the compositor half to the implicit CoreAnimation
+  transaction, which commits at the END of a run-loop pass — and a raise arms,
+  swaps, covers and measures inside ONE pass. Measured, not deduced: after
+  `-setAlphaValue:0.999` the window server still composited 0.00392; after
+  `-displayIfNeeded` it still did (drawing pixels is not the same as changing a
+  window's compositing alpha); after `[CATransaction flush]` it had 0.99900,
+  as it did after a run-loop turn — identically inside a main-QUEUE block,
+  which is how a raise resolves, so "it runs off the main thread" was NOT the
+  cause. The AppKit occluder set therefore commits
+  (`macVNCCurtainCommitWindowChanges`, `[CATransaction flush]`) before
+  returning from ANY change it makes — the covering alpha, a new window's armed
+  alpha before it can be ordered in at the default 1.0, a re-fit, ordering in
+  and ordering out — so every route commits by construction rather than by each
+  caller remembering to. The commit is an injectable seam
+  (`macVNCCurtainSetWindowCommit`), because otherwise that rule could only be
+  tested by putting a black window on somebody's screen. Partial coverage counts as failure: one
+  display curtained and one showing the remote party's work is the thing the
+  feature exists to prevent. The lift audits again, so the raised interval is
+  bracketed by two timestamped measurements instead of one claim. The window
+  set, the ordering and
   the timeout sit above injected seams (occluders, exclusion, scheduler), so
   `tests/test_curtain_window.m` exercises hot-plug (including hot-plug WHILE
-  armed, which must stay armed), both orders, the timeout
+  armed, which must stay armed), both orders, the timeout, each way of covering
+  nothing (no screen, a refused window, a partially covered desk, and windows
+  that are ordered in but measured not covering)
   and the late-answer race with no display attached, plus the rule that a
   curtain which is DOWN answers `NSApplicationDidChangeScreenParameters` with
   nothing at all — a resolution change or a display sleep must not quietly
