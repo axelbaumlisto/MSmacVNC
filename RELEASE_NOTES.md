@@ -1,9 +1,12 @@
 # macVNC 0.4.0
 
-## Curtain mode (off by default, and honest about what it does not do)
+## Curtain mode is NOT finished - it ships off, and this is why
 
-While a remote viewer works, the Mac's own screen can be hidden and its
-keyboard and pointer blocked, so nobody standing at the desk sees the session.
+The intent: while a remote viewer works, the Mac's own screen is hidden and its
+keyboard and pointer are blocked, so nobody standing at the desk sees the
+session. The decision logic, the unlock policy, the input tap and the lifecycle
+are written and unit-tested - but the central claim, that the screen actually
+goes black, is UNPROVEN, so this is not yet a feature you can rely on.
 Typing the VNC password on that Mac lifts it. The Mac itself stays unlocked —
 this is privacy from onlookers, not a lock, and the interface never claims
 otherwise.
