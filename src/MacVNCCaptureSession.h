@@ -15,28 +15,23 @@
  * blocks that composite frames, and classified SCK error codes, so the file
  * that starts a TCP server also had to know the capture framework.
  *
- * THREADING, as used by mac.m - MOST of the stream list is not mutex-protected,
- * and that is sound only because of WHEN each operation runs:
+ * THREADING: EVERY function here takes the module's mutex, for long enough to
+ * either mutate the stream list or copy it.
  *
- *  - Build and Reset mutate the list. Both run under serverLifecycleMutex, at a
- *    point where no client thread exists yet or all have been joined by
- *    rfbShutdownServer(screen, TRUE).
- *  - Start, StopAndWait, WaitForFirstFrames and Count only READ the
- *    list (they message the streams, which are individually thread-safe).
- *    These do run on client threads.
+ * It used to be only three of them, on the argument that the other readers
+ * (Start, StopAndWait, WaitForFirstFrames, Count) run on client threads, which
+ * rfbShutdownServer(screen, TRUE) joins before Build or Reset can run. That
+ * argument was FALSE, and the counter-example ships: mac.m's capture keep-warm
+ * timer fires on gCaptureStopQueue - a queue nothing joins - and calls
+ * StopAndWait() and Count() after dropping captureControlMutex, so it can
+ * overlap the Reset inside vncServerStopLocked, which nils and releases the
+ * list. Enumerating `gCapturers` while another thread releases it is a
+ * use-after-free with a plausible-looking stack.
  *
- * So a reader never overlaps a writer. Calling Build or Reset from a client
- * thread, or stopping the server without joining clients first, breaks that and
- * needs a lock here.
- *
- * SetSelfExcluded is the ONE reader that argument does not cover, and it does
- * take a lock. It is called from the MAIN thread (the curtain lives there,
- * because ordering windows is main-thread work), and the main thread is never
- * joined by rfbShutdownServer - so "server stop" and "lift the curtain" can be
- * genuinely concurrent, and reading the list unlocked would be a retain of an
- * array Reset had just freed. Build, Reset and SetSelfExcluded therefore share
- * a module-private mutex; the client-thread readers above are deliberately
- * left lock-free, since their justification still holds.
+ * So the rule is now the simple one, with no per-caller reasoning to keep
+ * true: readers snapshot under the lock (which retains every stream for the
+ * duration of the call) and work on the snapshot; writers swap the pointer
+ * under the lock and release the old list outside it.
  *
  * That mutex is a LEAF: it is taken after serverLifecycleMutex (Build/Reset run
  * under it) and never held while messaging a capturer, so no callback path can
@@ -98,6 +93,19 @@ void macVNCCaptureSessionReset(void);
 
 size_t macVNCCaptureSessionCount(void);
 
+/*
+ * Whether the CURRENT session's streams are excluding this application, i.e.
+ * whether what a successful SetSelfExcluded(true) established is still true.
+ *
+ * False when there is no session, and false again after a rebuild: the
+ * exclusion is state on an SCStream and Build always constructs the default
+ * filter, so a server stop/start silently un-hides us. Nothing reports that,
+ * which is why it must be ASKED - a curtain whose windows are up over a stream
+ * that no longer excludes them is the one state the raise/lift ordering exists
+ * to prevent, and the curtain's controller polls this to catch it.
+ */
+bool macVNCCaptureSessionSelfExcluded(void);
+
 void macVNCCaptureSessionStart(void);
 void macVNCCaptureSessionStopAndWait(void);
 
@@ -140,7 +148,9 @@ typedef void (*MacVNCCaptureExclusionCompletion)(void *context, bool success);
  * The exclusion lives on the streams of the CURRENT session only: it is state
  * on an SCStream, and Build always constructs the default filter, so a session
  * rebuilt after a server stop/start no longer excludes us. Whoever decides when
- * the curtain is up must re-establish or drop it; this module does not.
+ * the curtain is up must re-establish or drop it; this module does not - it
+ * only answers macVNCCaptureSessionSelfExcluded() honestly, including for a
+ * request that confirms after the session it belonged to was replaced.
  */
 void macVNCCaptureSessionSetSelfExcluded(bool excluded,
                                          MacVNCCaptureExclusionCompletion completion,
