@@ -1,6 +1,7 @@
 #import "MacVNCCurtainWindow.h"
 
 #import <AppKit/AppKit.h>
+#import <QuartzCore/QuartzCore.h>   /* CATransaction: the commit, see the header */
 
 #import "MacVNCCaptureSession.h"
 #import "MacVNCCurtainInput.h"   /* macVNCCurtainInputEventIsSelfInjected */
@@ -8,6 +9,31 @@
 double macVNCCurtainOccluderAlpha(bool covering)
 {
     return covering ? MACVNC_CURTAIN_ALPHA : MACVNC_CURTAIN_ARMING_ALPHA;
+}
+
+/* Main thread only, like every other window operation in this file, so a plain
+ * global needs no lock: the seam is installed by a test before it drives
+ * anything, and never while a curtain is in flight. */
+static MacVNCCurtainWindowCommit gWindowCommit;
+
+void macVNCCurtainSetWindowCommit(MacVNCCurtainWindowCommit commit)
+{
+    MacVNCCurtainWindowCommit installed = [commit copy];   /* heap block */
+    MacVNCCurtainWindowCommit previous = gWindowCommit;
+    gWindowCommit = installed;
+    [previous release];
+}
+
+void macVNCCurtainCommitWindowChanges(void)
+{
+    if (gWindowCommit) {
+        gWindowCommit();
+        return;
+    }
+    /* The one call that makes the change the window server's problem instead
+       of this run-loop pass's. -displayIfNeeded was measured NOT to do it: it
+       draws pixels, and the curtain's opacity is not a pixel. */
+    [CATransaction flush];
 }
 
 /* ------------------------------------------------------------------------- */
@@ -127,6 +153,66 @@ double macVNCCurtainOccluderAlpha(bool covering)
 - (NSArray<NSNumber *> *)screenIdentifiers
 {
     return [[_identifiers copy] autorelease];
+}
+
+/*
+ * The audit: the one place that treats "the curtain is up" as a claim to be
+ * checked rather than a flag to be trusted.
+ *
+ * Two halves, and the first alone would have caught the failure it exists for:
+ * an empty occluder set is a set every operation succeeds on. A desk with no
+ * attached screen, or one where every window creation was refused, leaves
+ * -setCovering: and -setVisible: iterating nothing, and everything above them
+ * reports success. The second half is the one no test can reach: what AppKit
+ * and the window server say about the windows themselves.
+ */
+- (NSString *)auditCoverageForPhase:(NSString *)phase
+{
+    NSArray<NSNumber *> *attached = [_occluders attachedScreenIdentifiers];
+    if (!attached)
+        attached = @[];
+
+    NSString *failure = nil;
+    if (!_visible)
+        failure = @"the occluders are not ordered in";
+    else if (!_covering)
+        failure = @"the occluders are not at the covering alpha";
+    else if (attached.count == 0)
+        failure = @"no screen is attached, so nothing is covered";
+
+    NSLog(@"macVNC: curtain audit at %@: screens attached=%lu, with an "
+          @"occluder=%lu, visible=%d covering=%d",
+          phase, (unsigned long)attached.count,
+          (unsigned long)_identifiers.count, _visible ? 1 : 0,
+          _covering ? 1 : 0);
+
+    BOOL canMeasure = [_occluders respondsToSelector:
+                          @selector(occluderReportForScreen:failureReason:)];
+    for (NSNumber *identifier in attached) {
+        if (![_identifiers containsObject:identifier]) {
+            /* A display with no occluder is the local user watching the remote
+               party work, which is the one thing this feature exists to stop -
+               so it is a failure even when every OTHER screen is covered. */
+            NSLog(@"macVNC: curtain audit at %@: screen %@ has NO occluder",
+                  phase, identifier);
+            if (!failure)
+                failure = [NSString stringWithFormat:
+                              @"screen %@ has no occluder", identifier];
+            continue;
+        }
+        if (!canMeasure)
+            continue;
+        NSString *reason = nil;
+        NSString *report = [_occluders occluderReportForScreen:identifier
+                                                 failureReason:&reason];
+        NSLog(@"macVNC: curtain audit at %@: %@%@", phase,
+              report ? report : @"(no report)",
+              reason ? [@" -> NOT COVERING: " stringByAppendingString:reason]
+                     : @"");
+        if (reason && !failure)
+            failure = reason;
+    }
+    return failure;
 }
 
 - (void)dealloc
@@ -296,6 +382,12 @@ static NSNumber *screenIdentifier(NSScreen *screen)
 
     _windows[identifier] = window;
     [window release];
+    /* Committed BEFORE this window can be ordered in: an alpha the window
+       server has not been told about is not the alpha it composites, and the
+       default is 1.0 - a window ordered in with the arming alpha still pending
+       would be a full black frame on both sides, which is the exact opposite
+       of what "armed" means. */
+    macVNCCurtainCommitWindowChanges();
     return YES;
 }
 
@@ -304,6 +396,103 @@ static NSNumber *screenIdentifier(NSScreen *screen)
     _covering = covering;
     for (NSNumber *identifier in _windows)
         _windows[identifier].covering = covering;
+    /* THE FIX. Without this the loop above is a change AppKit agrees with and
+       the compositor never hears about: measured live as "alpha=0.99900 |
+       window server alpha=0.00392" with the curtain "up" and nothing covered.
+       Committed here, at the seam that owns the windows, so every route to an
+       alpha change - raise, lift, hot-plug through
+       -synchronizeWithAttachedScreens - commits by construction rather than by
+       each caller remembering to. */
+    macVNCCurtainCommitWindowChanges();
+}
+
+/*
+ * What is ACTUALLY on the glass, from the two authorities that know.
+ *
+ * AppKit answers what this process asked for; the window server answers what
+ * it agreed to composite, and only the second can contradict the state
+ * machine. Nothing here reads a window NAME - the one part of
+ * CGWindowListCopyWindowInfo that TCC gates - so this can raise no permission
+ * prompt on a path that runs while a remote party is already connected.
+ */
+- (NSString *)occluderReportForScreen:(NSNumber *)identifier
+                        failureReason:(NSString **)reason
+{
+    MacVNCCurtainKeyWindow *window = _windows[identifier];
+    if (!window) {
+        if (reason)
+            *reason = [NSString stringWithFormat:
+                          @"screen %@ has no occluder window", identifier];
+        return [NSString stringWithFormat:@"screen %@: no window", identifier];
+    }
+
+    NSScreen *screen = [self screenForIdentifier:identifier];
+    NSRect screenFrame = screen ? screen.frame : NSZeroRect;
+
+    CGRect serverBounds = CGRectNull;
+    double serverAlpha = -1.0;
+    long serverLayer = 0;
+    BOOL serverKnows = NO;
+    BOOL serverOnScreen = NO;
+    CFArrayRef list =
+        CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow,
+                                   (CGWindowID)window.windowNumber);
+    if (list) {
+        if (CFArrayGetCount(list) > 0) {
+            NSDictionary *info =
+                (NSDictionary *)CFArrayGetValueAtIndex(list, 0);
+            serverKnows = YES;
+            serverAlpha = [info[(id)kCGWindowAlpha] doubleValue];
+            serverLayer = [info[(id)kCGWindowLayer] longValue];
+            /* kCGWindowIsOnscreen is ABSENT, not false, for a window the
+               compositor is not showing. */
+            serverOnScreen = [info[(id)kCGWindowIsOnscreen] boolValue];
+            CGRectMakeWithDictionaryRepresentation(
+                (CFDictionaryRef)info[(id)kCGWindowBounds], &serverBounds);
+        }
+        CFRelease(list);
+    }
+
+    NSString *failure = nil;
+    if (!screen)
+        failure = [NSString stringWithFormat:
+                      @"screen %@ is no longer attached", identifier];
+    else if (!window.isVisible)
+        failure = [NSString stringWithFormat:@"window %ld is not ordered in",
+                                             (long)window.windowNumber];
+    else if (!serverKnows || !serverOnScreen)
+        failure = [NSString stringWithFormat:
+                      @"the window server does not list window %ld on screen",
+                      (long)window.windowNumber];
+    else if (!NSContainsRect(window.frame, screenFrame))
+        failure = [NSString stringWithFormat:
+                      @"window %ld frame %@ does not cover screen %@ %@",
+                      (long)window.windowNumber,
+                      NSStringFromRect(window.frame), identifier,
+                      NSStringFromRect(screenFrame)];
+    /* Half an 8-bit level of tolerance, the same criterion the alpha itself is
+       derived from: the window server round-trips the value through a float. */
+    else if (serverAlpha < MACVNC_CURTAIN_ALPHA - (0.5 / 255.0))
+        failure = [NSString stringWithFormat:
+                      @"window %ld composites at alpha %.5f, not the covering "
+                      @"alpha %.5f",
+                      (long)window.windowNumber, serverAlpha,
+                      (double)MACVNC_CURTAIN_ALPHA];
+
+    if (reason)
+        *reason = failure;
+    return [NSString stringWithFormat:
+               @"screen %@: window %ld frame=%@ screenFrame=%@ alpha=%.5f "
+               @"visible=%d onActiveSpace=%d level=%ld opaque=%d "
+               @"occlusion=0x%lx | window server: known=%d onscreen=%d "
+               @"layer=%ld alpha=%.5f bounds=%@",
+               identifier, (long)window.windowNumber,
+               NSStringFromRect(window.frame), NSStringFromRect(screenFrame),
+               (double)window.alphaValue, window.isVisible ? 1 : 0,
+               window.isOnActiveSpace ? 1 : 0, (long)window.level,
+               window.isOpaque ? 1 : 0, (unsigned long)window.occlusionState,
+               serverKnows ? 1 : 0, serverOnScreen ? 1 : 0, serverLayer,
+               serverAlpha, NSStringFromRect(NSRectFromCGRect(serverBounds))];
 }
 
 - (void)setOccludersKeyboardSink:(id<MacVNCCurtainKeyboardSink>)sink
@@ -351,6 +540,7 @@ static NSNumber *screenIdentifier(NSScreen *screen)
         return;
     [window orderOut:nil];
     [_windows removeObjectForKey:identifier];
+    macVNCCurtainCommitWindowChanges();
 }
 
 - (void)updateOccluderGeometryForScreen:(NSNumber *)identifier
@@ -361,6 +551,7 @@ static NSNumber *screenIdentifier(NSScreen *screen)
         return;
     if (!NSEqualRects(window.frame, screen.frame))
         [window setFrame:screen.frame display:YES];
+    macVNCCurtainCommitWindowChanges();
 }
 
 - (void)setOccludersVisible:(BOOL)visible
@@ -384,6 +575,12 @@ static NSNumber *screenIdentifier(NSScreen *screen)
             [window orderOut:nil];
         }
     }
+    /* Same rule as the covering alpha, applied to ordering: this module never
+       returns from a change with the window server still holding the previous
+       state, because the very next thing that happens - a shareable-content
+       discovery in ANOTHER process, or this curtain's own audit - asks the
+       window server what is true. */
+    macVNCCurtainCommitWindowChanges();
 }
 
 - (void)dealloc
@@ -602,17 +799,8 @@ static void curtainExclusionCompleted(void *context, bool success)
         return;
 
     if (!success) {
-        _state = MacVNCCurtainStateDown;
-        /* The armed windows go away while they are still invisible, so a failed
-           raise leaked nothing to either side - which is the property the live
-           run already confirmed and this reordering must not spend. */
-        [_windowSet setVisible:NO];
-        [_windowSet setCovering:NO];
-        /* Best effort: a late success from the swap we gave up on must not
-           leave the stream excluding an application whose windows are not even
-           shown. Nothing waits for this. */
-        [_exclusion setCaptureExcludesOwnApplication:NO completion:nil];
-        [self finishWithSuccess:NO];
+        [self failRaiseBecause:
+                  @"the capture filter swap failed or never answered"];
         return;
     }
 
@@ -622,8 +810,42 @@ static void curtainExclusionCompleted(void *context, bool success)
     [_windowSet synchronizeWithAttachedScreens];
     [_windowSet setCovering:YES];
     [_windowSet setVisible:YES];
+
+    /* MEASURE, THEN CLAIM. Everything above this line is bookkeeping, and
+       bookkeeping is never wrong about itself: with no screen attached, or
+       with every window creation refused, the two calls above iterate an empty
+       set and succeed at nothing. This is the only step that can say the local
+       screen is NOT black - and it logs the numbers either way, so one run of
+       the app settles what the next reading of this file cannot.
+
+       Nothing turns the run loop between making the windows opaque and
+       ordering them out again below, so a refused raise still costs the local
+       user no black frame. */
+    NSString *notCovering = [_windowSet auditCoverageForPhase:@"raise"];
+    if (notCovering) {
+        [self failRaiseBecause:notCovering];
+        return;
+    }
+
     _state = MacVNCCurtainStateUp;
     [self finishWithSuccess:YES];
+}
+
+/* The one fail-safe way out of a raise, whatever refused it. */
+- (void)failRaiseBecause:(NSString *)reason
+{
+    NSLog(@"macVNC: curtain raise refused - %@", reason);
+    _state = MacVNCCurtainStateDown;
+    /* The windows go away, so a failed raise leaves nothing on the local
+       screen: the property the live run confirmed for the armed case, and the
+       one the measurement above must not spend for the covering one. */
+    [_windowSet setVisible:NO];
+    [_windowSet setCovering:NO];
+    /* Best effort: a late success from the swap we gave up on must not
+       leave the stream excluding an application whose windows are not even
+       shown. Nothing waits for this. */
+    [_exclusion setCaptureExcludesOwnApplication:NO completion:nil];
+    [self finishWithSuccess:NO];
 }
 
 - (void)liftWithCompletion:(MacVNCCurtainCompletion)completion
@@ -639,6 +861,7 @@ static void curtainExclusionCompleted(void *context, bool success)
         return;
     }
 
+    MacVNCCurtainState previous = _state;
     _state = MacVNCCurtainStateLifting;
     /* Lifting out of Raising abandons that raise: it is told it failed here
        (before its completion is dropped), and the token taken on the next line
@@ -646,6 +869,15 @@ static void curtainExclusionCompleted(void *context, bool success)
        show anything. */
     [self finishWithSuccess:NO];
     NSUInteger token = [self beginTransitionWithCompletion:completion];
+
+    /* The other end of the bracket: the raise measured this curtain on the way
+       up and this measures it on the way down, so the log says what the
+       windows were doing over the WHOLE interval a viewer was connected -
+       which is what a sample taken somewhere in the middle actually asks.
+       Only out of Up: a raise still in flight is not supposed to be covering,
+       and auditing it would report a state as a failure. */
+    if (previous == MacVNCCurtainStateUp)
+        (void)[_windowSet auditCoverageForPhase:@"lift"];
 
     /* Windows FIRST - the exact reverse of the raise. Everything after this
        point can fail without leaving the local user in front of a black

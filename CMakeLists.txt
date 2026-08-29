@@ -29,6 +29,9 @@ find_library(APPKIT_LIBRARY         AppKit           REQUIRED)
 find_library(SERVICE_MANAGEMENT     ServiceManagement REQUIRED)
 find_library(SECURITY_LIBRARY       Security REQUIRED)
 find_library(APPLICATION_SERVICES   ApplicationServices REQUIRED)
+# CATransaction, and nothing else: the curtain's window changes must reach the
+# WINDOW SERVER inside the run-loop pass that makes them, not at the end of it.
+find_library(QUARTZ_CORE            QuartzCore       REQUIRED)
 
 #
 # Sources
@@ -155,6 +158,7 @@ target_link_libraries(${PROJECT_NAME}
     ${SERVICE_MANAGEMENT}
     ${SECURITY_LIBRARY}
     ${APPLICATION_SERVICES}
+    ${QUARTZ_CORE}
 )
 
 #
@@ -198,12 +202,15 @@ if(BUILD_TESTING)
     # built on request and never added to ctest.
     #   cmake --build <dir> --target vnc_probe reference_server
     # See tests/measure_felt_latency.sh for the numbers they produced.
+    # vnc_probe takes its password from PROBE_PASSWORD and its region from
+    # PROBE_REGION in the environment; run it with no arguments for details.
     find_library(VNCCLIENT_LIB vncclient PATHS ${CMAKE_PREFIX_PATH}/lib)
     find_library(VNCSERVER_LIB vncserver PATHS ${CMAKE_PREFIX_PATH}/lib)
     if(VNCCLIENT_LIB)
         add_executable(vnc_probe EXCLUDE_FROM_ALL tests/vnc_probe.c)
         target_include_directories(vnc_probe PRIVATE ${CMAKE_PREFIX_PATH}/include)
         target_link_libraries(vnc_probe ${VNCCLIENT_LIB})
+        target_compile_options(vnc_probe PRIVATE -Wall -Wextra)
     endif()
     if(VNCSERVER_LIB)
         add_executable(reference_server EXCLUDE_FROM_ALL tests/reference_server.c)
@@ -277,7 +284,7 @@ if(BUILD_TESTING)
     target_link_libraries(test_curtain_window
         ${SCREEN_CAPTURE_KIT} ${CORE_MEDIA} ${CORE_VIDEO}
         ${FOUNDATION} ${APPKIT_LIBRARY} ${CARBON_LIBRARY}
-        ${APPLICATION_SERVICES} ${CMAKE_THREAD_LIBS_INIT})
+        ${APPLICATION_SERVICES} ${QUARTZ_CORE} ${CMAKE_THREAD_LIBS_INIT})
     add_test(NAME curtain_window COMMAND test_curtain_window)
 
     # "Should the curtain be up": every raise and lift transition above the
@@ -312,7 +319,7 @@ if(BUILD_TESTING)
     target_link_libraries(test_curtain_controller
         ${SCREEN_CAPTURE_KIT} ${CORE_MEDIA} ${CORE_VIDEO}
         ${FOUNDATION} ${APPKIT_LIBRARY} ${CARBON_LIBRARY}
-        ${APPLICATION_SERVICES} ${CMAKE_THREAD_LIBS_INIT})
+        ${APPLICATION_SERVICES} ${QUARTZ_CORE} ${CMAKE_THREAD_LIBS_INIT})
     add_test(NAME curtain_controller COMMAND test_curtain_controller)
 
     # The input half of the curtain: the three preconditions, the pass-through
@@ -335,7 +342,7 @@ if(BUILD_TESTING)
     target_link_libraries(test_curtain_input
         ${SCREEN_CAPTURE_KIT} ${CORE_MEDIA} ${CORE_VIDEO}
         ${FOUNDATION} ${APPKIT_LIBRARY} ${CARBON_LIBRARY}
-        ${APPLICATION_SERVICES} ${CMAKE_THREAD_LIBS_INIT})
+        ${APPLICATION_SERVICES} ${QUARTZ_CORE} ${CMAKE_THREAD_LIBS_INIT})
     add_test(NAME curtain_input COMMAND test_curtain_input)
 
     add_executable(test_compositor tests/test_compositor.c src/CompositeFramebuffer.c)
