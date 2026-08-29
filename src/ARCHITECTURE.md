@@ -220,7 +220,61 @@ Objective-C glue:
   (`macVNCCurtainPolicyArm`) and lifts when the secret changes in the 8 bytes
   the server can actually see (`macVNCCurtainPolicySecretChanged`). Raised
   state is never persisted and nothing raises at launch. Nothing constructs it
-  in production yet: the tap it needs is the next task.
+  in production yet: the preference and the wiring are the next task.
+- **MacVNCCurtainInput** — the curtain's input half: the event tap that
+  swallows what the person standing at the Mac types and clicks, and the only
+  path back in (it feeds **MacVNCCurtainPolicy** and reports the unlock). Six
+  rules carry it. (1) THREE preconditions, not one: Accessibility trust
+  (checked with the prompt SUPPRESSED — no code path here may raise a macOS
+  dialog), a non-NULL `CGEventTapCreate`, AND the keyboard bits still present
+  in the EFFECTIVE mask, read back with `CGGetEventTapList`
+  (`macVNCCurtainInputMaskKeepsKeyboard`). The third is not a re-check of the
+  first: without trust the keyboard bits are silently cleared while the tap is
+  still created, which would give a black screen with a fully live keyboard
+  typing into invisible applications — so any of the three failing means
+  `-beginSuppressingInput` answers NO and the curtain stays down. (2) Our own
+  injection passes through UNMODIFIED: `CGEventPost` delivers to taps at the
+  same location, so the remote viewer's own input arrives here. It is
+  recognised by `MACVNC_CURTAIN_INPUT_EVENT_MAGIC`, set on the server's private
+  event source in **MacVNCInput**, plus the posting process id for the one
+  legacy path (`CGPostMouseEvent`) that has no source to tag
+  (`macVNCCurtainInputEventIsSelfInjected`). (3) The tap runs on ITS OWN thread
+  and run loop, and is torn down there (disable, invalidate, release) —
+  cross-thread invalidation is a use-after-free, and a wedge on the main thread
+  would take the callback and the AppKit path down together. (4) The callback
+  cannot block: no shared lock, no I/O, no sleep, no keystroke logging; the
+  unlock policy has exactly ONE owner (the tap thread), so keys arriving
+  through the window are carried onto it rather than locked against. (5) FOCUS:
+  the curtain window is NOT key while the tap is healthy — the tap is the only
+  path to the policy and a key window would collect the REMOTE party's
+  keystrokes — and becomes key ONLY while the tap path is known unavailable
+  (secure input on, or a tap that could not be re-enabled), where its `keyDown:`
+  applies the same self-injection tag. Secure input is polled ON THE TAP'S OWN
+  THREAD (`IsSecureEventInputEnabled` is not thread safe), corroborated by
+  "keys stopped while the pointer kept moving"
+  (`macVNCCurtainInputSecureInputSuspected`), and the focus hand-over LATCHES
+  for the rest of the suppression session — taking focus is an app activation,
+  which deactivates the secure-input owner, so following the next reading back
+  down would flap at 10 Hz with the local user's password split across two
+  applications. (6) The watchdog measures LATENCY, NOT SILENCE
+  (`macVNCCurtainInputWatchdogEvaluate`) — with one deliberate exception. An
+  idle user produces no EVENTS, so "no callbacks for N seconds" would fire in
+  the feature's normal state; a callback is therefore judged only by how long
+  it has been in flight, and the main-thread heartbeat by how long it has gone
+  unacknowledged. THE POLL IS THE EXCEPTION: it is timer-driven, so nobody has
+  to act for it to run, and its silence IS a fault — it is the only detector of
+  a tap that went deaf without saying so (a disabled tap never delivers the
+  disable notification, which is itself an event) and it shares the run loop
+  with the callback, so without that clause a wedged tap thread reads as
+  healthy while the screen is black and the keyboard live. Unobserved time is
+  not a wedge: `CLOCK_MONOTONIC` advances while a frozen process sleeps, so the
+  watchdog measures its OWN observation gap first and re-baselines rather than
+  killing a healthy server on lid-open. Its action, when something really is
+  stuck, is `abort()`, because process death is the only thing that restores
+  the SCREEN from outside a wedged main thread. Everything above the tap seam is exercised by
+  `tests/test_curtain_input.m` with real `CGEvent`s and no tap at all; the tap
+  itself, the thread, the watchdog's abort and the AppKit key window need a
+  device. Nothing constructs it in production yet.
 
 ### The dirty hint is an optimisation, never the source of truth
 
@@ -270,7 +324,13 @@ pixels rather than points.
 - **MacVNCPermissions / MacVNCPermissionsPanel** — Screen-Recording &
   Accessibility checks and the gate panel.
 - **MacVNCInput** — keyboard/pointer injection; owns the CGEventSource, keymaps
-  and input mutexes; geometry is injected via `macVNCInputSetContext`.
+  and input mutexes; geometry is injected via `macVNCInputSetContext`. The
+  event source carries `MACVNC_CURTAIN_INPUT_EVENT_MAGIC` so a raised curtain's
+  tap can tell the remote viewer's input from the local user's; the one path
+  that cannot be tagged (`CGPostMouseEvent`, kept because it takes a button
+  MASK plus a position, so drags and double clicks need no synthesis) is
+  identified by process id instead. The tag is inert without a tap, so a server
+  that never raises a curtain behaves exactly as before.
 - **MacVNCPowerMgmt** — two session-scoped IOPMAssertions (system sleep +
   display sleep), created by the capture reconciler when the first client
   connects and released when the last leaves; `undim` is a throttled activity
@@ -295,7 +355,7 @@ pixels rather than points.
 
 ## Tests
 
-`ctest` runs 39 targets (the number is enforced: `architecture_doc` compares
+`ctest` runs 40 targets (the number is enforced: `architecture_doc` compares
 this sentence against CMakeLists.txt's `add_test` count, so a target added or
 commented out fails the suite until this line is updated deliberately). Every
 assertion added here is checked by mutating the source and confirming the test

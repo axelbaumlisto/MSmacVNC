@@ -3,6 +3,7 @@
 #import <AppKit/AppKit.h>
 
 #import "MacVNCCaptureSession.h"
+#import "MacVNCCurtainInput.h"   /* macVNCCurtainInputEventIsSelfInjected */
 
 /* ------------------------------------------------------------------------- */
 /* The window set: bookkeeping only, over the occluder seam.                  */
@@ -12,6 +13,11 @@
     id<MacVNCCurtainOccluders> _occluders;   /* retained */
     NSMutableArray<NSNumber *> *_identifiers;
     BOOL _visible;
+    BOOL _acceptsKeyboardFocus;
+    id<MacVNCCurtainKeyboardSink> _keyboardSink;   /* NOT retained: the input
+                                                      module owns this set's
+                                                      lifetime, not the other
+                                                      way round */
 }
 
 - (instancetype)initWithOccluders:(id<MacVNCCurtainOccluders>)occluders
@@ -69,6 +75,25 @@
     return _visible;
 }
 
+- (void)setAcceptsKeyboardFocus:(BOOL)accepts
+{
+    _acceptsKeyboardFocus = accepts;
+    if ([_occluders respondsToSelector:@selector(setOccludersAcceptKeyboardFocus:)])
+        [_occluders setOccludersAcceptKeyboardFocus:accepts];
+}
+
+- (BOOL)acceptsKeyboardFocus
+{
+    return _acceptsKeyboardFocus;
+}
+
+- (void)setKeyboardSink:(id<MacVNCCurtainKeyboardSink>)sink
+{
+    _keyboardSink = sink;
+    if ([_occluders respondsToSelector:@selector(setOccludersKeyboardSink:)])
+        [_occluders setOccludersKeyboardSink:sink];
+}
+
 - (NSArray<NSNumber *> *)screenIdentifiers
 {
     return [[_identifiers copy] autorelease];
@@ -87,11 +112,64 @@
 /* The AppKit occluders: one borderless black window per NSScreen.            */
 /* ------------------------------------------------------------------------- */
 
+/*
+ * The window itself, as a subclass for exactly two reasons.
+ *
+ * 1. A borderless window cannot become key at all unless it says so, and this
+ *    one may say so ONLY while the tap path is unavailable - the flag is set
+ *    from outside, never decided here.
+ * 2. Its -keyDown: must ignore OUR OWN injected events by the same tag the tap
+ *    uses. While this window is key, the remote viewer's keystrokes are posted
+ *    into this session and land here; feeding them to the unlock policy would
+ *    let whoever holds the VNC password lift the curtain by typing it
+ *    remotely, which is the one party the escape hatch is not for.
+ */
+@interface MacVNCCurtainKeyWindow : NSWindow
+@property (nonatomic, assign) BOOL acceptsKeyboardFocus;
+@property (nonatomic, assign) id<MacVNCCurtainKeyboardSink> keyboardSink;  /* not retained */
+@end
+
+@implementation MacVNCCurtainKeyWindow
+
+- (BOOL)canBecomeKeyWindow
+{
+    return _acceptsKeyboardFocus;
+}
+
+- (void)keyDown:(NSEvent *)event
+{
+    /* Dropped rather than passed to super, which would beep: a window that is
+       still key after the focus was taken back must not feed a policy it is no
+       longer allowed to feed. -setOccludersAcceptKeyboardFocus: is what makes
+       this state momentary. */
+    if (!_acceptsKeyboardFocus)
+        return;
+    if (macVNCCurtainInputEventIsSelfInjected((CGEventType)[event type],
+                                              [event CGEvent]))
+        return;                       /* the remote party's own keystroke */
+    NSString *characters = [event characters];
+    NSUInteger length = characters.length;
+    if (length == 0 || !_keyboardSink)
+        return;
+    /* Bounded on purpose: the policy's own buffer is fixed too, and a held key
+       must not turn into an unbounded copy. */
+    unichar buffer[16];
+    if (length > 16)
+        length = 16;
+    [characters getCharacters:buffer range:NSMakeRange(0, length)];
+    [_keyboardSink curtainWindowDidReceiveCharacters:(const uint16_t *)buffer
+                                               count:(size_t)length];
+}
+
+@end
+
 @interface MacVNCCurtainScreenOccluders : NSObject <MacVNCCurtainOccluders>
 @end
 
 @implementation MacVNCCurtainScreenOccluders {
-    NSMutableDictionary<NSNumber *, NSWindow *> *_windows;
+    NSMutableDictionary<NSNumber *, MacVNCCurtainKeyWindow *> *_windows;
+    BOOL _acceptsKeyboardFocus;
+    id<MacVNCCurtainKeyboardSink> _keyboardSink;   /* not retained */
 }
 
 - (instancetype)init
@@ -138,11 +216,12 @@ static NSNumber *screenIdentifier(NSScreen *screen)
     /* screen:nil plus a frame in global coordinates: with a screen argument the
        rect would be interpreted relative to THAT screen's origin, which reads
        like a bug on a multi-display desk. */
-    NSWindow *window = [[NSWindow alloc] initWithContentRect:screen.frame
-                                                   styleMask:NSWindowStyleMaskBorderless
-                                                     backing:NSBackingStoreBuffered
-                                                       defer:NO
-                                                      screen:nil];
+    MacVNCCurtainKeyWindow *window =
+        [[MacVNCCurtainKeyWindow alloc] initWithContentRect:screen.frame
+                                                  styleMask:NSWindowStyleMaskBorderless
+                                                    backing:NSBackingStoreBuffered
+                                                      defer:NO
+                                                     screen:nil];
     /* MRR: an NSWindow that releases itself when closed would be freed out from
        under this dictionary. */
     [window setReleasedWhenClosed:NO];
@@ -167,10 +246,53 @@ static NSNumber *screenIdentifier(NSScreen *screen)
        supposed to be a picture. */
     [window setIgnoresMouseEvents:YES];
     [window setFrame:screen.frame display:NO];
+    /* A screen attached while the tap path is already unavailable gets the
+       same focus rules as the rest, rather than a window that silently cannot
+       take the password. */
+    window.acceptsKeyboardFocus = _acceptsKeyboardFocus;
+    window.keyboardSink = _keyboardSink;
 
     _windows[identifier] = window;
     [window release];
     return YES;
+}
+
+- (void)setOccludersKeyboardSink:(id<MacVNCCurtainKeyboardSink>)sink
+{
+    _keyboardSink = sink;
+    for (NSNumber *identifier in _windows)
+        _windows[identifier].keyboardSink = sink;
+}
+
+- (void)setOccludersAcceptKeyboardFocus:(BOOL)accepts
+{
+    _acceptsKeyboardFocus = accepts;
+    MacVNCCurtainKeyWindow *candidate = nil;
+    for (NSNumber *identifier in _windows) {
+        MacVNCCurtainKeyWindow *window = _windows[identifier];
+        window.acceptsKeyboardFocus = accepts;
+        if (!candidate && window.isVisible)
+            candidate = window;
+    }
+    if (accepts && candidate) {
+        /* The ONE place this LSUIElement app takes focus, and it is the lesser
+           evil: the alternative is the local user typing their password into
+           whatever application the remote party is watching. */
+        [NSApp activateIgnoringOtherApps:YES];
+        [candidate makeKeyWindow];
+    } else if (!accepts) {
+        /* -resignKeyWindow is a NOTIFICATION hook, not a way to give key status
+           up: AppKit calls it, clients do not, and calling it transfers
+           nothing - the window stays key and keeps eating keystrokes,
+           including the remote viewer's, which the tap has already passed
+           through. Deactivating the application is the documented way back,
+           and it is the exact undo of the -activateIgnoringOtherApps: above.
+           (The lift orders these windows out moments later, which would also
+           resign key - but this module publishes the rule as its own, so it
+           has to hold on its own.) */
+        if ([NSApp isActive])
+            [NSApp deactivate];
+    }
 }
 
 - (void)removeOccluderForScreen:(NSNumber *)identifier

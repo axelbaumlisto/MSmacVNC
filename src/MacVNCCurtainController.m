@@ -27,6 +27,15 @@
 
 - (BOOL)captureIsLive
 {
+    /* SAY WHAT THIS MEANS: "a capturer OBJECT exists", not "a stream is
+       delivering frames". macVNCCaptureSessionStopAndWait() stops every
+       capturer but does NOT detach the list, so a session that has been
+       stopped - the keep-warm stop between viewers, for instance - still
+       counts here. It is the cheap half of the invariant; the half that
+       notices a stream which stopped or errored is -noteCaptureStreamStopped,
+       reported by the delegate, and the half that notices a session rebuilt
+       underneath us is -captureExcludesOwnApplication. Reading this alone as
+       "the remote viewer is seeing something" would be wrong. */
     return macVNCCaptureSessionCount() > 0;
 }
 
@@ -302,6 +311,12 @@
     assert([NSThread isMainThread]);
     if (generation != _transitionGeneration)
         return;                    /* a lift already abandoned this raise */
+    /* A surface that answers the SAME raise twice - same generation, two
+       completions - would otherwise arm a second heartbeat chain, and two
+       chains mean two beats per interval forever. The generation guard cannot
+       see that; only "there was a raise in flight" can. */
+    if (!_raiseInFlight)
+        return;
     _raiseInFlight = NO;
     if (!success) {
         NSLog(@"macVNC: curtain was not raised - the capture filter swap failed");

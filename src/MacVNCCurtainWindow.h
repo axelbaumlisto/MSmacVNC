@@ -87,6 +87,24 @@
 typedef void (^MacVNCCurtainCompletion)(BOOL success);
 
 /*
+ * Where the keys that reach the curtain WINDOW go.
+ *
+ * The curtain window is NOT key while the event tap is healthy: the tap is the
+ * only path to the unlock policy, and a key window would collect the REMOTE
+ * party's keystrokes, which are posted into this session and land in whatever
+ * window has focus. The window takes focus only while the tap path is known
+ * unavailable - secure input on, or a tap that could not be re-enabled - which
+ * is the one case where the local user typing their password would otherwise
+ * be typing it into an application the remote party is watching. The input
+ * module owns that decision; this header owns only the delivery.
+ */
+@protocol MacVNCCurtainKeyboardSink <NSObject>
+/* One key-down that reached the curtain window, as UTF-16 units exactly as
+ * -[NSEvent characters] produces them. Main thread. */
+- (void)curtainWindowDidReceiveCharacters:(const uint16_t *)units count:(size_t)count;
+@end
+
+/*
  * The screens the curtain covers, as an injectable seam.
  *
  * Identifiers are CGDirectDisplayIDs boxed in NSNumber (NSScreen's
@@ -107,6 +125,16 @@ typedef void (^MacVNCCurtainCompletion)(BOOL success);
 - (void)updateOccluderGeometryForScreen:(NSNumber *)identifier;
 /** Orders every occluder in (with orderFrontRegardless) or out. */
 - (void)setOccludersVisible:(BOOL)visible;
+
+@optional
+/*
+ * The focus half, optional because it arrived with the event tap and the
+ * bookkeeping above is testable without it: an occluder set that does not
+ * implement these is one that models windows but not focus, which is what the
+ * hot-plug and visibility tests need.
+ */
+- (void)setOccludersAcceptKeyboardFocus:(BOOL)accepts;
+- (void)setOccludersKeyboardSink:(id<MacVNCCurtainKeyboardSink>)sink;
 @end
 
 /*
@@ -127,6 +155,18 @@ typedef void (^MacVNCCurtainCompletion)(BOOL success);
 
 /** Shows or hides every occluder. Idempotent. */
 - (void)setVisible:(BOOL)visible;
+
+/*
+ * Whether the curtain windows may become key, and who receives what is typed
+ * into them. Both default to "no" / nil, which is the state a healthy tap
+ * requires; only the input module turns them on, and only while the tap path
+ * is unavailable. Kept as bookkeeping here so the rule is testable without
+ * AppKit: what a test asserts is that focus is NEVER handed over except in
+ * that state.
+ */
+- (void)setAcceptsKeyboardFocus:(BOOL)accepts;
+- (void)setKeyboardSink:(id<MacVNCCurtainKeyboardSink>)sink;
+@property (nonatomic, readonly) BOOL acceptsKeyboardFocus;
 
 @property (nonatomic, readonly) BOOL visible;
 /** Screens currently carrying an occluder, in attachment order. */
