@@ -781,6 +781,30 @@ static void testOnlyOneHeartbeatChainSurvivesARelift(void)
     [rig finish];
 }
 
+static void testASurfaceThatAnswersOneRaiseTwiceArmsOneHeartbeat(void)
+{
+    Rig *rig = readyRig();
+    rig.curtain.answersImmediately = NO;
+
+    [rig.controller setAuthenticatedClientCount:1];
+    [rig.curtain answerHeldAtIndex:0 with:YES];
+    assert(rig.controller.curtainRaised);
+
+    /* The same raise answered a second time. The generation is unchanged - it
+       IS the raise this belongs to - so only "there was a raise in flight" can
+       reject it. Without that, a second heartbeat chain is armed and every beat
+       from then on is doubled, forever. */
+    [rig.curtain answerHeldAtIndex:0 with:YES];
+
+    rig.clock.now += MACVNC_CURTAIN_HEARTBEAT_NANOSECONDS;
+    assert([rig.scheduler fire] == 1);
+    rig.clock.now += MACVNC_CURTAIN_HEARTBEAT_NANOSECONDS;
+    assert([rig.scheduler fire] == 1);
+    assert(rig.controller.curtainRaised);
+
+    [rig finish];
+}
+
 static void testConditionsAreRecheckedWhenTheSwapCompletes(void)
 {
     Rig *rig = readyRig();
@@ -870,6 +894,7 @@ int main(void)
         testUnobservedTimeLifts();
         testHeartbeatStopsWhenTheCurtainIsDown();
         testOnlyOneHeartbeatChainSurvivesARelift();
+        testASurfaceThatAnswersOneRaiseTwiceArmsOneHeartbeat();
         testConditionsAreRecheckedWhenTheSwapCompletes();
         testClientLeavingDuringTheSwapAbandonsIt();
         testFailedRaiseRestoresInput();

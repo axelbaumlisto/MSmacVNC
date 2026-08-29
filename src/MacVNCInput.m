@@ -5,12 +5,39 @@
 #include <rfb/keysym.h>
 #import <AppKit/AppKit.h>
 
+#import "MacVNCCurtainInput.h"   /* MACVNC_CURTAIN_INPUT_EVENT_MAGIC */
 #import "RFBKeySym.h"
 #import "PointerState.h"
 #import "KeyboardModifierState.h"
 #import "MacVNCPowerMgmt.h"
 
-/* The server's private event source */
+/*
+ * The server's private event source, TAGGED.
+ *
+ * Curtain mode installs an event tap that swallows local input, and
+ * CGEventPost delivers to taps at the same location, so the remote viewer's
+ * own keyboard and pointer arrive at that tap like anyone else's. The tag is
+ * how the tap tells them apart and passes them through unmodified.
+ *
+ * Every injection path in this file, and how each one is identified:
+ *   - CGEventCreateKeyboardEvent + CGEventPost (KbdAddEvent, the Fn
+ *     auto-release, macVNCInputResetModifiers): built from THIS source, so
+ *     they carry the tag.
+ *   - CGEventCreateScrollWheelEvent + CGEventPost (PtrAddEvent): same source,
+ *     same tag.
+ *   - CGPostMouseEvent (PtrAddEvent's move/button path): the legacy API takes
+ *     a button MASK plus a position, which is why it is here at all - drags
+ *     and double clicks need no synthesis - and it has NO source to tag. It is
+ *     identified by the posting process id instead
+ *     (kCGEventSourceUnixProcessID == getpid(), measured to be stamped on
+ *     these events); see macVNCCurtainInputEventIsSelfInjected.
+ *   - No CGWarpMouseCursorPosition anywhere in this file: warping produces no
+ *     event for a tap to swallow, and the cursor is moved by the line above.
+ *
+ * Setting user data on our own private source changes nothing for anyone but a
+ * tap: no tap, no difference, which is what keeps a server with the curtain
+ * never raised behaving exactly as before.
+ */
 static CGEventSourceRef eventSource;
 
 /* Character->keycode maps for the current layout: base, Shift, Alt-Gr, Shift+Alt-Gr. */
@@ -515,6 +542,9 @@ rfbBool macVNCInputStart(void)
         rfbLog("Could not create CGEventSource\n");
         return FALSE;
     }
+    /* See the note on eventSource: this is what makes remote input survive a
+       raised curtain. */
+    CGEventSourceSetUserData(eventSource, MACVNC_CURTAIN_INPUT_EVENT_MAGIC);
     memset(&pointerState, 0, sizeof(pointerState));
     macVNCClearModifiers(&keyboardModifierState);
     if (!keyboardInit()) {
