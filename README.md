@@ -66,7 +66,8 @@ The app stores normal settings in macOS preferences. Use **Preferences…** from
 - encryption policy: allow unencrypted viewers, or require TLS;
 - allowed client networks: checked active network rows plus manual IPv4/CIDR entries;
 - explicit allow-all mode;
-- **frame rate** and **image quality** (see below).
+- **frame rate** and **image quality** (see below);
+- **curtain mode** — off by default (see below).
 
 The network policy is IPv4-only in this version. The IPv6 listener is disabled in every mode until IPv6 allowlist semantics exist. Empty allowed-client lists are fail-closed unless **Allow all IPv4 clients** is explicitly checked.
 
@@ -137,6 +138,7 @@ security handler at the head of its list and sends the list from the head, and
 registers its own classic handler on the first connection, i.e. after ours. So
 plain is always listed first, and refusing it is the only reliable lever.
 
+
 | Setting | Effect |
 |---|---|
 | **Allow unencrypted connections (default)** | Both paths accepted; the viewer decides. Works with viewers that have no TLS support. |
@@ -151,6 +153,80 @@ this setting is a second layer.
 Measured cost of TLS on the same 57.5 MB frame: **0.13 s of server CPU
 unencrypted versus 0.35 s with TLS**, about 3x — worth knowing before requiring
 it on a busy machine.
+
+### Curtain mode
+
+Off by default. When it is on, the arrival of an authenticated viewer hides this
+Mac's screen behind a black window on every display and starts swallowing local
+keyboard and pointer input; the remote viewer keeps a live desktop and a working
+keyboard and mouse. Typing the VNC password on this Mac's own keyboard lifts the
+curtain for the rest of that run of the app.
+
+**The Mac is not locked.** Nothing here logs anybody out, locks the screen or
+asks macOS for a lock. Behind the curtain the account is exactly as unlocked as
+it was a second earlier — anyone with physical access to the machine, its power
+button or its ports is not blocked by this feature and is not meant to be.
+Locking the Mac is a separate action that this feature never performs, and it
+is not a substitute either: the login window is not something macVNC captures
+or covers, so a locked Mac ends the remote session's view as well as the local
+one.
+
+What it does not cover, plainly:
+
+- **Assistive-technology overlays and the mouse cursor draw above the curtain.**
+  The curtain window sits at the screen-saver window level, and the cursor layer
+  and accessibility panels are composited above it.
+- **Media, brightness and volume keys are not blocked.** The event tap asks for
+  keyboard, modifier and pointer events; system-defined events (the function-row
+  keys) are not in that mask, so they keep working while the curtain is up.
+- **Secure input lifts the curtain.** While any process holds Secure Event Input
+  (Terminal's *Secure Keyboard Entry*, a focused password field, a keychain
+  prompt), keyboard events are withheld from event taps: local keys would stop
+  being swallowed, and the password typed to lift the curtain would go into
+  whatever application has focus — which the remote party is watching. macVNC
+  therefore takes the curtain down instead.
+- **A silently dropped connection can hold the curtain up** until that connection
+  is reaped. The curtain is tied to authenticated clients, and a viewer whose
+  network vanished without a TCP reset still counts as connected until
+  LibVNCServer notices. It is seconds to minutes, not indefinite, but it is not
+  instant.
+- **The remote party is who raises it.** The curtain goes up because somebody
+  connected with the VNC password, so anyone holding that password can blind the
+  person standing at this Mac. That is the whole reason the setting ships off,
+  and the reason the way back in exists.
+- **Accessibility permission is required.** Without it the event tap is created
+  but deaf to the keyboard, which would be a black screen with a fully live
+  keyboard typing into invisible applications; macVNC refuses to raise the
+  curtain at all in that state. An empty VNC password is refused for the same
+  reason: a curtain with no way back in.
+- **Changing the password in Preferences does not change the escape hatch**
+  until macVNC is restarted. The curtain is armed with the password the *running*
+  server authenticates against, whether that came from Preferences or from
+  `MACVNC_PASSWORD_FILE`.
+- **VoiceOver users:** while local input is swallowed, keystrokes reach nothing,
+  so VoiceOver gives no feedback and announces nothing about the curtain. There
+  is no audible indication that the screen is covered.
+
+If the curtain is up and the password will not lift it, the ways out are, in
+order:
+
+1. **From another machine over ssh:** `ssh you@thismac 'killall macVNC'`. The
+   curtain windows die with the process and local input is restored. This needs
+   a second machine and an ssh route into this one; it is the only software
+   remedy that does not depend on the tap behaving.
+2. **Hardware.** Hold the power button to force a restart, or close the lid of a
+   laptop and reopen it — display sleep lifts the curtain, and so does time that
+   passed while the process was frozen. On a desktop, the power button is the
+   answer. This is the last resort, and it is the only one that does not depend
+   on any part of macVNC still working.
+
+What is deliberately **not** promised: that Control-Command-Q, the menu bar, the
+Apple menu or any other key combination will reach the Lock Screen while the
+curtain is up. An active event tap swallows those keystrokes before macOS sees
+them, so a document that promised them would be promising a way out that is not
+there. Assume the keyboard does nothing except type the VNC password.
+
+### Environment overrides
 
 Environment overrides remain for debug/headless launches:
 
@@ -244,6 +320,9 @@ The implementation separates layout, pixel composition, capture lifecycle, input
 - Mixed-scale adjacent layouts whose native pixel rectangles overlap after logical-origin normalization are rejected rather than composited incorrectly.
 - Composite width is padded with zero-filled black columns to a multiple of four for strict VNC viewer compatibility.
 - The CLI process does not survive reboot unless a supervised service is configured.
+- Curtain mode hides the screen and swallows local input; it never locks the Mac,
+  and it does not cover assistive-technology overlays, the cursor layer or the
+  media/brightness keys. See **Curtain mode** above.
 
 ## License
 

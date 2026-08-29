@@ -17,6 +17,7 @@ NSString * const MacVNCKeyAutoAllowedClients = @"autoAllowedClients";
 NSString * const MacVNCKeyCaptureFPS = @"captureFPS";
 NSString * const MacVNCKeyImageProfile = @"imageProfile";
 NSString * const MacVNCKeyEncryption = @"encryption";
+NSString * const MacVNCKeyCurtain = @"curtainMode";
 
 NSString * const MacVNCBundleID = @"net.christianbeier.macVNC";
 
@@ -30,7 +31,8 @@ NSArray<NSString *> *macVNCAllDefaultsKeys(void)
              MacVNCKeyAutoAllowedClients,
              MacVNCKeyCaptureFPS,
              MacVNCKeyImageProfile,
-             MacVNCKeyEncryption];
+             MacVNCKeyEncryption,
+             MacVNCKeyCurtain];
 }
 
 void macVNCRegisterDefaults(void)
@@ -47,6 +49,11 @@ void macVNCRegisterDefaults(void)
         MacVNCKeyCaptureFPS:        @(MACVNC_CAPTURE_FPS_DEFAULT),
         MacVNCKeyImageProfile:      @(MACVNC_IMAGE_PROFILE_DEFAULT_NAME),
         MacVNCKeyEncryption:        @(MACVNC_ENCRYPTION_DEFAULT_NAME),
+        /* OFF, and the one default in this file whose value protects the person
+           who is NOT operating the app: the curtain is raised by the remote
+           viewer, so a shipped-on default would hand every holder of the VNC
+           password the ability to blind whoever is standing at the Mac. */
+        MacVNCKeyCurtain:           @NO,
         /* Registered so a fresh install is symmetric with a saved one: the
            loopback entry in allowedClients was put there by US, not typed by the
            user, and the "extra allowed clients" field must not present it as if

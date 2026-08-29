@@ -53,6 +53,14 @@ int main(void)
                    &encryption));
         assert(encryption == MacVNCEncryptionOptional);
 
+        /* Curtain mode is OFF on a fresh install, and that is a SAFETY value
+           rather than a taste one: the curtain is raised by whoever connects
+           with the VNC password, so a default of YES would let the remote
+           party blind the person standing at the Mac without anybody at this
+           machine having asked for it. Pinned as a VALUE for the same reason
+           the performance defaults are. */
+        assert([defaults boolForKey:MacVNCKeyCurtain] == NO);
+
         /* Server basics. */
         assert([defaults integerForKey:MacVNCKeyPort] == MacVNCDefaultPort);
         assert([defaults integerForKey:MacVNCKeyDisplay] == -1);

@@ -20,22 +20,28 @@ static const NSInteger kListenTagRowBase   = 1000; /* + interface row index */
    give a label column and a control column so the magic NSMakeRect numbers read
    as intent, not arbitrary constants. */
 static const CGFloat kFormWidth   = 520;
-static const CGFloat kFormHeight  = 298;
+static const CGFloat kFormHeight  = 358;
 static const CGFloat kColLabelX   = 0;
 static const CGFloat kColCtrlX    = 160;
 static const CGFloat kRowHeight   = 22;
-static const CGFloat kRowPort     = 268;
-static const CGFloat kRowListen   = 232;
-static const CGFloat kRowCustom   = 202;
-static const CGFloat kRowAllowed  = 172;
-static const CGFloat kRowManual   = 138;
-static const CGFloat kRowScroll   = 104;
-static const CGFloat kRowHint     = 80;
+static const CGFloat kRowPort     = 328;
+static const CGFloat kRowListen   = 292;
+static const CGFloat kRowCustom   = 262;
+static const CGFloat kRowAllowed  = 232;
+static const CGFloat kRowManual   = 198;
+static const CGFloat kRowScroll   = 164;
+static const CGFloat kRowHint     = 140;
 /* Performance rows sit below the network block: they are the settings people
    revisit, and they must not push the allowlist off the top of the sheet. */
-static const CGFloat kRowFrameRate = 54;
-static const CGFloat kRowQuality   = 28;
-static const CGFloat kRowEncrypt   = 2;
+static const CGFloat kRowFrameRate = 114;
+static const CGFloat kRowQuality   = 88;
+static const CGFloat kRowEncrypt   = 62;
+/* Curtain mode sits at the bottom, alone, with room for the help text that has
+   to say what it does AND what it does not do (it hides the screen; it does
+   not lock the Mac). A one-line tooltip could not carry that. */
+static const CGFloat kRowCurtain     = 36;
+static const CGFloat kRowCurtainHelp = 0;
+static const CGFloat kCurtainHelpHeight = 32;
 
 static const NSInteger kCustomAddressLabelTag = 9101;
 static const NSInteger kCustomAddressFieldTag = 9102;
@@ -91,6 +97,7 @@ typedef struct {
     int captureFPS;
     __unsafe_unretained NSString *imageProfileName;
     __unsafe_unretained NSString *encryptionName;
+    BOOL curtainEnabled;
 } MacVNCPreferencesValues;
 
 @interface MacVNCPreferencesForm : NSObject
@@ -103,6 +110,7 @@ typedef struct {
 @property (nonatomic, retain) NSPopUpButton *frameRatePopup;
 @property (nonatomic, retain) NSPopUpButton *imageQualityPopup;
 @property (nonatomic, retain) NSPopUpButton *encryptionPopup;
+@property (nonatomic, retain) NSButton *curtainCheckbox;
 @end
 
 @implementation MacVNCPreferencesForm
@@ -117,6 +125,7 @@ typedef struct {
     [_frameRatePopup release];
     [_imageQualityPopup release];
     [_encryptionPopup release];
+    [_curtainCheckbox release];
     [super dealloc];
 }
 @end
@@ -334,6 +343,34 @@ typedef struct {
     }
     [encryptPopup selectItemWithTag:selectedEncryption];
 
+    /* Curtain mode. The help text below the checkbox is not decoration: this
+       is the only setting whose whole point is that the person at the Mac
+       stops seeing their own screen, so the words have to say exactly what is
+       true - the screen is hidden, local input is swallowed, the VNC password
+       typed HERE lifts it, and the Mac is NOT locked. Claiming a lock would be
+       the one lie that could get someone to walk away from an unlocked
+       machine. */
+    NSButton *curtainCheckbox =
+        [NSButton checkboxWithTitle:@"Hide this Mac\u2019s screen while a viewer is connected"
+                             target:nil
+                             action:NULL];
+    curtainCheckbox.frame = NSMakeRect(kColLabelX, kRowCurtain, kFormWidth, kRowHeight);
+    curtainCheckbox.state = values.curtainEnabled ? NSControlStateValueOn
+                                                  : NSControlStateValueOff;
+    curtainCheckbox.toolTip = @"Off by default: the curtain goes up when a viewer "
+                               "connects, so anyone holding the VNC password can "
+                               "hide the screen from the person at this Mac.";
+    NSTextField *curtainHelp = [NSTextField wrappingLabelWithString:
+        @"While a viewer is connected, this Mac\u2019s screen is hidden and local "
+        @"keyboard and pointer input are blocked. Typing the VNC password on this "
+        @"Mac lifts it for the rest of the session. The Mac itself stays unlocked, "
+        @"and Accessibility permission is required or the curtain refuses to go up."];
+    curtainHelp.frame = NSMakeRect(kColLabelX, kRowCurtainHelp, kFormWidth, kCurtainHelpHeight);
+    curtainHelp.textColor = NSColor.secondaryLabelColor;
+    curtainHelp.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
+
+    [form addSubview:curtainCheckbox]; [form addSubview:curtainHelp];
+
     [form addSubview:rateLabel]; [form addSubview:ratePopup];
     [form addSubview:qualityLabel]; [form addSubview:qualityPopup];
     [form addSubview:encryptLabel]; [form addSubview:encryptPopup];
@@ -357,6 +394,7 @@ typedef struct {
     result.frameRatePopup = ratePopup;
     result.imageQualityPopup = qualityPopup;
     result.encryptionPopup = encryptPopup;
+    result.curtainCheckbox = curtainCheckbox;
     return result;
 }
 
@@ -434,7 +472,8 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
                                      BOOL allowAllConfirmed,
                                      int captureFPS,
                                      NSString *imageProfileName,
-                                     NSString *encryptionName)
+                                     NSString *encryptionName,
+                                     BOOL curtainEnabled)
 {
     /* Plaintext in defaults, by explicit request; also clears any older
        Keychain copy. */
@@ -462,6 +501,12 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
     if (macVNCParseEncryptionPolicy(encryptionName.UTF8String, &parsedEncryption))
         [defaults setObject:encryptionName forKey:MacVNCKeyEncryption];
 
+    /* Unlike every other setting here, this one takes effect WITHOUT a restart:
+       AppDelegate observes the defaults change, so switching it off while the
+       curtain is up brings the screen back rather than waiting for the next
+       launch. That direction is the one that must not be deferred. */
+    [defaults setBool:curtainEnabled forKey:MacVNCKeyCurtain];
+
     [defaults synchronize];
 }
 
@@ -480,6 +525,7 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
                                  ?: @(MACVNC_IMAGE_PROFILE_DEFAULT_NAME);
     NSString *encryptionName = [defaults stringForKey:MacVNCKeyEncryption]
                                ?: @(MACVNC_ENCRYPTION_DEFAULT_NAME);
+    BOOL curtainEnabled = [defaults boolForKey:MacVNCKeyCurtain];
     NSArray<NSDictionary *> *networkRows = macVNCActiveNetworkRows();
     NSString *manualAllowed = macVNCManualAllowedText(
         currentAllowed, [defaults stringForKey:MacVNCKeyAutoAllowedClients]);
@@ -494,6 +540,7 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
         .captureFPS = captureFPS,
         .imageProfileName = imageProfileName,
         .encryptionName = encryptionName,
+        .curtainEnabled = curtainEnabled,
     };
     MacVNCPreferencesForm *form = [self buildFormWithValues:values];
 
@@ -591,7 +638,8 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
 
     macVNCPersistPreferences(defaults, newPort, form.pwdField.stringValue,
                              newMode, newAddress, plan, newAllowAll,
-                             newCaptureFPS, newImageProfile, newEncryption);
+                             newCaptureFPS, newImageProfile, newEncryption,
+                             form.curtainCheckbox.state == NSControlStateValueOn);
 }
 
 @end

@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 #import "MacVNCCurtainController.h"
+#import "MacVNCCurtainInput.h"
 
 /*
  * "Should the curtain be up" - every transition, with no device, no tap, no
@@ -146,6 +147,12 @@
 /* How often the password was pulled out of storage: a refusal that was already
    decided must not read it at all. */
 @property (nonatomic, assign) NSUInteger reads;
+/* EVERY copy ever handed out, kept alive here so a test can read their bytes
+   after the callers have finished with them. All of them, not just the last:
+   one raise reads the secret twice (arming, then the invariant re-check), and
+   a test that looked only at the newest copy would pass with the older one
+   left in the clear. */
+@property (nonatomic, retain) NSMutableArray<NSMutableData *> *handedOut;
 @end
 
 @implementation FakeSecretSource
@@ -153,7 +160,16 @@
 - (NSData *)copyCurtainSecret
 {
     ++_reads;
-    return [_secret retain];
+    if (!_secret)
+        return nil;
+    /* A FRESH mutable copy per call, exactly like the production source: the
+       caller owns the storage outright, which is what makes wiping it legal
+       rather than vandalism against whoever else still holds it. */
+    NSMutableData *copy = [[NSMutableData alloc] initWithData:_secret];
+    if (!_handedOut)
+        self.handedOut = [NSMutableArray array];
+    [_handedOut addObject:copy];
+    return copy;                    /* +1, per the protocol's `copy` naming */
 }
 
 - (void)setSecretText:(NSString *)text
@@ -164,6 +180,7 @@
 - (void)dealloc
 {
     [_secret release];
+    [_handedOut release];
     [super dealloc];
 }
 
@@ -853,6 +870,33 @@ static void testClientLeavingDuringTheSwapAbandonsIt(void)
     [rig finish];
 }
 
+/*
+ * The cleartext copy does not outlive its use.
+ *
+ * Every read of the secret allocates a fresh copy of the VNC password, and the
+ * curtain re-reads it on EVERY heartbeat while it is up - so releasing without
+ * wiping would sprinkle readable passwords through freed heap for the
+ * allocator to hand to whoever asks for memory next.
+ */
+static void testTheSecretCopyIsWipedBeforeItIsReleased(void)
+{
+    Rig *rig = raisedRig();
+
+    /* Arming the policy is one read and the invariant re-check that follows a
+       successful raise is another, so this is not a test about "the last
+       copy": every copy the curtain ever asked for has to come back zeroed. */
+    NSArray<NSMutableData *> *copies = rig.secretSource.handedOut;
+    assert(copies.count >= 2);
+    for (NSMutableData *handed in copies) {
+        assert(handed.length > 0);  /* a real password, not an empty one */
+        const uint8_t *bytes = handed.bytes;
+        for (NSUInteger i = 0; i < handed.length; ++i)
+            assert(bytes[i] == 0);
+    }
+
+    [rig finish];
+}
+
 static void testFailedRaiseRestoresInput(void)
 {
     Rig *rig = readyRig();
@@ -868,6 +912,271 @@ static void testFailedRaiseRestoresInput(void)
     assert([rig.scheduler fire] == 0);
 
     [rig finish];
+}
+
+/* ---------------------------------------------------------------------- */
+/* The wiring the production glue performs, minus the device.              */
+/*                                                                          */
+/* Everything above this line drives a FAKE suppression seam, which cannot   */
+/* observe the one property Task 4's header calls a coupling: that THIS      */
+/* controller, used as the input module's observer, undoes the keyboard      */
+/* focus hand-over that secure input triggers. The real MacVNCCurtainInput   */
+/* is used below, above a fake tap, so the composition is exercised rather   */
+/* than argued.                                                             */
+/* ---------------------------------------------------------------------- */
+
+@interface WiringTap : NSObject <MacVNCCurtainInputTap>
+@property (nonatomic, assign) NSMutableArray<NSString *> *log;   /* not owned */
+@property (nonatomic, assign) BOOL secureInput;
+@property (nonatomic, assign) NSUInteger stopCount;
+@end
+
+@implementation WiringTap
+
+- (BOOL)processIsTrustedForAccessibility { return YES; }
+
+- (BOOL)startWithEventMask:(uint64_t)eventMask
+                   handler:(id<MacVNCCurtainInputTapHandler>)handler
+{
+    (void)eventMask; (void)handler;
+    [_log addObject:@"tap-start"];
+    return YES;
+}
+
+- (uint64_t)effectiveEventMask { return MACVNC_CURTAIN_INPUT_EVENT_MASK; }
+- (BOOL)tapIsEnabled { return YES; }
+- (BOOL)reenableTap { return YES; }
+- (BOOL)secureInputIsEnabled { return _secureInput; }
+
+- (BOOL)performOnTapThread:(dispatch_block_t)block
+{
+    if (block)
+        block();
+    return YES;
+}
+
+- (void)stop
+{
+    ++_stopCount;
+    [_log addObject:@"tap-stop"];
+}
+
+@end
+
+@interface WiringFocus : NSObject <MacVNCCurtainInputFocus>
+@property (nonatomic, assign) NSMutableArray<NSString *> *log;   /* not owned */
+@property (nonatomic, assign) BOOL accepts;
+@end
+
+@implementation WiringFocus
+
+- (void)setAcceptsKeyboardFocus:(BOOL)accepts
+{
+    _accepts = accepts;
+    [_log addObject:accepts ? @"focus-to-curtain" : @"focus-not-curtain"];
+}
+
+- (void)setKeyboardSink:(id<MacVNCCurtainKeyboardSink>)sink { (void)sink; }
+
+@end
+
+/*
+ * The same one-way back reference the production glue uses: the controller
+ * retains the input, the input retains its observer, so the observer cannot be
+ * the controller itself without a cycle - and the construction order forces it
+ * anyway (the input must exist before the controller can be built with it).
+ */
+@interface WiringObserver : NSObject <MacVNCCurtainInputObserver>
+@property (nonatomic, assign) MacVNCCurtainController *controller;  /* not owned */
+@end
+
+@implementation WiringObserver
+- (void)noteLocalUnlockAccepted { [_controller noteLocalUnlockAccepted]; }
+- (void)setSecureInputActive:(BOOL)active { [_controller setSecureInputActive:active]; }
+- (void)noteInputSuppressionUnavailable { [_controller noteInputSuppressionUnavailable]; }
+@end
+
+/* The input module's hop to the main queue is a ZERO-delay schedule, which the
+   heartbeat's scheduler refuses on purpose; this one models the hop as what it
+   is - work that runs on a later main-queue turn. */
+@interface HopScheduler : NSObject <MacVNCCurtainScheduler>
+@property (nonatomic, retain) NSMutableArray<dispatch_block_t> *pending;
+@end
+
+@implementation HopScheduler
+
+- (instancetype)init
+{
+    if ((self = [super init]))
+        _pending = [[NSMutableArray alloc] init];
+    return self;
+}
+
+- (void)afterNanoseconds:(uint64_t)nanoseconds performBlock:(dispatch_block_t)block
+{
+    (void)nanoseconds;
+    if (block)
+        [_pending addObject:[[block copy] autorelease]];
+}
+
+- (NSUInteger)fire
+{
+    NSArray<dispatch_block_t> *due = [[_pending copy] autorelease];
+    [_pending removeAllObjects];
+    for (dispatch_block_t block in due)
+        block();
+    return due.count;
+}
+
+- (void)dealloc
+{
+    [_pending release];
+    [super dealloc];
+}
+
+@end
+
+/*
+ * Secure input, through the REAL input module, with this controller observing.
+ *
+ * The hand-over of the keyboard focus to the curtain window latches for the
+ * rest of the suppression session, and MacVNCCurtainKeyWindow's -keyDown:
+ * drops self-injected events - so an observer that did NOT lift would leave
+ * the curtain window key for the whole session and the remote viewer's
+ * KEYBOARD would die while their mouse kept working. What makes it safe is
+ * that the lift is synchronous with the hand-over: by the time the reporting
+ * block returns, suppression has ended and the focus is back.
+ */
+static void testSecureInputHandOverIsUndoneByTheControllersLift(void)
+{
+    NSMutableArray<NSString *> *log = [NSMutableArray array];
+    FakeCaptureHealth *health = [[[FakeCaptureHealth alloc] init] autorelease];
+    health.live = YES;
+    FakeCurtainSurface *curtain = [[[FakeCurtainSurface alloc] init] autorelease];
+    curtain.log = log;
+    curtain.health = health;
+    FakeSecretSource *secretSource = [[[FakeSecretSource alloc] init] autorelease];
+    [secretSource setSecretText:@"hunter2"];
+    ManualScheduler *heartbeats = [[[ManualScheduler alloc] init] autorelease];
+    HopScheduler *hops = [[[HopScheduler alloc] init] autorelease];
+    FakeClock *clock = [[[FakeClock alloc] init] autorelease];
+    WiringTap *tap = [[[WiringTap alloc] init] autorelease];
+    tap.log = log;
+    WiringFocus *focus = [[[WiringFocus alloc] init] autorelease];
+    focus.log = log;
+    WiringObserver *observer = [[[WiringObserver alloc] init] autorelease];
+
+    MacVNCCurtainInput *input =
+        [[[MacVNCCurtainInput alloc] initWithTap:tap
+                                           focus:focus
+                                        observer:observer
+                                    secretSource:secretSource
+                                       scheduler:hops
+                                           clock:clock] autorelease];
+    MacVNCCurtainController *controller =
+        [[[MacVNCCurtainController alloc] initWithCurtain:curtain
+                                         inputSuppression:input
+                                            captureHealth:health
+                                             secretSource:secretSource
+                                                scheduler:heartbeats
+                                                    clock:clock] autorelease];
+    observer.controller = controller;
+
+    [controller setCurtainPreferenceEnabled:YES];
+    [controller setServerRunning:YES];
+    [controller setAuthenticatedClientCount:1];
+    assert(controller.curtainRaised);
+    assert(input.suppressing);
+    /* While the tap is healthy the curtain window must NOT be key, or the
+       remote party's keystrokes would land in it. */
+    assert(!focus.accepts);
+    assert(!input.tapPathUnavailable);
+
+    tap.secureInput = YES;
+    [input handleTapPoll];              /* the tap thread's own poll */
+    assert(input.tapPathUnavailable);
+    /* Nothing has moved on the main thread yet: the report is a hop. */
+    assert(controller.curtainRaised);
+
+    assert([hops fire] == 1);           /* the hop lands on main */
+
+    assert(!controller.curtainRaised);
+    assert(!input.suppressing);
+    /* THE assertion this test exists for: the focus went to the curtain window
+       and came straight back, inside the one block, so the window is key for
+       zero run-loop iterations and the remote viewer's keyboard never dies. */
+    assert(!focus.accepts);
+    assert(tap.stopCount == 1);
+    assert([log isEqualToArray:(@[ @"tap-start", @"focus-not-curtain",
+                                   @"curtain-raise", @"focus-to-curtain",
+                                   @"curtain-lift", @"tap-stop",
+                                   @"focus-not-curtain" ])]);
+
+    /* And the run ends the way it does in production. */
+    [controller noteApplicationWillTerminate];
+    while ([heartbeats fire] > 0)
+        ;
+}
+
+/*
+ * WHICH count the wiring feeds this controller.
+ *
+ * Everything else in this file is behavioural, and this one cannot be: the
+ * choice lives in AppDelegate.m, which no test target compiles (it is the
+ * glue that owns NSApp, the status item and the server lifecycle). What CAN
+ * be pinned is the line itself, the same way tests/test_defaults.m pins the
+ * defaults header against its implementation.
+ *
+ * It is worth pinning because the mistake is invisible: feeding
+ * vncConnectedClients instead compiles, runs, passes every other test in this
+ * repository, and raises the curtain DURING the up-to-8 s first-frame wait -
+ * the local screen black while the remote viewer still holds a placeholder.
+ * tests/test_client_counts.m owns the other half, that the two counts really
+ * do differ inside that window.
+ */
+static void testTheWiringFeedsTheReceivingUpdatesCount(void)
+{
+    NSString *source =
+        [NSString stringWithContentsOfFile:@MACVNC_APP_DELEGATE_SOURCE
+                                  encoding:NSUTF8StringEncoding
+                                     error:NULL];
+    if (source.length == 0) {
+        fprintf(stderr, "FAIL cannot read AppDelegate.m\n");
+        abort();
+    }
+
+    /* The body of -refreshCurtainState, which is the one place that answers
+       "how many viewers may the curtain hide behind". Bounded at the next
+       method so a mention anywhere else in the file cannot satisfy this. */
+    NSRange start = [source rangeOfString:@"- (void)refreshCurtainState"];
+    if (start.location == NSNotFound) {
+        fprintf(stderr, "FAIL -refreshCurtainState is gone from AppDelegate.m\n");
+        abort();
+    }
+    NSRange rest = NSMakeRange(NSMaxRange(start), source.length - NSMaxRange(start));
+    NSRange end = [source rangeOfString:@"\n}\n" options:0 range:rest];
+    assert(end.location != NSNotFound);
+    NSString *body = [source substringWithRange:
+        NSMakeRange(rest.location, end.location - rest.location)];
+
+    /* Comments in that body explain the choice and name both counters, so the
+       check has to look at CODE. One statement, the one that produces the
+       number handed to -setAuthenticatedClientCount:. */
+    NSRange assignment =
+        [body rangeOfString:@"int clients = vncAuthenticatedClientsReceivingUpdates;"];
+    if (assignment.location == NSNotFound) {
+        fprintf(stderr, "FAIL the curtain is not fed "
+                        "vncAuthenticatedClientsReceivingUpdates\n");
+        abort();
+    }
+    /* And it is not fed the wide count instead - the exact reversion this
+       witness exists to catch. */
+    NSRange wide = [body rangeOfString:@"int clients = vncConnectedClients;"];
+    if (wide.location != NSNotFound) {
+        fprintf(stderr, "FAIL the curtain is fed vncConnectedClients, which "
+                        "moves before the first frame exists\n");
+        abort();
+    }
 }
 
 int main(void)
@@ -898,6 +1207,9 @@ int main(void)
         testConditionsAreRecheckedWhenTheSwapCompletes();
         testClientLeavingDuringTheSwapAbandonsIt();
         testFailedRaiseRestoresInput();
+        testTheSecretCopyIsWipedBeforeItIsReleased();
+        testSecureInputHandOverIsUndoneByTheControllersLift();
+        testTheWiringFeedsTheReceivingUpdatesCount();
         printf("curtain controller: all assertions passed\n");
     }
     return 0;

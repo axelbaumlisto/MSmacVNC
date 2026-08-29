@@ -131,13 +131,10 @@ MacVNCCurtainInputWatchdogVerdict macVNCCurtainInputWatchdogEvaluate(
 }
 
 /* ------------------------------------------------------------------------- */
-/* The window set is the focus seam. Declared HERE, exactly as the controller  */
-/* declares MacVNCCurtain's surface conformance, so the screen half stays      */
-/* unaware that an event tap exists.                                          */
+/* The window set is the focus seam; the conformance is declared in this       */
+/* module's HEADER (the wiring has to pass the curtain's own window set in),    */
+/* which leaves nothing but an empty implementation here.                      */
 /* ------------------------------------------------------------------------- */
-
-@interface MacVNCCurtainWindowSet (MacVNCCurtainInputFocus) <MacVNCCurtainInputFocus>
-@end
 
 @implementation MacVNCCurtainWindowSet (MacVNCCurtainInputFocus)
 @end
@@ -270,7 +267,7 @@ MacVNCCurtainInputWatchdogVerdict macVNCCurtainInputWatchdogEvaluate(
     NSData *secret = _secretSource ? [_secretSource copyCurtainSecret] : nil;
     bool armed = macVNCCurtainPolicyArm(&_policy, (const char *)secret.bytes,
                                         secret.length);
-    [secret release];
+    macVNCCurtainDiscardSecret(secret);
     if (!armed) {
         NSLog(@"macVNC: local input cannot be suppressed - there is no "
               @"password to type to lift the curtain");

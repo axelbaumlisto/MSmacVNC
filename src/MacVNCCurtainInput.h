@@ -151,7 +151,11 @@
  *    WOULD DIE WHILE THEIR MOUSE KEPT WORKING, because pointer events never go
  *    through a key window. So an observer that wants to keep the curtain up
  *    across secure input must also give the focus back, and this module offers
- *    no way to do that except ending suppression. Task 5 wires that observer.
+ *    no way to do that except ending suppression. AppDelegate wires that
+ *    observer, and it wires the one that lifts: the report reaches
+ *    MacVNCCurtainController through a one-way bridge, and the controller
+ *    lifts inside the very block that handed the focus over. The composition
+ *    is exercised in tests/test_curtain_controller.m, above a fake tap.
  */
 
 /*
@@ -356,6 +360,18 @@ MacVNCCurtainInputWatchdogVerdict macVNCCurtainInputWatchdogEvaluate(
 - (void)setKeyboardSink:(id<MacVNCCurtainKeyboardSink>)sink;
 @end
 
+/*
+ * The window set already publishes both selectors, so the conformance is a
+ * declaration and nothing more. It is declared HERE rather than in
+ * MacVNCCurtainWindow.h so the screen half stays unaware that an event tap
+ * exists - and in the HEADER rather than in the .m because the wiring
+ * (AppDelegate) has to hand THE curtain's own window set to this module: the
+ * window the local user may type into while the tap path is unavailable must
+ * be a window somebody actually shows.
+ */
+@interface MacVNCCurtainWindowSet (MacVNCCurtainInputFocus) <MacVNCCurtainInputFocus>
+@end
+
 /* Called BY the tap seam, ON the tap's own thread (except where noted). */
 @protocol MacVNCCurtainInputTapHandler <NSObject>
 /* One event. Returns the event to pass it on, or NULL to swallow it. */
@@ -412,11 +428,11 @@ MacVNCCurtainInputWatchdogVerdict macVNCCurtainInputWatchdogEvaluate(
  * The decisions, above the seam. Conforms to the suppression protocol the
  * controller already refuses to raise without.
  *
- * Nothing constructs this in production yet - the preference and the wiring
- * are the next task - so with no curtain ever raised, behaviour is exactly
- * what it was: no tap is created, and the only trace of this module in a
- * running server is the tag on the event source (MacVNCInput.m), which nothing
- * but a tap can read.
+ * AppDelegate constructs this at launch as the controller's suppression seam.
+ * Construction starts NOTHING: while curtain mode is switched off - the
+ * shipped default - no curtain is ever raised, so no tap is created, and the
+ * only trace of this module in a running server is the tag on the event source
+ * (MacVNCInput.m), which nothing but a tap can read.
  */
 /*
  * WHAT IS TESTED HERE, AND WHAT IS ONLY ARGUED.
