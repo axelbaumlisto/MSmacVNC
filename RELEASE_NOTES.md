@@ -1,3 +1,71 @@
+# macVNC 0.4.1
+
+## A leaked assertion was stopping this Mac's display from ever sleeping
+
+`IOPMAssertionDeclareUserActivity` is not a fire-and-forget nudge. It creates a
+`UserIsActive` assertion and hands back an ID that stays held until released.
+macVNC's own header denied this in two places - "holds no persistent assertion"
+and, of the release function, "no persistent assertion is held, so this is a
+no-op" - and the release was wired only to the server stopping, which under
+"Start at Login" never happens.
+
+Measured on a live machine: `pmset -g assertions` showed `macVNC remote session`
+held continuously for over three hours with no client connected, and with it
+held `pmset displaysleepnow` failed outright. The display could not idle-sleep
+at all. Once the fix was in, the same machine's display slept normally.
+
+The assertion is now released when the last viewer leaves, alongside the power
+assertions, and the header says what the code does. A test witness fails if the
+release is removed again.
+
+**This also retracts an earlier explanation.** A blank-screen incident was once
+attributed to the display having slept. It could not have: this assertion made
+display sleep impossible at the time. That incident remains unexplained, and it
+was never a macVNC defect - no VNC connection existed when it happened.
+
+## Wake-on-connect is now verified, not assumed
+
+With the leak fixed it was finally possible to test the thing the code always
+claimed. The display was allowed to idle-sleep (confirmed by the active display
+list emptying), then a VNC client connected: **both displays were back and
+serving real pixels within 6 seconds**, with no local input of any kind.
+
+## Closed-display mode (lid closed) - new, off by default, effect UNVERIFIED
+
+While a viewer is connected **and the power adaptor is in**, macVNC can ask the
+kernel not to sleep this Mac when the lid closes. macOS already does that when
+an external display is attached *and* the machine is on wall power; this relaxes
+it to wall power alone.
+
+Read this before enabling it. The flag is a single machine-wide bit shared with
+`powerd` and with apps such as Amphetamine. It has **no reference count**, the
+kernel returns success without saying what it did, the resulting state cannot be
+read back, and - unlike every other power API macVNC uses - **the kernel does
+not clear it when the process dies**. A crash while armed would otherwise leave
+the Mac unable to sleep on lid close until it reboots.
+
+So the record of "macVNC armed this" is written to disk *before* the kernel call
+and cleared *after* the release, and it carries the process id and the boot
+session. Recovery at launch acts only on a record from this boot whose owner is
+gone. A record from an earlier boot is discarded without touching the kernel -
+otherwise launching macVNC after a reboot would cancel Amphetamine's setting -
+and a record owned by another running macVNC is left alone. A record that cannot
+be persisted refuses the arm outright.
+
+It arms only on wall power, so a lid-shut laptop on battery still sleeps, and
+only while somebody is actually watching.
+
+**The effect itself is unverified.** The kernel publishes nothing to read back,
+and the only trigger that would republish it is a lid movement or a full system
+sleep. Every surrounding behaviour *is* verified on real hardware - it arms on
+connect, releases on the last disconnect, survives `SIGKILL` and is cleaned up
+at the next launch, discards a fabricated previous-boot record without any
+kernel call, and leaves a second live instance's record untouched - but whether
+the lid then keeps the Mac awake has not been observed. The Preferences text
+says so too.
+
+---
+
 # macVNC 0.4.0
 
 ## Curtain mode is NOT finished - it ships off, and this is why
