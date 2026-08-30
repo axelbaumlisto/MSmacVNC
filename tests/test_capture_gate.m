@@ -6,6 +6,7 @@
 #include <stdatomic.h>
 
 #include "mac.h"
+#include "MacVNCDisplayWake.h"
 
 /*
  * The injected capture-permission gate.
@@ -104,6 +105,12 @@ int main(void)
         assert(macVNCCaptureStartCountForTesting() == 1); /* warm reuse */
         assert(macVNCCaptureStopCountForTesting() == 0);
 
+        /* The display-wake assertion must be HELD while a viewer is connected.
+           It is declared on connect (and on input), and it is a real
+           UserIsActive assertion however much the old header denied it. */
+        macVNCWakeDisplays();
+        assert(macVNCDisplayWakeIsHoldingForTesting());
+
         /* Second disconnect: schedule stop with a 200ms window and wait it out. */
         macVNCSetCaptureKeepWarmForTesting(200ULL * 1000 * 1000);
         atomic_store(&vncConnectedClients, 0);
@@ -111,6 +118,23 @@ int main(void)
         for (int i = 0; i < 40 && macVNCCaptureStopCountForTesting() == 0; ++i)
             usleep(50000); /* up to 2s */
         assert(macVNCCaptureStopCountForTesting() == 1);
+
+        /* ...and RELEASED once the last viewer is gone. Without this witness the
+           assertion survived every disconnect and was only dropped when the
+           server itself stopped - which, under "Start at Login", is never. A
+           live machine showed it held for hours with nobody watching, and a
+           held UserIsActive assertion stops the display idle-sleeping at all.
+
+           Polled, not read once: the stop COUNTER is bumped at the top of the
+           timer body and the release happens a few statements later, so a bare
+           read here raced the very thing it is checking. */
+        bool released = false;
+        for (int i = 0; i < 40 && !released; ++i) {
+            released = !macVNCDisplayWakeIsHoldingForTesting();
+            if (!released)
+                usleep(50000); /* up to 2s */
+        }
+        assert(released);
 
         /* After the warm stop, a new client starts captures again. */
         atomic_store(&vncConnectedClients, 1);
