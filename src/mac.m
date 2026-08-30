@@ -43,6 +43,7 @@
 #import "NetworkPolicyResolver.h"
 #import "MacVNCDisplayWake.h"
 #import "MacVNCPowerMgmt.h"
+#import "MacVNCClamshell.h"
 #import "mac.h"
 #import <AppKit/AppKit.h>
 
@@ -689,6 +690,22 @@ static void reconcileCaptureState(void)
         dispatch_resume(timer);
     }
     pthread_mutex_unlock(&captureControlMutex);
+
+    /* Closed-display mode is reconciled here, unconditionally and OUTSIDE the
+       lock, and both properties were earned.
+
+       Unconditionally, because the two branches above are edge-triggered on
+       CAPTURE state, not on the client count: a viewer reconnecting inside the
+       30 s keep-warm window takes neither branch, so a re-evaluation hung off
+       them would silently skip that session. It also makes the release happen
+       when the last viewer actually leaves rather than 30 s later, which is
+       what the Preferences text promises.
+
+       Outside the lock, because this does a synchronous cfprefsd round trip and
+       three IOKit calls, and captureControlMutex serialises every connect and
+       disconnect. The stop branch already unlocks before its slow work for the
+       same reason. */
+    macVNCClamshellReevaluate();
 }
 
 /*
@@ -1100,6 +1117,9 @@ vncServerStopLocked(void)
        with captures never started (permission denied at connect) or a crash
        path must not leak the assertions either. Idempotent. */
     dimmingShutdown();
+    /* Before the display assertion, and unlike it, this one can outlive the
+       process: the kernel does not clear the clamshell bit for us. */
+    macVNCClamshellShutdown();
     macVNCReleaseDisplayAssertion();
     macVNCInputShutdown();
     macVNCClearStoredPassword();

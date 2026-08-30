@@ -3,6 +3,7 @@
 #include "CaptureRate.h"
 #include "MacVNCEncryptionPolicy.h"
 #include "MacVNCImageProfile.h"
+#import "MacVNCClamshell.h"
 #import "MacVNCDefaultsKeys.h"
 #import "MacVNCPassword.h"
 #import "MacVNCNetworkRows.h"
@@ -20,31 +21,40 @@ static const NSInteger kListenTagRowBase   = 1000; /* + interface row index */
    give a label column and a control column so the magic NSMakeRect numbers read
    as intent, not arbitrary constants. */
 static const CGFloat kFormWidth   = 520;
-static const CGFloat kFormHeight  = 402;
+static const CGFloat kFormHeight  = 494;
 static const CGFloat kColLabelX   = 0;
 static const CGFloat kColCtrlX    = 160;
 static const CGFloat kRowHeight   = 22;
-static const CGFloat kRowPort     = 372;
-static const CGFloat kRowListen   = 336;
-static const CGFloat kRowCustom   = 306;
-static const CGFloat kRowAllowed  = 276;
-static const CGFloat kRowManual   = 242;
-static const CGFloat kRowScroll   = 208;
-static const CGFloat kRowHint     = 184;
+static const CGFloat kRowPort     = 464;
+static const CGFloat kRowListen   = 428;
+static const CGFloat kRowCustom   = 398;
+static const CGFloat kRowAllowed  = 368;
+static const CGFloat kRowManual   = 334;
+static const CGFloat kRowScroll   = 300;
+static const CGFloat kRowHint     = 276;
 /* Performance rows sit below the network block: they are the settings people
    revisit, and they must not push the allowlist off the top of the sheet. */
-static const CGFloat kRowFrameRate = 158;
-static const CGFloat kRowQuality   = 132;
-static const CGFloat kRowEncrypt   = 106;
+static const CGFloat kRowFrameRate = 250;
+static const CGFloat kRowQuality   = 224;
+static const CGFloat kRowEncrypt   = 198;
 /* Curtain mode sits at the bottom, alone, with room for the help text that has
    to say what it does, what it does NOT do (it hides the screen; it does not
    lock the Mac), WHEN it starts doing it (the next connection, not this one)
    and what has not been verified (the blackout on a second display). A
    one-line tooltip could not carry that, and every one of those sentences is
    there because leaving it out would leave a false impression. */
-static const CGFloat kRowCurtain     = 80;
-static const CGFloat kRowCurtainHelp = 0;
+static const CGFloat kRowCurtain     = 172;
+static const CGFloat kRowCurtainHelp = 92;
 static const CGFloat kCurtainHelpHeight = 76;
+/* Closed-display mode sits below the curtain for the same reason the curtain
+   sits below everything else: it needs prose, not a tooltip. What it sets is a
+   machine-wide kernel flag that no other app can see, that macOS does not undo
+   when macVNC dies, and that we cannot read back to check - so the help text
+   has to name the precondition (the adaptor) and the fact that the effect is
+   unverified, rather than implying a setting as ordinary as a frame rate. */
+static const CGFloat kRowClamshell     = 66;
+static const CGFloat kRowClamshellHelp = 0;
+static const CGFloat kClamshellHelpHeight = 62;
 
 static const NSInteger kCustomAddressLabelTag = 9101;
 static const NSInteger kCustomAddressFieldTag = 9102;
@@ -101,6 +111,7 @@ typedef struct {
     __unsafe_unretained NSString *imageProfileName;
     __unsafe_unretained NSString *encryptionName;
     BOOL curtainEnabled;
+    BOOL clamshellEnabled;
 } MacVNCPreferencesValues;
 
 @interface MacVNCPreferencesForm : NSObject
@@ -114,6 +125,7 @@ typedef struct {
 @property (nonatomic, retain) NSPopUpButton *imageQualityPopup;
 @property (nonatomic, retain) NSPopUpButton *encryptionPopup;
 @property (nonatomic, retain) NSButton *curtainCheckbox;
+@property (nonatomic, retain) NSButton *clamshellCheckbox;
 @end
 
 @implementation MacVNCPreferencesForm
@@ -129,6 +141,7 @@ typedef struct {
     [_imageQualityPopup release];
     [_encryptionPopup release];
     [_curtainCheckbox release];
+    [_clamshellCheckbox release];
     [super dealloc];
 }
 @end
@@ -393,6 +406,39 @@ typedef struct {
 
     [form addSubview:curtainCheckbox]; [form addSubview:curtainHelp];
 
+    /* Closed-display mode. Three things must be said, and none of them fit in
+       a tooltip: it needs the power adaptor, it only holds while somebody is
+       watching, and its effect has not been observed - the kernel reports
+       success whatever happened and publishes nothing we can read back, so the
+       only proof is closing the lid. Saying "keeps your Mac awake with the lid
+       shut" flatly would be claiming a result we have never seen. */
+    NSButton *clamshellCheckbox =
+        [NSButton checkboxWithTitle:@"Keep running with the lid closed while a viewer is connected"
+                             target:nil
+                             action:NULL];
+    clamshellCheckbox.frame = NSMakeRect(kColLabelX, kRowClamshell, kFormWidth, kRowHeight);
+    clamshellCheckbox.state = values.clamshellEnabled ? NSControlStateValueOn
+                                                      : NSControlStateValueOff;
+    /* "As soon as" is now literally true, and it was not when this text was
+       first written: the release used to ride on the 30 s capture keep-warm
+       timer, so the Mac stayed lid-close-awake for half a minute after the last
+       viewer left. The reconciler is level-triggered on the client count. */
+    clamshellCheckbox.toolTip = @"Requires the power adaptor. Released as soon as "
+                                 "the last viewer disconnects or the adaptor is "
+                                 "unplugged.";
+    NSTextField *clamshellHelp = [NSTextField wrappingLabelWithString:
+        @"Only while the power adaptor is connected, and only while a viewer is "
+        @"actually connected \u2014 unplugging the adaptor releases it immediately, so a "
+        @"closed laptop on battery still sleeps. macOS already does this on its own "
+        @"when an external display is attached. NOT VERIFIED: the system reports "
+        @"success without saying what it did, and the only way to observe the result "
+        @"is to close the lid."];
+    clamshellHelp.frame = NSMakeRect(kColLabelX, kRowClamshellHelp, kFormWidth, kClamshellHelpHeight);
+    clamshellHelp.textColor = NSColor.secondaryLabelColor;
+    clamshellHelp.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
+
+    [form addSubview:clamshellCheckbox]; [form addSubview:clamshellHelp];
+
     [form addSubview:rateLabel]; [form addSubview:ratePopup];
     [form addSubview:qualityLabel]; [form addSubview:qualityPopup];
     [form addSubview:encryptLabel]; [form addSubview:encryptPopup];
@@ -417,6 +463,7 @@ typedef struct {
     result.imageQualityPopup = qualityPopup;
     result.encryptionPopup = encryptPopup;
     result.curtainCheckbox = curtainCheckbox;
+    result.clamshellCheckbox = clamshellCheckbox;
     return result;
 }
 
@@ -495,7 +542,8 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
                                      int captureFPS,
                                      NSString *imageProfileName,
                                      NSString *encryptionName,
-                                     BOOL curtainEnabled)
+                                     BOOL curtainEnabled,
+                                     BOOL clamshellEnabled)
 {
     /* Plaintext in defaults, by explicit request; also clears any older
        Keychain copy. */
@@ -529,7 +577,14 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
        launch. That direction is the one that must not be deferred. */
     [defaults setBool:curtainEnabled forKey:MacVNCKeyCurtain];
 
+    /* Also immediate, and here the immediacy is the safety property rather
+       than a convenience: unticking this box is how a user withdraws a
+       machine-wide flag, and deferring that to the next launch would leave the
+       Mac unable to sleep on lid close for as long as macVNC keeps running. */
+    [defaults setBool:clamshellEnabled forKey:MacVNCKeyClamshell];
+
     [defaults synchronize];
+    macVNCClamshellReevaluate();
 }
 
 - (void)runModal
@@ -548,6 +603,7 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
     NSString *encryptionName = [defaults stringForKey:MacVNCKeyEncryption]
                                ?: @(MACVNC_ENCRYPTION_DEFAULT_NAME);
     BOOL curtainEnabled = [defaults boolForKey:MacVNCKeyCurtain];
+    BOOL clamshellEnabled = [defaults boolForKey:MacVNCKeyClamshell];
     NSArray<NSDictionary *> *networkRows = macVNCActiveNetworkRows();
     NSString *manualAllowed = macVNCManualAllowedText(
         currentAllowed, [defaults stringForKey:MacVNCKeyAutoAllowedClients]);
@@ -563,6 +619,7 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
         .imageProfileName = imageProfileName,
         .encryptionName = encryptionName,
         .curtainEnabled = curtainEnabled,
+        .clamshellEnabled = clamshellEnabled,
     };
     MacVNCPreferencesForm *form = [self buildFormWithValues:values];
 
@@ -661,7 +718,8 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
     macVNCPersistPreferences(defaults, newPort, form.pwdField.stringValue,
                              newMode, newAddress, plan, newAllowAll,
                              newCaptureFPS, newImageProfile, newEncryption,
-                             form.curtainCheckbox.state == NSControlStateValueOn);
+                             form.curtainCheckbox.state == NSControlStateValueOn,
+                             form.clamshellCheckbox.state == NSControlStateValueOn);
 }
 
 @end
