@@ -5,6 +5,7 @@
 #include <stdio.h>
 
 #include "mac.h"
+#include "MacVNCDisplayWake.h"
 
 /*
  * The two client counts, and the window between them.
@@ -53,10 +54,19 @@ int main(void)
            first-frame wait. Captures must know about it - they are what makes
            the frame - and the curtain must NOT, because there is nothing to
            hide behind yet. */
+        assert(!macVNCDisplayWakeIsHoldingForTesting());
         void *waiting = macVNCBeginClientForTesting(false);
         assert(waiting != NULL);
         assert(connectedClients() == 1);
         assert(clientsReceivingUpdates() == 0);
+
+        /* The display wake is tied to COUNTING a client, not to accepting a
+           socket. It used to fire in newClient(), before authentication, which
+           meant anyone able to reach the port could light up this Mac's screen
+           without the password - measured with a deliberately wrong one - and
+           the UserIsActive assertion it created was never released, because an
+           unauthenticated client never reaches the reconciler that releases it. */
+        assert(macVNCDisplayWakeIsHoldingForTesting());
 
         /* Frames arrived: now it counts for the curtain too. */
         macVNCClientReceivedFirstFramesForTesting(waiting);

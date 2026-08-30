@@ -1,3 +1,31 @@
+# macVNC 0.4.2
+
+## An unauthenticated stranger could wake your screen
+
+`newClient()` woke the display the moment a TCP connection was accepted -
+before the password was checked. Measured on a sleeping machine: a connection
+carrying a deliberately wrong password lit up both displays. Anyone able to
+reach the port could do it, repeatedly, without ever knowing the password.
+
+The same line leaked the assertion 0.4.1 was released to fix. An
+unauthenticated client never increments the connected-client counter, so the
+reconciler that releases the `UserIsActive` assertion never ran for it: the
+assertion was held until some later *successful* session happened to end, or
+forever if none ever did. 0.4.1's fix covered only the authenticated path.
+
+The wake now happens where the client is counted - after authentication, where
+capture starts and where the release is already paired. Verified on a sleeping
+machine: a wrong password now leaves both displays asleep and creates no
+assertion, while a correct one wakes them in about a second and serves pixels.
+
+## Dead code removed
+
+Two `...ForTesting` hooks in the closed-display adapter had no callers. One of
+them overrode the wall-power precondition - the guard that stops a lid-shut
+laptop staying awake on battery - and it was compiled into the shipping app.
+
+---
+
 # macVNC 0.4.1
 
 ## A leaked assertion was stopping this Mac's display from ever sleeping

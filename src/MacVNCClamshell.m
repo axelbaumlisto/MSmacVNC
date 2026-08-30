@@ -38,10 +38,6 @@ static bool gStarted = false;
  */
 static atomic_bool gTerminating = false;
 
-#if defined(MACVNC_ENABLE_TEST_HOOKS)
-/* Atomic: read from client threads and the power callback, written by tests. */
-static _Atomic int gPowerOverride = -1;
-#endif
 
 /*
  * kPMSetClamshellSleepState is 12 in the public SDK header IOPMLibDefs.h. The
@@ -96,12 +92,6 @@ realEffects(void)
 static bool
 onWallPower(void)
 {
-#if defined(MACVNC_ENABLE_TEST_HOOKS)
-    int override = atomic_load(&gPowerOverride);
-    if (override >= 0)
-        return override != 0;
-#endif
-
     CFTypeRef blob = IOPSCopyPowerSourcesInfo();
     if (blob == NULL) {
         /* Unknown power state must not arm: the precondition exists to stop a
@@ -245,19 +235,3 @@ macVNCClamshellShutdown(void)
     }
 }
 
-#if defined(MACVNC_ENABLE_TEST_HOOKS)
-bool
-macVNCClamshellIsArmedForTesting(void)
-{
-    pthread_mutex_lock(&clamshellMutex);
-    bool armed = gArmed;
-    pthread_mutex_unlock(&clamshellMutex);
-    return armed;
-}
-
-void
-macVNCClamshellSetPowerSourceOverrideForTesting(int value)
-{
-    atomic_store(&gPowerOverride, value);
-}
-#endif
