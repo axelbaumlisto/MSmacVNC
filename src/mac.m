@@ -42,6 +42,7 @@
 #import "NetworkAccess.h"
 #import "NetworkPolicyResolver.h"
 #import "MacVNCDisplayWake.h"
+#import "DisplayReadiness.h"
 #import "MacVNCPowerMgmt.h"
 #import "MacVNCClamshell.h"
 #import "mac.h"
@@ -206,25 +207,99 @@ _Atomic int vncAuthenticatedClientsReceivingUpdates = 0;
 
 
 
-/* Enumerate the attached displays. Retries because a dimmed or slept screen
-   reports zero active displays and capture would then fail. */
+/*
+ * Which displays are ATTACHED, whether or not they happen to be awake.
+ *
+ * CGGetOnlineDisplayList is the only enumerator that survives display sleep -
+ * measured on this desk with both panels off: the active list was empty while
+ * the online list still reported both, with correct bounds. It is what gives
+ * the wait below a target instead of a threshold.
+ *
+ * Mirrored secondaries are dropped. The ACTIVE list excludes them; the online
+ * list does not, and two displays reporting identical bounds make
+ * macVNCBuildDisplayLayout fail as overlapping - so passing them through would
+ * turn "the user enabled mirroring" into "the server refuses to start".
+ */
+/* The active list as plain ids. Both the wait and its log line need it, and
+   writing the CGGetActiveDisplayList dance twice is how the two drift. */
+static size_t
+readActiveDisplayIDs(uint32_t *out, size_t capacity)
+{
+  CGDirectDisplayID active[MACVNC_MAX_DISPLAYS];
+  CGDisplayCount reported = 0;
+  if (CGGetActiveDisplayList(MACVNC_MAX_DISPLAYS, active, &reported) != kCGErrorSuccess)
+      return 0;
+
+  size_t kept = 0;
+  for (CGDisplayCount i = 0; i < reported && kept < capacity; ++i)
+      out[kept++] = (uint32_t)active[i];
+  return kept;
+}
+
+static size_t
+readOnlineDisplays(uint32_t *out, size_t capacity)
+{
+  CGDirectDisplayID online[MACVNC_MAX_DISPLAYS];
+  CGDisplayCount reported = 0;
+  if (CGGetOnlineDisplayList(MACVNC_MAX_DISPLAYS, online, &reported) != kCGErrorSuccess)
+      return 0;
+
+  size_t kept = 0;
+  for (CGDisplayCount i = 0; i < reported && kept < capacity; ++i) {
+      if (CGDisplayMirrorsDisplay(online[i]) != kCGNullDirectDisplay)
+          continue;
+      out[kept++] = (uint32_t)online[i];
+  }
+  return kept;
+}
+
+/*
+ * Enumerate the displays to capture, waiting for the whole desk.
+ *
+ * This used to break out of its retry loop at the FIRST non-zero active count.
+ * On a sleeping desk that is whichever panel woke first: macVNC came up with a
+ * 3840x2160 canvas for a 5550x2715 desk and the second monitor stayed invisible
+ * to every viewer until the app was restarted by hand. The loop knew a slept
+ * screen reports zero - its own comment said so - but had no idea how many to
+ * expect, so any partial answer ended it.
+ */
 static rfbBool
 readAttachedDisplays(MacVNCDisplayInput *displays, size_t *count, int *primaryIndex)
 {
   CGDirectDisplayID ids[MACVNC_MAX_DISPLAYS];
   CGDisplayCount reported = 0;
 
+  uint32_t expected[MACVNC_MAX_DISPLAYS];
+  size_t expectedCount = readOnlineDisplays(expected, MACVNC_MAX_DISPLAYS);
+
+  uint32_t awakeIDs[MACVNC_MAX_DISPLAYS];
+  size_t awakeCount = 0;
+
   macVNCWakeDisplays();
   for (int attempt = 0; attempt < 20; ++attempt) {
-      /* Ask for the TOTAL first (NULL list), not just what fits: filling a
-         16-slot array caps the answer at 16, which would silently drop the
-         17th display instead of reporting an unsupported configuration. */
-      CGGetActiveDisplayList(0, NULL, &reported);
-      if (reported > 0)
+      awakeCount = readActiveDisplayIDs(awakeIDs, MACVNC_MAX_DISPLAYS);
+      if (awakeCount > 0 &&
+          macVNCDisplaysAllActive(awakeIDs, awakeCount, expected, expectedCount))
           break;
       macVNCWakeDisplays();
       usleep(250000); /* 250ms */
   }
+
+  /* Timed out with part of the desk still dark: serve what there is rather
+     than refuse, and name what is missing - a bare count leaves the user
+     guessing which cable to check. */
+  uint32_t missing[MACVNC_MAX_DISPLAYS];
+  size_t missingCount = macVNCDisplaysMissing(awakeIDs, awakeCount,
+                                              expected, expectedCount,
+                                              missing, MACVNC_MAX_DISPLAYS);
+  for (size_t i = 0; i < missingCount; ++i)
+      rfbLog("Display %u is attached but did not wake in time; it will not be "
+             "part of this session\n", missing[i]);
+
+  /* Ask for the TOTAL (NULL list), not just what fits: filling a 16-slot array
+     caps the answer at 16, which would silently drop the 17th display instead
+     of reporting an unsupported configuration. */
+  CGGetActiveDisplayList(0, NULL, &reported);
   if (reported == 0 || reported > MACVNC_MAX_DISPLAYS) {
       rfbErr("Unsupported active display count: %u\n", reported);
       return FALSE;
@@ -1139,7 +1214,11 @@ vncServerStopLocked(void)
     dimmingShutdown();
     /* Before the display assertion, and unlike it, this one can outlive the
        process: the kernel does not clear the clamshell bit for us. */
-    macVNCClamshellShutdown();
+    /* The non-latching release: a server stop is reversible (the menu's Stop,
+       a failed start, a future layout-driven restart), so it must not disable
+       closed-display mode for the rest of the run. Termination latches
+       separately, from applicationWillTerminate. */
+    macVNCClamshellReleaseForServerStop();
     macVNCReleaseDisplayAssertion();
     macVNCInputShutdown();
     macVNCClearStoredPassword();

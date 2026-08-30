@@ -1,3 +1,65 @@
+# macVNC 0.4.3
+
+## A monitor could be missing from every session, and the wait was the reason
+
+Starting macVNC on a desk whose screens were asleep produced a server that
+served one monitor of two. The canvas was 3840x2160 for a 5550x2715 desk, and
+it stayed that way for the life of the process - no viewer ever saw the second
+screen, and nothing in the log said why.
+
+The cause was the enumeration's stopping condition, not a missing refresh:
+
+```c
+CGGetActiveDisplayList(0, NULL, &reported);
+if (reported > 0)
+    break;                 /* the FIRST non-zero answer ends the wait */
+```
+
+The loop knew a sleeping screen reports zero active displays - its own comment
+said so - but it had no idea how many displays to expect, so whichever panel
+woke first ended the wait.
+
+`CGGetOnlineDisplayList` reports every attached display, with correct bounds,
+**while it is asleep**. Measured with both panels off:
+
+```text
+active=0 []
+online=2 [3(3840x2160@0,0) 1(1710x1112@-1710,1603)]
+```
+
+So the wait now has a target instead of a threshold: enumerate what is
+attached, wake, and wait until each of those displays is actually active.
+Mirrored secondaries are dropped from the target - the active list excludes
+them, the online list does not, and two displays reporting identical bounds
+would make the layout builder refuse to start. If a display never wakes within
+the existing budget, the server serves the rest and names the missing display
+in the log instead of silently shrinking the desk.
+
+Verified on the exact failing scenario: with both panels asleep, macVNC now
+comes up serving the full 5552x2715 composite.
+
+## Stopping the server no longer disables closed-display mode for good
+
+`vncServerStopLocked()` called the terminate-path shutdown, which latches a flag
+that nothing ever clears. Pressing Stop and then Start in the menu therefore
+left closed-display mode permanently unable to arm, with nothing said - and a
+failed start took the same path. The latch now belongs to termination alone,
+which is the only stop that is not meant to be undone.
+
+## An automatic restart on display changes was designed and rejected
+
+The first version of this work was a watcher that restarted the server whenever
+the display layout changed. Two blind reviews rejected it, and the measurement
+above confirmed the central objection: a sleeping display leaves the active
+list, so that design would have dropped every viewer twice per screen-off
+cycle - the opposite of what it was for. It also had no safe failure branch, and
+re-reading the layout wakes the screen, which would have made a loop with the
+room lights in it. Plugging a monitor in while the server runs therefore still
+needs a manual restart; the reasoning is written down in
+`.pi/plans/display-reconfiguration.md` rather than lost.
+
+---
+
 # macVNC 0.4.2
 
 ## An unauthenticated stranger could wake your screen

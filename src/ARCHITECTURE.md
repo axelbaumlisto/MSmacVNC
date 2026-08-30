@@ -168,7 +168,7 @@ Objective-C glue:
   screen when it asks. A session with no live stream reports FAILURE, because
   "nothing to exclude" must not read as "the curtain may go up".
   WHICH application the filter names is resolved by `ScreenCapturer`, and that
-  resolution is the one thing 42 green test targets did not cover: see below.
+  resolution is the one thing 43 green test targets did not cover: see below.
 - **MacVNCCurtainWindow** — the curtain's screen half: one borderless black
   window per `NSScreen` at `NSScreenSaverWindowLevel` (joining all Spaces, and
   auxiliary to full-screen apps, because the level alone covers neither),
@@ -432,7 +432,22 @@ pixels rather than points.
   display sleep), created by the capture reconciler when the first client
   connects and released when the last leaves; `undim` is a throttled activity
   nudge. Never touches global Energy Saver values.
-- **MacVNCDisplayWake** — one-shot display wake (no persistent assertion).
+- **MacVNCDisplayWake** — declares local user activity to light a sleeping or
+  dimmed panel, and holds the `UserIsActive` assertion that
+  `IOPMAssertionDeclareUserActivity` creates until the last viewer leaves. It is
+  declared where a client is COUNTED, i.e. after authentication: doing it on
+  TCP accept let anyone who could reach the port wake this Mac's screen without
+  the password, and left the assertion held forever because an unauthenticated
+  client never reaches the reconciler that releases it.
+- **DisplayReadiness** — whether the whole desk has woken up. The enumeration in
+  `mac.m` used to wait for "at least one active display", which on a sleeping
+  desk is whichever panel woke first: the server then built a 3840x2160 canvas
+  for a 5550x2715 desk and the second monitor stayed invisible until a manual
+  restart. `CGGetOnlineDisplayList` reports every attached display with correct
+  bounds even while it is asleep (measured), so the wait now has a target
+  instead of a threshold. Mirrored secondaries are dropped from that target: the
+  active list excludes them, the online list does not, and identical bounds make
+  the layout builder fail as overlapping.
 - **MacVNCClamshellPolicy / MacVNCClamshellMarker / MacVNCClamshell** —
   closed-display mode. The policy
   half is pure C and holds every rule; the marker owns the persisted record; the
@@ -535,7 +550,7 @@ pixels rather than points.
 
 ## Tests
 
-`ctest` runs 42 targets (the number is enforced: `architecture_doc` compares
+`ctest` runs 43 targets (the number is enforced: `architecture_doc` compares
 this sentence against CMakeLists.txt's `add_test` count, so a target added or
 commented out fails the suite until this line is updated deliberately). Every
 assertion added here is checked by mutating the source and confirming the test
