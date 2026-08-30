@@ -216,16 +216,12 @@ macVNCClamshellStart(void)
 }
 
 void
-macVNCClamshellShutdown(void)
+macVNCClamshellReleaseForServerStop(void)
 {
     @autoreleasepool {
-        /* Latched first: from here on no connect may re-arm, however long the
-           server teardown behind us takes. */
-        atomic_store(&gTerminating, true);
-
         pthread_mutex_lock(&clamshellMutex);
         /* Only what WE hold. The bit has no reference count and is shared with
-           powerd and with apps like Amphetamine, so a quit path that cleared it
+           powerd and with apps like Amphetamine, so a path that cleared it
            regardless would silently cancel theirs. A record on disk we did not
            write belongs to another process or another boot, and Start has
            already dealt with those. */
@@ -234,4 +230,25 @@ macVNCClamshellShutdown(void)
         pthread_mutex_unlock(&clamshellMutex);
     }
 }
+
+void
+macVNCClamshellShutdown(void)
+{
+    /* Latched FIRST, and only here. This used to live in the shared release
+       path, which every server stop runs - so pressing Stop and then Start in
+       the menu disabled closed-display mode for the rest of the app's life,
+       with nothing said and no way back short of quitting. The latch belongs to
+       termination alone, because termination is the only stop that is not
+       meant to be undone. */
+    atomic_store(&gTerminating, true);
+    macVNCClamshellReleaseForServerStop();
+}
+
+#if defined(MACVNC_ENABLE_TEST_HOOKS)
+bool
+macVNCClamshellIsTerminatingForTesting(void)
+{
+    return atomic_load(&gTerminating);
+}
+#endif
 

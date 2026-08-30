@@ -6,6 +6,7 @@
 
 #include "mac.h"
 #include "MacVNCDisplayWake.h"
+#include "MacVNCClamshell.h"
 
 /*
  * The two client counts, and the window between them.
@@ -54,6 +55,15 @@ int main(void)
            first-frame wait. Captures must know about it - they are what makes
            the frame - and the curtain must NOT, because there is nothing to
            hide behind yet. */
+        /* Stopping the server must not permanently disable closed-display
+           mode. The quit latch used to live in the release path that every
+           server stop runs, so Stop followed by Start in the menu killed the
+           feature for the rest of the app's life, silently. Only termination
+           may latch. */
+        assert(!macVNCClamshellIsTerminatingForTesting());
+        macVNCClamshellReleaseForServerStop();
+        assert(!macVNCClamshellIsTerminatingForTesting());
+
         assert(!macVNCDisplayWakeIsHoldingForTesting());
         void *waiting = macVNCBeginClientForTesting(false);
         assert(waiting != NULL);

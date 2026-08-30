@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.4.2 LANGUAGES C)
+project(macVNC VERSION 0.4.3 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -56,6 +56,8 @@ set(SOURCE_FILES
     src/MacVNCEncryptionPolicy.c
     src/MacVNCImageProfile.c
     src/MacVNCSweepSchedule.c
+    src/DisplayReadiness.h
+    src/DisplayReadiness.c
     src/MacVNCClamshellPolicy.h
     src/MacVNCClamshellPolicy.c
     src/MacVNCClamshellMarker.h
@@ -262,6 +264,12 @@ if(BUILD_TESTING)
     # Closed-display mode's decision half. Pure C on purpose: the kernel call it
     # drives returns success unconditionally and publishes nothing, so the only
     # part that can be checked is the part with no IOKit in it.
+    # Waiting for the whole desk instead of the first monitor that answers.
+    add_executable(test_display_readiness tests/test_display_readiness.c
+                   src/DisplayReadiness.c)
+    target_include_directories(test_display_readiness PRIVATE src)
+    add_test(NAME display_readiness COMMAND test_display_readiness)
+
     add_executable(test_clamshell_policy tests/test_clamshell_policy.c
                    src/MacVNCClamshellPolicy.c)
     target_include_directories(test_clamshell_policy PRIVATE src)
@@ -563,6 +571,7 @@ if(BUILD_TESTING)
         src/MacVNCPowerMgmt.m
         # reconcileCaptureState() re-evaluates closed-display mode alongside the
         # power assertions, so the testable core carries it too.
+        src/DisplayReadiness.c
         src/MacVNCClamshell.m
         src/MacVNCClamshellMarker.m
         src/MacVNCClamshellPolicy.c
