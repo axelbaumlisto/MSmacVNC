@@ -1,20 +1,38 @@
 #pragma once
 
+#include <stdbool.h>
+
 /*
  * Wakes the Mac's display on demand for remote viewing.
  *
  * A remote VNC client needs a live display to capture; if the Mac dims or
  * sleeps the screen, ScreenCaptureKit yields no frames (blank/black remote
- * screen). These helpers nudge the display awake WITHOUT holding a persistent
- * NoDisplaySleep assertion (that would behave like a built-in caffeinate).
- * Sustained sleep/dim prevention, if desired, lives in MacVNCPowerMgmt.
+ * screen). Sustained sleep/dim prevention lives in MacVNCPowerMgmt; this module
+ * is about the transition.
+ *
+ * IT DOES HOLD AN ASSERTION, and this header used to deny it.
+ * IOPMAssertionDeclareUserActivity is not a fire-and-forget nudge: it creates a
+ * UserIsActive assertion and hands back an ID that stays held until released.
+ * The old wording ("holds no persistent assertion", "this is a no-op") was
+ * measured false on a live machine - `pmset -g assertions` showed
+ * `macVNC remote session` held continuously for hours with no viewer connected,
+ * which by itself stopped the display ever idle-sleeping. Release is therefore
+ * a real obligation, paired with the last viewer leaving rather than with the
+ * server stopping: a listener under "Start at Login" runs for weeks.
  */
 
-/* Wake the display now by declaring local user activity so a sleeping/dimmed
- * screen lights up and the idle timer resets. Holds no persistent assertion.
- * Safe to call repeatedly (e.g. on each client connect). */
+/* Wake the display now by declaring local user activity, so a sleeping or
+ * dimmed screen lights up and the idle timer resets. Safe to call repeatedly:
+ * the same assertion ID is passed back in, which updates the existing activity
+ * instead of accumulating assertions. */
 void macVNCWakeDisplays(void);
 
-/* Retained for API symmetry; no persistent assertion is held, so this is a
- * no-op. Safe to call. */
+/* Release the assertion. Idempotent, and safe when nothing was ever declared.
+ * Must be called when the last viewer goes away, not only at server stop. */
 void macVNCReleaseDisplayAssertion(void);
+
+#if defined(MACVNC_ENABLE_TEST_HOOKS)
+/* Whether an assertion is currently held - the witness that makes the leak
+   above visible to a test instead of only to pmset. */
+bool macVNCDisplayWakeIsHoldingForTesting(void);
+#endif

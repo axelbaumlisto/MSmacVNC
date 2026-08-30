@@ -682,6 +682,12 @@ static void reconcileCaptureState(void)
             atomic_fetch_add(&gCaptureStopCount, 1);
 #endif
             dimmingShutdown();
+            /* Paired with the assertions, not with the server stop. This is a
+               UserIsActive assertion, and holding it with no viewer connected
+               is a caffeinate by another name - measured on a live machine as
+               "macVNC remote session" held for hours after the last client
+               left, which by itself stopped the display ever idle-sleeping. */
+            macVNCReleaseDisplayAssertion();
             macVNCCaptureSessionStopAndWait();
             macVNCInputResetModifiers();
             rfbLog("Capture keep-warm window elapsed; %lu display captures stopped\n",
