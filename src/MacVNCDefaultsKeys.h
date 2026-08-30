@@ -33,6 +33,12 @@ extern NSString * const MacVNCKeyEncryption;
  * See MacVNCCurtainController.h for when it goes up and every way it comes
  * back down. */
 extern NSString * const MacVNCKeyCurtain;
+/* Closed-display mode: while a viewer is connected and the adaptor is in, ask
+ * the kernel not to sleep this Mac when the lid closes. OFF by default because
+ * the bit it sets is global, shared with powerd and with apps like Amphetamine,
+ * carries no reference count, and is not cleared by the kernel when the setting
+ * process dies. See MacVNCClamshellPolicy.h. */
+extern NSString * const MacVNCKeyClamshell;
 
 extern NSString * const MacVNCBundleID;
 

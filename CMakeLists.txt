@@ -56,6 +56,12 @@ set(SOURCE_FILES
     src/MacVNCEncryptionPolicy.c
     src/MacVNCImageProfile.c
     src/MacVNCSweepSchedule.c
+    src/MacVNCClamshellPolicy.h
+    src/MacVNCClamshellPolicy.c
+    src/MacVNCClamshellMarker.h
+    src/MacVNCClamshellMarker.m
+    src/MacVNCClamshell.h
+    src/MacVNCClamshell.m
     src/MacVNCCurtainPolicy.h
     src/MacVNCCurtainPolicy.c
     src/MacVNCCurtainWindow.h
@@ -252,6 +258,14 @@ if(BUILD_TESTING)
                    src/MacVNCCurtainPolicy.c)
     target_include_directories(test_curtain_policy PRIVATE src)
     add_test(NAME curtain_policy COMMAND test_curtain_policy)
+
+    # Closed-display mode's decision half. Pure C on purpose: the kernel call it
+    # drives returns success unconditionally and publishes nothing, so the only
+    # part that can be checked is the part with no IOKit in it.
+    add_executable(test_clamshell_policy tests/test_clamshell_policy.c
+                   src/MacVNCClamshellPolicy.c)
+    target_include_directories(test_clamshell_policy PRIVATE src)
+    add_test(NAME clamshell_policy COMMAND test_clamshell_policy)
 
     # The curtain's capture half from the session's side: one answer per
     # request, on the main thread, and requests that survive a session being
@@ -547,6 +561,15 @@ if(BUILD_TESTING)
         src/MacVNCDisplayWake.m
         src/MacVNCTLS.c
         src/MacVNCPowerMgmt.m
+        # reconcileCaptureState() re-evaluates closed-display mode alongside the
+        # power assertions, so the testable core carries it too.
+        src/MacVNCClamshell.m
+        src/MacVNCClamshellMarker.m
+        src/MacVNCClamshellPolicy.c
+        # ...which reads its preference through the one key table, rather than
+        # re-spelling the defaults key and letting the two drift.
+        src/MacVNCDefaultsKeys.m
+        src/MacVNCListenMode.m
         src/MacVNCInput.m
         src/ScreenCapturer.m
     )

@@ -18,6 +18,7 @@ NSString * const MacVNCKeyCaptureFPS = @"captureFPS";
 NSString * const MacVNCKeyImageProfile = @"imageProfile";
 NSString * const MacVNCKeyEncryption = @"encryption";
 NSString * const MacVNCKeyCurtain = @"curtainMode";
+NSString * const MacVNCKeyClamshell = @"closedDisplayMode";
 
 NSString * const MacVNCBundleID = @"net.christianbeier.macVNC";
 
@@ -32,7 +33,8 @@ NSArray<NSString *> *macVNCAllDefaultsKeys(void)
              MacVNCKeyCaptureFPS,
              MacVNCKeyImageProfile,
              MacVNCKeyEncryption,
-             MacVNCKeyCurtain];
+             MacVNCKeyCurtain,
+             MacVNCKeyClamshell];
 }
 
 void macVNCRegisterDefaults(void)
@@ -54,6 +56,11 @@ void macVNCRegisterDefaults(void)
            viewer, so a shipped-on default would hand every holder of the VNC
            password the ability to blind whoever is standing at the Mac. */
         MacVNCKeyCurtain:           @NO,
+        /* OFF. The kernel bit behind this one is global, uncounted, and
+           survives our death - so the cost of a user who never asked for it is
+           a Mac that stops sleeping on lid close with nothing on screen to
+           say why. */
+        MacVNCKeyClamshell:         @NO,
         /* Registered so a fresh install is symmetric with a saved one: the
            loopback entry in allowedClients was put there by US, not typed by the
            user, and the "extra allowed clients" field must not present it as if

@@ -168,7 +168,7 @@ Objective-C glue:
   screen when it asks. A session with no live stream reports FAILURE, because
   "nothing to exclude" must not read as "the curtain may go up".
   WHICH application the filter names is resolved by `ScreenCapturer`, and that
-  resolution is the one thing 41 green test targets did not cover: see below.
+  resolution is the one thing 42 green test targets did not cover: see below.
 - **MacVNCCurtainWindow** — the curtain's screen half: one borderless black
   window per `NSScreen` at `NSScreenSaverWindowLevel` (joining all Spaces, and
   auxiliary to full-screen apps, because the level alone covers neither),
@@ -433,6 +433,37 @@ pixels rather than points.
   connects and released when the last leaves; `undim` is a throttled activity
   nudge. Never touches global Energy Saver values.
 - **MacVNCDisplayWake** — one-shot display wake (no persistent assertion).
+- **MacVNCClamshellPolicy / MacVNCClamshellMarker / MacVNCClamshell** —
+  closed-display mode. The policy
+  half is pure C and holds every rule; the marker owns the persisted record; the
+  adapter sends
+  `kPMSetClamshellSleepState` (12, from the public SDK header `IOPMLibDefs.h`)
+  to `IOPMrootDomain`, clearing the last term of
+  `shouldSleepOnClamshellClosed()`. Unlike everything else in this section it
+  sets state the kernel does **not** reclaim: `RootDomainUserClient::clientClose`
+  does not clear the mask, so a crash while armed would leave this Mac unable to
+  sleep on lid close until it reboots. Hence three rules that have no analogue
+  in the assertion modules. First, a marker is written to defaults **before**
+  the arming call and cleared **after** the disarming one, so a crash in either
+  gap strands a marker rather than a bit; a marker that cannot be persisted
+  **refuses the arm**, because a bit nobody recorded is the one state no later
+  run can repair. Second, that marker carries **pid and boot session**, and
+  recovery acts only on a record from this boot whose owner is gone: a record
+  from an earlier boot describes a mask the kernel already zeroed (clearing on
+  it would cancel Amphetamine's setting), and a record whose owner is alive
+  belongs to the second instance this project routinely runs on another port
+  under the same bundle id and therefore the same defaults domain. Third, the
+  quit path latches against re-arming and then withdraws only what **we** hold
+  — the bit is shared with powerd and has no reference count, so unconditional
+  cleanup would cancel someone else's. Fourth, it arms only on wall power, so a
+  lid-shut laptop on battery still sleeps.
+  Reconciliation is level-triggered on the client count and runs outside
+  `captureControlMutex`: hanging it off the capture start/stop edges skipped
+  viewers who reconnected inside the 30 s keep-warm window, and doing its
+  cfprefsd and IOKit work under the lock serialised every connect. When the
+  preference is off and nothing is held it returns before touching IOKit at all. There is no gate of the kind the curtain window has, and that is not
+  an omission: the kernel returns `kIOReturnSuccess` unconditionally and never
+  republishes the mask, so the effect is unobservable from software.
 - **MacVNCPassword** — password load/store (plaintext in defaults, by request)
   and the hardened `MACVNC_PASSWORD_FILE` reader.
 - **ScreenCapturer** — one display's SCStream lifecycle + readiness, and the
@@ -504,7 +535,7 @@ pixels rather than points.
 
 ## Tests
 
-`ctest` runs 41 targets (the number is enforced: `architecture_doc` compares
+`ctest` runs 42 targets (the number is enforced: `architecture_doc` compares
 this sentence against CMakeLists.txt's `add_test` count, so a target added or
 commented out fails the suite until this line is updated deliberately). Every
 assertion added here is checked by mutating the source and confirming the test
