@@ -16,6 +16,7 @@
 #import "MacVNCListenMode.h"
 #import "MacVNCLoginItem.h"
 #import "MacVNCStartupConfig.h"
+#import "MacVNCClamshell.h"
 #import "MacVNCCurtainController.h"
 #import "MacVNCCurtainInput.h"
 #import "MacVNCCurtainWindow.h"
@@ -234,6 +235,10 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
     macVNCAuthenticatedClientsChangedHandler = macVNCAuthenticatedClientsChanged_;
     macVNCPermissionUIServerRunningProvider = macVNCServerIsRunning_;
     macVNCRegisterDefaults();
+    /* After the defaults exist and before the server can accept anyone: this
+       also clears a clamshell bit stranded by a previous run that crashed
+       while armed, which nothing else on the machine will ever clear. */
+    macVNCClamshellStart();
     [self setupCurtainMode];
     [self setupStatusBarItem];
 
@@ -270,6 +275,21 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
        the app is on its way out. */
     [self.curtainController noteApplicationWillTerminate];
     self.curtainObserver.controller = nil;
+
+    /* Also early, and for a related reason: the server stop below is allowed to
+       time out, and a timed-out stop that never reached vncServerStopLocked()
+       would leave the lid-close bit set with no owner.
+
+       Listeners FIRST. Disarming while the port is still accepting left a real
+       hole: a viewer completing authentication in that window re-armed through
+       reconcileCaptureState, and the second-chance disarm inside
+       vncServerStopLocked sits behind exactly the teardown the 8 s budget below
+       is allowed to abandon - so the process could exit with the bit set. This
+       call is main-thread-safe by construction (bounded trylock), and after it
+       no new client can authenticate. macVNCClamshellShutdown additionally
+       latches, so the two together close the window from both ends. */
+    vncServerCloseListeners();
+    macVNCClamshellShutdown();
 
     /* Stop OFF the main thread, then wait bounded: vncServerStop() joins client
        threads and waits for capture work that may sit behind a prompt (up to 5 s
