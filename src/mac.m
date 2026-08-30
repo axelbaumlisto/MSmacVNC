@@ -730,6 +730,12 @@ countClientForCaptureLocked(MacVNCClientState *state)
         return false;
     state->captureCounted = TRUE;
     atomic_fetch_add(&vncConnectedClients, 1);
+    /* An authenticated viewer is arriving: light the display so it has
+       something live to capture rather than a blank screen. Paired with the
+       release in reconcileCaptureState, which is driven by this same counter -
+       so unlike the old pre-auth wake, this assertion can never outlive the
+       session that created it. */
+    macVNCWakeDisplays();
     return true;
 }
 
@@ -1052,9 +1058,17 @@ static enum rfbNewClientAction newClient(rfbClientPtr cl)
       return RFB_CLIENT_REFUSE;
   }
 
-  /* A client is connecting: make sure the display is awake so it has something
-     live to capture instead of a blank/dimmed screen. */
-  macVNCWakeDisplays();
+  /* Deliberately NO display wake here. It used to live at this line, before
+     authentication, and that was wrong twice over. It let anyone who could
+     reach the port light up this Mac's screen without knowing the password -
+     measured: a connection with a deliberately wrong password woke both
+     displays. And because an unauthenticated client never increments
+     vncConnectedClients, the reconciler never ran, so the UserIsActive
+     assertion it created was held until some LATER successful session happened
+     to end - or forever, if none ever did.
+
+     The wake now happens where the client is counted, which is where capture
+     starts and where the release is already paired. */
 
   MacVNCClientState *state = calloc(1, sizeof(*state));
   if (!state)

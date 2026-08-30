@@ -39,10 +39,3 @@ void macVNCClamshellStart(void);
  */
 void macVNCClamshellShutdown(void);
 
-#if defined(MACVNC_ENABLE_TEST_HOOKS)
-/* Test hooks. Compiled out of the shipping app on purpose: the override below
-   defeats the wall-power precondition, which is the guard that stops a lid-shut
-   laptop running on battery. */
-bool macVNCClamshellIsArmedForTesting(void);
-void macVNCClamshellSetPowerSourceOverrideForTesting(int onWallPower); /* -1 = real */
-#endif
