@@ -19,6 +19,7 @@ NSString * const MacVNCKeyImageProfile = @"imageProfile";
 NSString * const MacVNCKeyEncryption = @"encryption";
 NSString * const MacVNCKeyCurtain = @"curtainMode";
 NSString * const MacVNCKeyClamshell = @"closedDisplayMode";
+NSString * const MacVNCKeyKeepDisplayAwake = @"keepDisplayAwake";
 
 NSString * const MacVNCBundleID = @"net.christianbeier.macVNC";
 
@@ -34,7 +35,8 @@ NSArray<NSString *> *macVNCAllDefaultsKeys(void)
              MacVNCKeyImageProfile,
              MacVNCKeyEncryption,
              MacVNCKeyCurtain,
-             MacVNCKeyClamshell];
+             MacVNCKeyClamshell,
+             MacVNCKeyKeepDisplayAwake];
 }
 
 void macVNCRegisterDefaults(void)
@@ -61,6 +63,10 @@ void macVNCRegisterDefaults(void)
            a Mac that stops sleeping on lid close with nothing on screen to
            say why. */
         MacVNCKeyClamshell:         @NO,
+        /* OFF. Holding the display awake stops the Mac reaching its own lock
+           screen, so switching it on is a security choice and must be one the
+           user made on purpose rather than one we made for them. */
+        MacVNCKeyKeepDisplayAwake:  @NO,
         /* Registered so a fresh install is symmetric with a saved one: the
            loopback entry in allowedClients was put there by US, not typed by the
            user, and the "extra allowed clients" field must not present it as if

@@ -39,6 +39,12 @@ extern NSString * const MacVNCKeyCurtain;
  * carries no reference count, and is not cleared by the kernel when the setting
  * process dies. See MacVNCClamshellPolicy.h. */
 extern NSString * const MacVNCKeyClamshell;
+/* Keep the display and the machine awake for as long as the server is running,
+ * rather than only while a viewer is connected. OFF by default: it costs power
+ * and it stops the Mac locking itself, which is a security decision the user
+ * has to make deliberately. See MacVNCPowerMgmt.h for what it holds and why it
+ * is not the same thing as the session assertions. */
+extern NSString * const MacVNCKeyKeepDisplayAwake;
 
 extern NSString * const MacVNCBundleID;
 

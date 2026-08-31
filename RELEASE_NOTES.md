@@ -1,3 +1,34 @@
+# macVNC 0.4.6
+
+## macVNC can keep the Mac awake itself
+
+New Preferences option, **off by default**: *Keep this Mac awake while the
+server is running*.
+
+It exists because of a chain this project created. macOS here is set to lock the
+moment the display turns off. The display never turned off, because two separate
+things were holding it: a `UserIsActive` assertion macVNC leaked, and an
+external `caffeinate` agent. 0.4.1 fixed the leak and the agent was removed the
+same day - both supports vanished at once, and from then on every remote
+connection arrived at the macOS **login screen**.
+
+Handing that job to a launchd agent works but hides it: the machine stays awake
+whether or not macVNC is running, and nothing in the app explains why. Held
+here it belongs to the tool that needs it, it is visible and switchable in
+Preferences, it applies only while the server is actually running, and it dies
+with the process the way an `IOPMAssertion` should - unlike a global `pmset`
+value or an agent that outlives everything.
+
+Two assertions, not one: preventing display sleep keeps the panel lit,
+preventing idle system sleep keeps the machine reachable at all. Both are
+observed through `pmset` in the test, not merely tracked in variables.
+
+The help text states the cost plainly, because the whole effect of the setting
+is that this Mac never reaches its own lock screen: whoever walks up to it sees
+the desktop rather than a password prompt.
+
+---
+
 # macVNC 0.4.5
 
 ## The display diagnostics reach the log

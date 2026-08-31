@@ -432,6 +432,15 @@ pixels rather than points.
   display sleep), created by the capture reconciler when the first client
   connects and released when the last leaves; `undim` is a throttled activity
   nudge. Never touches global Energy Saver values.
+- **MacVNCPowerMgmt keep-awake** — a SECOND assertion pair, held while the
+  SERVER runs rather than while a viewer watches, and off unless the user asks
+  for it in Preferences. It exists because macOS here was set to lock the moment
+  the display turns off, and two accidents were hiding that: a leaked
+  `UserIsActive` assertion in this app and an external `caffeinate` agent.
+  Fixing the leak and removing the agent made both supports vanish at once, and
+  every remote connection then arrived at the macOS login screen. Reconciled
+  level-triggered from `updateMenuStatus`, so start, stop and a Preferences
+  change all converge on one place that re-reads both facts.
 - **MacVNCDisplayWake** — declares local user activity to light a sleeping or
   dimmed panel, and holds the `UserIsActive` assertion that
   `IOPMAssertionDeclareUserActivity` creates until the last viewer leaves. It is
