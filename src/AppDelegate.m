@@ -762,6 +762,27 @@ static NSMenuItem *addRow(NSMenu *menu, NSString *title, SEL action,
                                          &_handledFailureGeneration))
         return;
 
+    /* How much this failure is allowed to cost. Stopping the server used to be
+       the only answer, and it is the wrong default for a remote-access tool:
+       the recovery it offers is a menu bar the remote user cannot reach. Once
+       macVNC stopped leaking the display-wake assertion its screens could
+       idle-sleep again, ScreenCaptureKit reported failure, and the server took
+       its own listener down with nobody even connected. */
+    uint32_t online[16];
+    uint32_t onlineCount = 0;
+    CGGetOnlineDisplayList(16, (CGDirectDisplayID *)online, &onlineCount);
+    MacVNCCaptureFailureResponse response = macVNCResolveCaptureFailure(
+        [info[@"denied"] boolValue], onlineCount > 0,
+        atomic_load(&vncConnectedClients));
+
+    if (response == MacVNCCaptureFailureKeepServing) {
+        /* Off the main thread for the same reason as the stop below: dropping
+           captures waits for in-flight ScreenCaptureKit work. */
+        dispatch_async(self.lifecycleQueue, ^{ vncServerDropCaptures(); });
+        [self updateMenuStatus];
+        return;
+    }
+
     /* Stop OFF the main thread: vncServerStop() joins client threads and waits
        for in-flight ScreenCaptureKit work, which can be pending behind a system
        permission prompt. Blocking the main thread here would freeze the menu bar
