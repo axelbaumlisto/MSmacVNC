@@ -17,6 +17,19 @@ int main(void)
     /* Before start, no resources are held. */
     assert(macVNCInputHasResources() == false);
 
+    /* Building the KEYBOARD MAPS must not look like a running server.
+
+       This one is a scar. The Text Input Source API aborts the process when it
+       is called off the main thread, so the layout is now built at app launch
+       instead of inside macVNCInputStart. The maps then counted as "input
+       resources", serverHasLifecycleResourcesLocked() answered "a run is
+       already live" in a brand new process, and the very first start request
+       was refused with "VNC server is already running" - leaving the app
+       listening on nothing. The maps describe the user's keyboard; only the
+       event source describes a run. */
+    macVNCInputRefreshKeyboardLayout();
+    assert(macVNCInputHasResources() == false);
+
     /* Injecting a context must not allocate any input resource. */
     MacVNCDisplayLayout layout;
     memset(&layout, 0, sizeof(layout));
