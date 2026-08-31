@@ -184,6 +184,17 @@ rfbBool vncServerStart(const MacVNCServerConfig *config);
 void vncServerStop(void);
 
 /*
+ * Drop the running captures WITHOUT touching the listener, and let the
+ * reconciler rebuild them if anyone is still watching.
+ *
+ * The recovery for a capture failure that is not fatal. Stopping the whole
+ * server was the old answer, and for a remote-access tool it is the most
+ * expensive one available: the offered recovery lives in a menu bar the remote
+ * user cannot reach.
+ */
+void vncServerDropCaptures(void);
+
+/*
  * Close the listening sockets without a full stop, freeing the port.
  *
  * Used immediately before relaunching: the successor inherits descriptors, and
