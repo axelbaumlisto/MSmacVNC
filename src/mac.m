@@ -325,7 +325,11 @@ readAttachedDisplays(MacVNCDisplayInput *displays, size_t *count, int *primaryIn
       };
       if (ids[i] == mainID)
           *primaryIndex = (int)i;
-      printf("Found %s display %zu id=%u at (%.0f,%.0f), logical %.0fx%.0f, pixels %dx%d\n",
+      /* rfbLog, not printf. These lines used to go to stdout, and macVNC is
+         launched with `open`, which captures only stderr - so the one piece of
+         diagnostic output that says which monitors the server actually found
+         was invisible in the log exactly when a monitor was missing. */
+      rfbLog("Found %s display %zu id=%u at (%.0f,%.0f), logical %.0fx%.0f, pixels %dx%d\n",
              ids[i] == mainID ? "primary" : "secondary", i, ids[i],
              displays[i].logicalX, displays[i].logicalY,
              displays[i].logicalWidth, displays[i].logicalHeight,
@@ -367,8 +371,22 @@ resolveDisplayLayout(void)
       rfbErr("Could not build a non-overlapping RFB display layout\n");
       return FALSE;
   }
-  printf("Capturing %zu display(s); composite framebuffer: %dx%d\n",
-         displayLayout.count, displayLayout.width, displayLayout.height);
+  /* Name the displays, not just how many. displayNumber >= 0 selects by
+     POSITION in the enumeration, so after a monitor is unplugged the same
+     stored number designates a different physical screen - a switch that would
+     otherwise happen with nothing said. */
+  char ids[MACVNC_MAX_DISPLAYS * 12 + 1];
+  size_t used = 0;
+  ids[0] = '\0';
+  for (size_t i = 0; i < displayLayout.count && used < sizeof ids - 1; ++i) {
+      int n = snprintf(ids + used, sizeof ids - used, "%s%u",
+                       i ? "," : "", displayLayout.displays[i].input.displayID);
+      if (n < 0)
+          break;
+      used += (size_t)n;
+  }
+  rfbLog("Capturing %zu display(s) [id %s]; composite framebuffer: %dx%d\n",
+         displayLayout.count, ids, displayLayout.width, displayLayout.height);
   return TRUE;
 }
 
