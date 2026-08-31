@@ -1,3 +1,30 @@
+# macVNC 0.4.5
+
+## The display diagnostics reach the log
+
+The two lines that say which monitors the server found, and which of them it
+decided to capture, went to **stdout**. macVNC is launched with `open`, which
+captures only stderr - so the one piece of output that answers "why is a
+monitor missing?" was invisible in the log exactly when a monitor was missing.
+Diagnosing 0.4.3's bug meant inferring the composite size from a client's pixel
+count.
+
+They are `rfbLog` now, and the second one names the displays instead of
+counting them:
+
+```text
+Found primary display 0 id=3 at (0,0), logical 3840x2160, pixels 3840x2160
+Found secondary display 1 id=1 at (-1710,1603), logical 1710x1112, pixels 1710x1112
+Capturing 2 display(s) [id 3,1]; composite framebuffer: 5552x2715
+```
+
+The display ids matter beyond tidiness: `displayNumber >= 0` selects by
+POSITION in the enumeration, so after a monitor is unplugged the same stored
+number designates a different physical screen. That switch used to happen with
+nothing said.
+
+---
+
 # macVNC 0.4.4
 
 ## A capture failure no longer takes the listener down
