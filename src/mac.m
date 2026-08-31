@@ -789,6 +789,28 @@ static void reconcileCaptureState(void)
     macVNCClamshellReevaluate();
 }
 
+void
+vncServerDropCaptures(void)
+{
+    /* Mirrors the keep-warm timer's teardown, minus the timer: mark the
+       captures stopped under the control lock, then do the slow stop OUTSIDE
+       it, then reconcile - which restarts them when a viewer is still there
+       and leaves them down when nobody is. */
+    pthread_mutex_lock(&captureControlMutex);
+    bool wasRunning = gCapturesRunning;
+    gCapturesRunning = false;
+    atomic_store(&gCaptureWarmDeadlineNs, 0);
+    pthread_mutex_unlock(&captureControlMutex);
+
+    if (!wasRunning)
+        return;
+
+    macVNCCaptureSessionStopAndWait();
+    macVNCInputResetModifiers();
+    rfbLog("Captures dropped after a capture failure; the listener stays up\n");
+    reconcileCaptureState();
+}
+
 /*
  * The two counters' bookkeeping, in ONE place.
  *

@@ -1,3 +1,44 @@
+# macVNC 0.4.4
+
+## A capture failure no longer takes the listener down
+
+Any capture failure that was not a permission problem used to stop the whole
+server and put up a modal saying "the server has been stopped; start it again
+from the menu". For a remote-access tool that is the most expensive possible
+answer: the recovery it offers is in a menu bar the remote user cannot reach.
+Losing the picture is bad. Losing the way back in is unrecoverable.
+
+It stopped being theoretical the moment 0.4.1 fixed the leaked display-wake
+assertion. With that leak gone the screens could idle-sleep again, a sleeping
+display makes ScreenCaptureKit report failure - including for capturers that
+outlive a stopped stream, since stopping a stream deliberately does not detach
+the capturer - and macVNC killed its own listener with nobody even connected.
+Observed exactly that way: the process alive, its modal on screen, port 5903
+refusing connections.
+
+Now the response is chosen rather than assumed:
+
+```text
+permission revoked            -> the permission gate, as before
+nobody watching               -> keep serving; drop the captures
+watching, displays attached   -> keep serving; drop the captures
+watching, nothing attached    -> stop, because there is nothing to serve
+```
+
+Dropping the captures leaves the listener up and lets the next viewer rebuild
+them against whatever the desk looks like by then.
+
+## A clean build, and what it turned up
+
+Every "builds warning-free" claim in the previous releases was made on an
+INCREMENTAL build, which silently skipped targets that had not changed. A
+from-scratch build surfaced two real warnings in `test_start_failure`, where a
+deliberate NULL argument met a header-wide non-null assumption. The parameter is
+now declared for what it is - optional - and the build is warning-free from
+scratch, which is a different and stronger statement than before.
+
+---
+
 # macVNC 0.4.3
 
 ## A monitor could be missing from every session, and the wait was the reason
