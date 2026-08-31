@@ -8,12 +8,12 @@
    OBSERVABLE, not just tracked in our own variables (an implementation that
    never created them passes every variable check). Scoped because the
    installed macVNC legitimately holds its own two while a test runs. */
-static int ourAssertionCount(void)
+static int countNamed(const char *name)
 {
-    char cmd[256];
+    char cmd[320];
     snprintf(cmd, sizeof(cmd),
-             "pmset -g assertions | grep 'pid %d(' | grep -c 'macVNC remote session'",
-             (int)getpid());
+             "pmset -g assertions | grep 'pid %d(' | grep -c '%s'",
+             (int)getpid(), name);
     FILE *f = popen(cmd, "r");
     if (!f) return -1;
     int n = 0;
@@ -21,6 +21,9 @@ static int ourAssertionCount(void)
     pclose(f);
     return n;
 }
+
+/* The session pair, named for the run they belong to. */
+static int ourAssertionCount(void) { return countNamed("macVNC remote session"); }
 
 #include "MacVNCPowerMgmt.h"
 
@@ -65,7 +68,36 @@ int main(void)
         assert(macVNCUndimNudgeCountForTesting() == 1);
         assert(dimmingShutdown() == 0);
 
-        puts("test_power_mgmt: all assertions passed");
+    
+        /* Keep-awake: the pair held while the SERVER runs, not while a viewer
+           watches. Observed through pmset, not through our own variables - an
+           implementation that never created them passes every variable check.
+
+           It exists because the machine was configured to lock the moment the
+           display turns off, and two accidents were hiding that: a leaked
+           UserIsActive assertion in macVNC and a caffeinate agent. Removing
+           both meant every remote connection landed on the macOS login screen. */
+        assert(!macVNCKeepDisplayAwakeIsHeld());
+        assert(countNamed("macVNC keep display awake") == 0);
+
+        macVNCSetKeepDisplayAwake(TRUE);
+        assert(macVNCKeepDisplayAwakeIsHeld());
+        /* Two: preventing display sleep keeps the panel lit, preventing idle
+           system sleep keeps the machine reachable at all. */
+        assert(countNamed("macVNC keep display awake") == 2);
+
+        /* Idempotent: asking again must not stack a second pair. */
+        macVNCSetKeepDisplayAwake(TRUE);
+        assert(countNamed("macVNC keep display awake") == 2);
+
+        macVNCSetKeepDisplayAwake(FALSE);
+        assert(!macVNCKeepDisplayAwakeIsHeld());
+        assert(countNamed("macVNC keep display awake") == 0);
+        /* Releasing twice must not fault or resurrect them. */
+        macVNCSetKeepDisplayAwake(FALSE);
+        assert(countNamed("macVNC keep display awake") == 0);
+
+    puts("test_power_mgmt: all assertions passed");
     }
     return 0;
 }

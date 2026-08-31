@@ -11,6 +11,7 @@
 #import "MacVNCStatusText.h"
 #import "MacVNCStartFailure.h"
 #import "MacVNCPermissionsPanel.h"
+#import "MacVNCPowerMgmt.h"
 #import "MacVNCPreferences.h"
 #import "MacVNCDefaultsKeys.h"
 #import "MacVNCListenMode.h"
@@ -267,6 +268,9 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
 {
     [self.updateTimer invalidate];
     self.updateTimer = nil;
+    /* The kernel would reclaim these when the process dies; released here so
+       the quit path says out loud what it is giving up. */
+    macVNCSetKeepDisplayAwake(FALSE);
 
     /* FIRST, and before anything that can block: this is what takes the black
        windows off every display and stops swallowing local input. The stop
@@ -892,6 +896,17 @@ static NSMenuItem *addRow(NSMenu *menu, NSString *title, SEL action,
 - (void)updateMenuStatus
 {
     int port = vncServerGetPort();
+
+    /* Keep-awake is reconciled HERE, level-triggered on the same 2 s timer that
+       redraws the menu, rather than hooked onto start, stop and the Preferences
+       save separately. One place that re-reads both facts cannot get out of
+       step with itself, and macVNCSetKeepDisplayAwake is idempotent, so the
+       repetition costs nothing. It is tied to the server RUNNING: an app that
+       is merely open, with the server stopped, has no business holding this
+       Mac awake. */
+    macVNCSetKeepDisplayAwake(
+        port > 0 &&
+        [NSUserDefaults.standardUserDefaults boolForKey:MacVNCKeyKeepDisplayAwake]);
 
     /* ONE snapshot for the whole render: the status line used to sample TCC
        separately from the permission rows — four reads, two snapshots, one

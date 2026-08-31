@@ -142,3 +142,51 @@ dimmingShutdown(void)
 }
 
 
+
+/*
+ * Keep-awake: the pair held while the SERVER runs, not while a viewer watches.
+ *
+ * Two assertions, for the same reason the session pair is two: preventing
+ * display sleep keeps the panel lit, preventing idle SYSTEM sleep keeps the
+ * machine reachable at all. Named differently from the session pair so that
+ * `pmset -g assertions` - and the test that reads it - can tell which is which.
+ */
+static IOPMAssertionID keepDisplayAssertion = kIOPMNullAssertionID;
+static IOPMAssertionID keepSystemAssertion = kIOPMNullAssertionID;
+
+void
+macVNCSetKeepDisplayAwake(rfbBool enabled)
+{
+    pthread_mutex_lock(&power_mutex);
+    if (enabled) {
+        if (keepDisplayAssertion == kIOPMNullAssertionID &&
+            IOPMAssertionCreateWithName(kIOPMAssertPreventUserIdleDisplaySleep,
+                                        kIOPMAssertionLevelOn,
+                                        CFSTR("macVNC keep display awake"),
+                                        &keepDisplayAssertion) != kIOReturnSuccess)
+            keepDisplayAssertion = kIOPMNullAssertionID;
+        if (keepSystemAssertion == kIOPMNullAssertionID &&
+            IOPMAssertionCreateWithName(kIOPMAssertPreventUserIdleSystemSleep,
+                                        kIOPMAssertionLevelOn,
+                                        CFSTR("macVNC keep display awake"),
+                                        &keepSystemAssertion) != kIOReturnSuccess)
+            keepSystemAssertion = kIOPMNullAssertionID;
+    } else {
+        if (keepDisplayAssertion != kIOPMNullAssertionID)
+            IOPMAssertionRelease(keepDisplayAssertion);
+        if (keepSystemAssertion != kIOPMNullAssertionID)
+            IOPMAssertionRelease(keepSystemAssertion);
+        keepDisplayAssertion = kIOPMNullAssertionID;
+        keepSystemAssertion = kIOPMNullAssertionID;
+    }
+    pthread_mutex_unlock(&power_mutex);
+}
+
+rfbBool
+macVNCKeepDisplayAwakeIsHeld(void)
+{
+    pthread_mutex_lock(&power_mutex);
+    rfbBool held = keepDisplayAssertion != kIOPMNullAssertionID;
+    pthread_mutex_unlock(&power_mutex);
+    return held;
+}
