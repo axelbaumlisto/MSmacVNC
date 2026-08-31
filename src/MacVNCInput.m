@@ -221,6 +221,23 @@ static CFStringRef gMappedSourceID = NULL;
 static rfbBool keyboardInit(void);
 static void keyboardShutdownLocked(void);
 
+/*
+ * MAIN THREAD ONLY. Every Text Input Source call in this file now happens
+ * here, and that is not tidiness - it is the fix for a crash.
+ *
+ * KbdAddEvent used to call this on a LibVNCServer client thread. On current
+ * macOS, TISCopyCurrentKeyboardInputSource reaches
+ * isCreateCurrentKeyboardInputSourceRef, which runs dispatch_assert_queue and
+ * kills the process with SIGTRAP when it is not on the queue it expects. The
+ * whole server died the moment somebody typed:
+ *
+ *   KbdAddEvent -> TSMCurrentKeyboardInputSourceRefCreate
+ *               -> dispatch_assert_queue -> EXC_BREAKPOINT
+ *
+ * So the layout is now refreshed only from the main thread - once at launch and
+ * again whenever macOS says the selected input source changed - and client
+ * threads do nothing but read the maps this produced.
+ */
 static void
 keyboardRefreshIfLayoutChangedLocked(void)
 {
@@ -247,7 +264,9 @@ KbdAddEvent(rfbBool down, rfbKeySym keySym, struct _rfbClientRec* cl)
     (void)cl;
     undim();
     pthread_mutex_lock(&keyboardMutex);
-    keyboardRefreshIfLayoutChangedLocked();
+    /* NO Text Input Source call here. This is a client thread, and TIS asserts
+       its queue and aborts the process; see keyboardRefreshIfLayoutChangedLocked.
+       The maps are kept current by the main-thread refresher instead. */
 
     CGKeyCode keyCode = (CGKeyCode)-1;
     for (size_t i = 0; i < sizeof(specialKeyMap) / sizeof(specialKeyMap[0]); ++i) {
@@ -547,11 +566,22 @@ rfbBool macVNCInputStart(void)
     CGEventSourceSetUserData(eventSource, MACVNC_CURTAIN_INPUT_EVENT_MAGIC);
     memset(&pointerState, 0, sizeof(pointerState));
     macVNCClearModifiers(&keyboardModifierState);
-    if (!keyboardInit()) {
-        macVNCInputShutdown();
-        return FALSE;
-    }
+    /* keyboardInit() is NOT called here any more: this runs on the server
+       lifecycle queue, and its Text Input Source calls abort the process off
+       the main thread. macVNCInputRefreshKeyboardLayout() does it from the main
+       thread at launch, and again on every input-source change.
+
+       Missing maps are survivable and were already handled - the unicode
+       fallback path below covers ASCII - so a server that starts before the
+       first refresh types rather than refuses. */
     return TRUE;
+}
+
+void macVNCInputRefreshKeyboardLayout(void)
+{
+    pthread_mutex_lock(&keyboardMutex);
+    keyboardRefreshIfLayoutChangedLocked();
+    pthread_mutex_unlock(&keyboardMutex);
 }
 
 void macVNCInputShutdown(void)
@@ -578,8 +608,22 @@ void macVNCInputShutdown(void)
 
 bool macVNCInputHasResources(void)
 {
-    return eventSource || charKeyMap || charShiftKeyMap ||
-           charAltGrKeyMap || charShiftAltGrKeyMap;
+    /*
+     * SERVER-owned resources only.
+     *
+     * The keymaps used to count here, and once the layout began being built at
+     * app launch - on the main thread, which is the only place the Text Input
+     * Source API tolerates - that made serverHasLifecycleResourcesLocked()
+     * answer "a run is already live" in a brand new process. The very first
+     * start request was then refused with "VNC server is already running" and
+     * the app listened on nothing at all. Caught by a test instance that came
+     * up with a dead port and a four-line log.
+     *
+     * The event source is created by macVNCInputStart and released by
+     * macVNCInputShutdown, so it tracks a RUN. The keymaps outlive runs by
+     * design: they describe the user's keyboard, not this server's lifetime.
+     */
+    return eventSource != NULL;
 }
 
 #if defined(MACVNC_ENABLE_TEST_HOOKS)

@@ -21,6 +21,17 @@ rfbBool macVNCInputStart(void);
 /* Release the CGEventSource and keyboard maps. Safe to call repeatedly. */
 void macVNCInputShutdown(void);
 
+/*
+ * Rebuild the keysym->keycode maps for the current keyboard layout.
+ *
+ * MAIN THREAD ONLY, and that restriction is the whole point. The Text Input
+ * Source API asserts its dispatch queue on current macOS and aborts the
+ * process; calling it from a LibVNCServer client thread crashed the server the
+ * moment a viewer typed. Call it once at launch and again whenever macOS
+ * reports that the selected input source changed.
+ */
+void macVNCInputRefreshKeyboardLayout(void);
+
 /* TRUE while any input resource (event source or a keymap) is still live. */
 bool macVNCInputHasResources(void);
 

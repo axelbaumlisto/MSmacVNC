@@ -11,7 +11,9 @@
 #import "MacVNCStatusText.h"
 #import "MacVNCStartFailure.h"
 #import "MacVNCPermissionsPanel.h"
+#import "MacVNCInput.h"
 #import "MacVNCPowerMgmt.h"
+#import <Carbon/Carbon.h>
 #import "MacVNCPreferences.h"
 #import "MacVNCDefaultsKeys.h"
 #import "MacVNCListenMode.h"
@@ -236,6 +238,18 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
     macVNCAuthenticatedClientsChangedHandler = macVNCAuthenticatedClientsChanged_;
     macVNCPermissionUIServerRunningProvider = macVNCServerIsRunning_;
     macVNCRegisterDefaults();
+
+    /* Keyboard layout, on the MAIN thread and before the server can accept a
+       viewer. The Text Input Source API asserts its dispatch queue on current
+       macOS and aborts the process, so this may never move to the lifecycle
+       queue or to a client thread - which is exactly where it used to happen:
+       typing on a connected viewer killed the whole server with SIGTRAP. */
+    macVNCInputRefreshKeyboardLayout();
+    [NSDistributedNotificationCenter.defaultCenter
+        addObserver:self
+           selector:@selector(keyboardInputSourceChanged:)
+               name:(NSString *)kTISNotifySelectedKeyboardInputSourceChanged
+             object:nil];
     /* After the defaults exist and before the server can accept anyone: this
        also clears a clamshell bit stranded by a previous run that crashed
        while armed, which nothing else on the machine will ever clear. */
@@ -268,6 +282,7 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
 {
     [self.updateTimer invalidate];
     self.updateTimer = nil;
+    [NSDistributedNotificationCenter.defaultCenter removeObserver:self];
     /* The kernel would reclaim these when the process dies; released here so
        the quit path says out loud what it is giving up. */
     macVNCSetKeepDisplayAwake(FALSE);
@@ -892,6 +907,14 @@ static NSMenuItem *addRow(NSMenu *menu, NSString *title, SEL action,
 /* -----------------------------------------------------------------------
  * Menu actions
  * ----------------------------------------------------------------------- */
+
+/* Main thread, by contract of the notification centre - which is the only
+   thread the Text Input Source API tolerates. */
+- (void)keyboardInputSourceChanged:(NSNotification *)note
+{
+    (void)note;
+    macVNCInputRefreshKeyboardLayout();
+}
 
 - (void)updateMenuStatus
 {

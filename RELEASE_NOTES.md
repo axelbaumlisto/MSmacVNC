@@ -1,3 +1,44 @@
+# macVNC 0.4.7
+
+## Typing on a viewer crashed the whole server
+
+```text
+KbdAddEvent -> TSMCurrentKeyboardInputSourceRefCreate
+            -> dispatch_assert_queue -> EXC_BREAKPOINT (SIGTRAP)
+```
+
+`KbdAddEvent` runs on a LibVNCServer **client thread**, and it called
+`TISCopyCurrentKeyboardInputSource` on every keystroke to notice input-source
+changes. On current macOS that call reaches
+`isCreateCurrentKeyboardInputSourceRef`, which runs `dispatch_assert_queue` and
+aborts the process when it is not on the queue it expects. The server did not
+drop the client - it died, taking the listener with it, so nothing could
+reconnect. Caught from a real crash report, not from a test.
+
+Every Text Input Source call now happens on the **main thread**: once at launch
+and again whenever macOS reports that the selected input source changed, via
+`kTISNotifySelectedKeyboardInputSourceChanged`. Client threads only read the
+maps that produced. `macVNCInputStart` no longer builds them either - it runs on
+the server lifecycle queue, which is equally not the main thread.
+
+Verified by driving real RFB key events at a live server: modifiers and letters,
+process alive, no new crash report.
+
+## ...and the first version of that fix stopped the server from starting at all
+
+Moving the layout build to launch made the keymaps exist before any server did.
+They counted as "input resources", so `serverHasLifecycleResourcesLocked()`
+reported that a run was already live in a brand new process, and the first start
+request was refused with *"VNC server is already running"* - leaving the app
+listening on nothing, with a four-line log. Found by a test instance whose port
+came up dead.
+
+Only the event source describes a run now; the keymaps describe the user's
+keyboard and outlive runs by design. Both halves have a regression witness, and
+the mutation that restores the old predicate is killed.
+
+---
+
 # macVNC 0.4.6
 
 ## macVNC can keep the Mac awake itself
