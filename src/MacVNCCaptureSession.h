@@ -125,13 +125,38 @@ typedef void (*MacVNCCaptureFailureHandler)(bool likelyPermissionDenial);
  * every Build - independent of whether the layout content did - tells the
  * frame handler that the OLD session's stream is no longer the current one.
  *
+ * `desiredExcluded` is the ONE fix for a race a whole-diff review found: a
+ * caller that rebuilds a session while curtain mode is up (mac.m's
+ * rearmCaptures(), passing whatever macVNCCaptureSessionSelfExcluded() read a
+ * moment before this call) used to have Build unconditionally publish
+ * "not excluded" and re-request the real thing only AFTER Start() - and
+ * -setExcludesOwnApplication: needs a live SCStream, which Start() only
+ * constructs asynchronously, so that request commonly lost the race. Nothing
+ * bounded how long the curtain's own 1Hz heartbeat (which may only ever LIFT,
+ * never re-raise except on a new first-client edge) could see "not excluded"
+ * in the meantime - and StopAndWait alone, which runs before any of this, is
+ * documented as taking bounded but REAL seconds, so the exposed window was
+ * not a rare tail case, it was most rebuilds. Passing the intent IN removes
+ * the false reading instead of racing to correct it: when true, Build
+ * publishes macVNCCaptureSessionSelfExcluded() == true IMMEDIATELY (before
+ * any stream exists, before Start() has even been called) and
+ * macVNCCaptureSessionStart() below then drives the SAME bounded, best-effort
+ * retry that used to live in mac.m internally, on THIS module's own clock -
+ * so the curtain controller's heartbeat, which only ever reads
+ * macVNCCaptureSessionSelfExcluded(), never observes a false reading for a
+ * rebuild that is still legitimately in flight. Only if every retry is
+ * exhausted does it become false, which is the one case a lift is actually
+ * owed. Pass false for the ordinary case (no curtain, or the very first
+ * Build of a server run, before any client has ever raised one).
+ *
  * Does NOT start capture - Start does, once a client is authenticated.
  */
 bool macVNCCaptureSessionBuild(const MacVNCDisplayLayout *layout,
                                uint64_t generation,
                                int captureFramesPerSecond,
                                MacVNCCaptureFrameHandler frameHandler,
-                               MacVNCCaptureFailureHandler failureHandler);
+                               MacVNCCaptureFailureHandler failureHandler,
+                               bool desiredExcluded);
 
 /* Releases the streams. A stream whose work never quiesced is deliberately
    leaked rather than freed while a callback may still touch it. */
@@ -141,14 +166,21 @@ size_t macVNCCaptureSessionCount(void);
 
 /*
  * Whether the CURRENT session's streams are excluding this application, i.e.
- * whether what a successful SetSelfExcluded(true) established is still true.
+ * whether what a successful SetSelfExcluded(true) established is still true -
+ * OR, since Build's desiredExcluded parameter, whether a rebuild's own
+ * best-effort reestablishment is still within its bounded retry budget (see
+ * macVNCCaptureSessionBuild). The curtain controller cannot tell those two
+ * apart, on purpose: it does not need to, and it must never see a false
+ * reading for a rebuild that is still legitimately trying.
  *
- * False when there is no session, and false again after a rebuild: the
- * exclusion is state on an SCStream and Build always constructs the default
- * filter, so a server stop/start silently un-hides us. Nothing reports that,
- * which is why it must be ASKED - a curtain whose windows are up over a stream
- * that no longer excludes them is the one state the raise/lift ordering exists
- * to prevent, and the curtain's controller polls this to catch it.
+ * False when there is no session, false again after a rebuild NOT asked to
+ * preserve exclusion (the ordinary case - no curtain, or the first Build of a
+ * server run): the exclusion is state on an SCStream and Build always
+ * constructs the default filter, so a server stop/start silently un-hides us.
+ * Nothing reports that, which is why it must be ASKED - a curtain whose
+ * windows are up over a stream that no longer excludes them is the one state
+ * the raise/lift ordering exists to prevent, and the curtain's controller
+ * polls this to catch it.
  */
 bool macVNCCaptureSessionSelfExcluded(void);
 

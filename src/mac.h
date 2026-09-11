@@ -272,6 +272,21 @@ void macVNCSetCaptureKeepWarmForTesting(uint64_t ns);
    react to. See CaptureLiveness.h for why silence itself is the signal. */
 unsigned macVNCCaptureRearmCountForTesting(void);
 
+/* How many times a re-arm ATTEMPT failed (rearmCaptures() itself returned
+   false) - as opposed to macVNCCaptureRearmCountForTesting(), which only
+   counts successes. A post-audit fix ("FIX-A"/F1) made a failed attempt count
+   toward maxRearms too, so GiveUp is reachable instead of retrying at 1Hz
+   forever; this is the witness that the FAILURE branch's bookkeeping actually
+   runs, not just the success branch's. */
+unsigned macVNCCaptureRearmFailureCountForTesting(void);
+
+/* How many times the watchdog resolved GiveUp (maxRearms failed attempts with
+   no recovering frame) and reported a capture failure because of it. Without
+   this a test can only infer GiveUp happened by an absence (no further
+   re-arms), which is indistinguishable from "the test did not wait long
+   enough". */
+unsigned macVNCCaptureGiveUpCountForTesting(void);
+
 /*
  * Feeds one synthetic, correctly-sized (zeroed) frame for displayIndex
  * directly through the real compositeCapturedFrame, carrying generation -

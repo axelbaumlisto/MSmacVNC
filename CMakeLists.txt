@@ -661,6 +661,16 @@ if(BUILD_TESTING)
     add_test(NAME capture_liveness_rearm COMMAND test_capture_liveness_rearm)
     set_tests_properties(capture_liveness_rearm PROPERTIES SKIP_RETURN_CODE 77)
 
+    # B4 (post-audit FIX-B): the FAILURE half of a live re-arm through the
+    # same real glue - a fault-injected macVNCCaptureSessionBuild() that keeps
+    # failing, proving gRearmsSinceFrame/gLastRearmNs advance on failure too
+    # (FIX-A) and that GiveUp is actually reachable, not just theoretically so.
+    add_executable(test_capture_liveness_rearm_failure tests/test_capture_liveness_rearm_failure.m)
+    target_include_directories(test_capture_liveness_rearm_failure PRIVATE src)
+    target_link_libraries(test_capture_liveness_rearm_failure macvnc_core_testable)
+    add_test(NAME capture_liveness_rearm_failure COMMAND test_capture_liveness_rearm_failure)
+    set_tests_properties(capture_liveness_rearm_failure PROPERTIES SKIP_RETURN_CODE 77)
+
     add_executable(test_first_frame_wait tests/test_first_frame_wait.m)
     target_include_directories(test_first_frame_wait PRIVATE src)
     target_link_libraries(test_first_frame_wait macvnc_core_testable)
