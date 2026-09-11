@@ -457,6 +457,18 @@ pixels rather than points.
   instead of a threshold. Mirrored secondaries are dropped from that target: the
   active list excludes them, the online list does not, and identical bounds make
   the layout builder fail as overlapping.
+- **CaptureLiveness** — whether a stream that is technically running is still
+  delivering frames. Measured, not imagined: the desk changed shape once while
+  captures were live, `SCStream` went silent with no `didStopWithError`, and
+  macVNC served viewers a 42-hour-old canvas until someone restarted the app by
+  hand. `mac.m` stamps a per-display timestamp at the one place a frame becomes
+  pixels (`compositeCapturedFrame`); a 1Hz watchdog on the existing capture-stop
+  queue reads the oldest one and asks this module for a verdict: `Alive`,
+  `Rearm` (stop and rebuild the SAME layout's streams - no re-read, no server
+  restart), or `GiveUp` (report the failure through the path that already
+  handles a real capture error). No client, or captures not running, is always
+  `Alive` - the design this replaces would have re-armed a display that idled
+  itself to sleep with nobody watching.
 - **MacVNCClamshellPolicy / MacVNCClamshellMarker / MacVNCClamshell** —
   closed-display mode. The policy
   half is pure C and holds every rule; the marker owns the persisted record; the
@@ -559,7 +571,7 @@ pixels rather than points.
 
 ## Tests
 
-`ctest` runs 43 targets (the number is enforced: `architecture_doc` compares
+`ctest` runs 45 targets (the number is enforced: `architecture_doc` compares
 this sentence against CMakeLists.txt's `add_test` count, so a target added or
 commented out fails the suite until this line is updated deliberately). Every
 assertion added here is checked by mutating the source and confirming the test
