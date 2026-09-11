@@ -54,6 +54,7 @@ testIdleServerIsAlwaysAlive(void)
     MacVNCCaptureLivenessInput input = {
         .capturesRunning   = true,
         .clientsConnected  = false,
+        .anyDisplayActive  = true,
         .nowNs             = BASE_NS + 1000ULL * NS_PER_SEC,
         .lastFrameNs       = BASE_NS,   /* stale */
         .capturesStartedNs = BASE_NS,
@@ -72,6 +73,7 @@ testCapturesNotRunningIsAlive(void)
     MacVNCCaptureLivenessInput input = {
         .capturesRunning   = false,
         .clientsConnected  = true,
+        .anyDisplayActive  = true,
         .nowNs             = BASE_NS + 1000ULL * NS_PER_SEC,
         .lastFrameNs       = 0,
         .capturesStartedNs = 0,
@@ -90,6 +92,7 @@ testGraceWindowBeforeFirstFrame(void)
     MacVNCCaptureLivenessInput input = {
         .capturesRunning   = true,
         .clientsConnected  = true,
+        .anyDisplayActive  = true,
         .nowNs             = BASE_NS + 5ULL * NS_PER_SEC,
         .lastFrameNs       = 0,
         .capturesStartedNs = BASE_NS,
@@ -114,6 +117,7 @@ testSilenceThresholdBoundary(void)
     MacVNCCaptureLivenessInput input = {
         .capturesRunning   = true,
         .clientsConnected  = true,
+        .anyDisplayActive  = true,
         .lastFrameNs       = BASE_NS + 20ULL * NS_PER_SEC,
         .capturesStartedNs = BASE_NS,
         .lastRearmNs       = 0,
@@ -139,6 +143,7 @@ testCooldownBlocksSecondRearm(void)
     MacVNCCaptureLivenessInput input = {
         .capturesRunning   = true,
         .clientsConnected  = true,
+        .anyDisplayActive  = true,
         .lastFrameNs       = lastFrame,
         .capturesStartedNs = BASE_NS,
         .lastRearmNs       = rearmedAt,
@@ -160,6 +165,7 @@ testMaxRearmsExhaustedGivesUp(void)
     MacVNCCaptureLivenessInput input = {
         .capturesRunning   = true,
         .clientsConnected  = true,
+        .anyDisplayActive  = true,
         .lastFrameNs       = lastFrame,
         .capturesStartedNs = BASE_NS,
         .lastRearmNs       = rearmedAt,
@@ -182,6 +188,7 @@ testFreshFrameResetsRearmCounter(void)
     MacVNCCaptureLivenessInput input = {
         .capturesRunning   = true,
         .clientsConnected  = true,
+        .anyDisplayActive  = true,
         .lastFrameNs       = recoveredFrame,
         .capturesStartedNs = BASE_NS,
         .lastRearmNs       = recoveredFrame - 20ULL * NS_PER_SEC, /* the re-arm that produced it, well outside the cooldown window by now */
@@ -189,6 +196,38 @@ testFreshFrameResetsRearmCounter(void)
         .nowNs             = recoveredFrame + limits.silenceNs,
     };
     assert(macVNCResolveCaptureLiveness(&input, &limits) == MacVNCCaptureRearm);
+}
+
+static void
+testNoActiveDisplayIsAlive(void)
+{
+    /* A denied/failed power assertion (dimmingInit()) lets the display
+       idle-sleep with a client still connected: ScreenCaptureKit goes silent
+       for a legitimate reason, not the dead-stream bug this module exists to
+       catch. Every other input here is deliberately picked to ALREADY be past
+       maxRearms - if anyDisplayActive did not override them, this would
+       resolve GiveUp, not Alive. Re-arming cannot wake a display, so trying
+       would only spend the whole budget confirming what is already known. */
+    MacVNCCaptureLivenessLimits limits = shippedLimits();
+    uint64_t lastFrame = BASE_NS + 20ULL * NS_PER_SEC;
+    uint64_t rearmedAt = lastFrame + limits.silenceNs;
+    MacVNCCaptureLivenessInput input = {
+        .capturesRunning   = true,
+        .clientsConnected  = true,
+        .anyDisplayActive  = false,
+        .lastFrameNs       = lastFrame,
+        .capturesStartedNs = BASE_NS,
+        .lastRearmNs       = rearmedAt,
+        .rearmsSinceFrame  = limits.maxRearms,
+        .nowNs             = rearmedAt + limits.cooldownNs,
+    };
+    assert(macVNCResolveCaptureLiveness(&input, &limits) == MacVNCCaptureAlive);
+
+    /* The moment a display comes back, silence is judged on its own terms
+       again - this input differs only in anyDisplayActive, everything else
+       held identical to the GiveUp-triggering case above. */
+    input.anyDisplayActive = true;
+    assert(macVNCResolveCaptureLiveness(&input, &limits) == MacVNCCaptureGiveUp);
 }
 
 int
@@ -202,6 +241,7 @@ main(void)
     testCooldownBlocksSecondRearm();
     testMaxRearmsExhaustedGivesUp();
     testFreshFrameResetsRearmCounter();
+    testNoActiveDisplayIsAlive();
 
     puts("test_capture_liveness: all assertions passed");
     return 0;

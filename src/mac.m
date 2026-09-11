@@ -54,7 +54,8 @@ static rfbScreenInfoPtr rfbScreen;
 
 /* Set by AppDelegate; invoked on the main queue when capture fails at runtime. */
 void (*macVNCScreenCaptureFailureHandler)(bool likelyPermissionDenial,
-                                          uint64_t serverGeneration) = NULL;
+                                          uint64_t serverGeneration,
+                                          uint64_t captureGeneration) = NULL;
 
 
 /* Injected permission gate; see mac.h. NULL means unrestricted. */
@@ -304,9 +305,13 @@ static void macVNCEnsureStopQueue(void)
  * by its `generation` (see gCaptureSessionGeneration) before
  * compositeCapturedFrame ever reaches this array, so an index here is always
  * live-session-fresh, never a stale session's position reinterpreted against
- * the current one. 0 means "no frame yet for that slot" - macVNCMonotonicNow()
+ * the current one. 0 means "no frame yet for that slot" - macVNCUptimeNow()
  * never returns 0, so it doubles as a safe sentinel with no separate bool
- * needed alongside it.
+ * needed alongside it. This array, gCapturesStartedNs and gLastRearmNs are
+ * ALL stamped with macVNCUptimeNow(), never macVNCMonotonicNow(): the
+ * watchdog measures elapsed AWAKE time, so a long system sleep is never
+ * mistaken for a dead stream (see macVNCUptimeNow()'s own comment for the
+ * measurement that established this).
  */
 static _Atomic uint64_t gLastFrameNs[MACVNC_MAX_DISPLAYS];
 /* When the currently running captures were told to start - the watchdog's
@@ -790,7 +795,7 @@ compositeCapturedFrame(MacVNCCaptureFrameOrigin origin,
        to match: a stream delivering wrong-sized frames is a different bug
        from one that stopped delivering anything, and only the watchdog cares
        about the latter. */
-    atomic_store(&gLastFrameNs[origin.displayIndex], macVNCMonotonicNow());
+    atomic_store(&gLastFrameNs[origin.displayIndex], macVNCUptimeNow());
     /* A delivered frame proves the stream that produced it is alive again, so
        whatever re-arm count a PRIOR silence ran up no longer describes the
        current situation - without this reset a stream that recovers on its
@@ -825,9 +830,18 @@ reportCaptureFailure(bool likelyPermissionDenial)
        (queued behind a modal, after the server was stopped and restarted) can be
        discarded by the handler. */
     uint64_t generation = atomic_load(&serverGeneration);
+    /* AND stamp which capture ATTEMPT it belongs to: gCaptureSessionGeneration
+       changes on every Build, successful or not (nextCaptureSessionGeneration()
+       runs unconditionally at the top of rearmCaptures(), and again at every
+       ScreenInit/reconcile Build) - so this is a distinct number per re-arm
+       attempt within the SAME server run, which is exactly what
+       macVNCShouldActOnCaptureFailure needs to stop deduplicating a failed
+       re-arm, then another, then an honest GiveUp down to a single silent
+       report. */
+    uint64_t captureGeneration = atomic_load(&gCaptureSessionGeneration);
     /* No UI here: AppDelegate owns the single permission popup. */
     if (macVNCScreenCaptureFailureHandler)
-        macVNCScreenCaptureFailureHandler(likelyPermissionDenial, generation);
+        macVNCScreenCaptureFailureHandler(likelyPermissionDenial, generation, captureGeneration);
 }
 
 static rfbBool
@@ -1018,6 +1032,19 @@ captureLivenessLimits(void)
     return limits;
 }
 
+/* A plain, cheap read of "is any display awake right now" - no waking, no
+   display objects built, just the count collectDisplayInputs() itself checks
+   first. Reused by nothing else: collectDisplayInputs() needs the full list
+   to build a layout from, this needs only whether it would be empty, and a
+   shared helper for one comparison against zero is not worth the coupling. */
+static bool
+anyDisplayCurrentlyActive(void)
+{
+    CGDisplayCount reported = 0;
+    CGGetActiveDisplayList(0, NULL, &reported);
+    return reported > 0;
+}
+
 /* The minimum stamp over the displays actually in the layout: one dead panel
    of two must be caught, not averaged away by a lively one. */
 static uint64_t
@@ -1061,7 +1088,7 @@ rearmCaptures(void)
     macVNCCaptureSessionStopAndWait();
     for (size_t i = 0; i < MACVNC_MAX_DISPLAYS; ++i)
         atomic_store(&gLastFrameNs[i], 0);
-    atomic_store(&gCapturesStartedNs, macVNCMonotonicNow());
+    atomic_store(&gCapturesStartedNs, macVNCUptimeNow());
 
     /* Re-read the desk WITHOUT waking it: resolveDeskLayoutWithoutWaking()
        calls collectDisplayInputs(), never readAttachedDisplays(), and a
@@ -1166,7 +1193,8 @@ captureLivenessWatchdogFired(void)
     MacVNCCaptureLivenessInput input = {
         .capturesRunning   = gCapturesRunning,
         .clientsConnected  = atomic_load(&vncConnectedClients) > 0,
-        .nowNs             = macVNCMonotonicNow(),
+        .anyDisplayActive  = anyDisplayCurrentlyActive(),
+        .nowNs             = macVNCUptimeNow(),
         .lastFrameNs       = oldestFrameStamp(),
         .capturesStartedNs = atomic_load(&gCapturesStartedNs),
         .lastRearmNs       = atomic_load(&gLastRearmNs),
@@ -1184,16 +1212,29 @@ captureLivenessWatchdogFired(void)
         rfbLog("No capture frames for %.1f s; re-arming display captures\n",
                (double)sinceActivity / 1e9);
         if (!rearmCaptures()) {
-            /* Same layout, same call ScreenInit already trusted at startup,
-               now failing mid-run: there is nothing left to retry into, and
-               sitting through more silent cooldown cycles until maxRearms
-               reports GiveUp would only delay telling anyone about a failure
-               that is already known right now. */
+            /* Bookkeeping advances on failure too, not only on success below -
+               this was the bug a whole-diff audit caught: leaving
+               gLastRearmNs/gRearmsSinceFrame untouched here meant the very
+               next 1Hz tick saw the SAME inputs it just saw, resolved to
+               Rearm again, failed again, forever - maxRearms and GiveUp were
+               unreachable on exactly the path most likely to need them (a
+               re-read or rebuild that keeps failing the same way). A failed
+               attempt is still an attempt and must count toward the cap.
+               The immediate report below is kept ON TOP of that, not instead
+               of it: same layout, same call ScreenInit already trusted at
+               startup, now failing mid-run - there is nothing left to retry
+               into THIS attempt, so telling the user now rather than after
+               more silent cooldown cycles is still right. If this report is
+               swallowed by a stale/duplicate check upstream, the advanced
+               counters here are what still gets an honest GiveUp out within
+               the budget. */
+            atomic_store(&gLastRearmNs, macVNCUptimeNow());
+            atomic_fetch_add(&gRearmsSinceFrame, 1);
             rfbErr("Re-arm could not rebuild display captures; reporting a capture failure\n");
             reportCaptureFailure(false);
             return;
         }
-        atomic_store(&gLastRearmNs, macVNCMonotonicNow());
+        atomic_store(&gLastRearmNs, macVNCUptimeNow());
         atomic_fetch_add(&gRearmsSinceFrame, 1);
 #if defined(MACVNC_ENABLE_TEST_HOOKS)
         atomic_fetch_add(&gCaptureRearmCount, 1);
@@ -1277,7 +1318,7 @@ static void reconcileCaptureState(void)
                let the watchdog fire on its very first tick. */
             for (size_t i = 0; i < MACVNC_MAX_DISPLAYS; ++i)
                 atomic_store(&gLastFrameNs[i], 0);
-            atomic_store(&gCapturesStartedNs, macVNCMonotonicNow());
+            atomic_store(&gCapturesStartedNs, macVNCUptimeNow());
             atomic_store(&gLastRearmNs, 0);
             atomic_store(&gRearmsSinceFrame, 0);
             gCapturesRunning = true;
@@ -1289,13 +1330,32 @@ static void reconcileCaptureState(void)
                makes macOS raise its own dialog. The decision belongs to the
                permission owner, injected via macVNCCaptureAllowed. */
             rfbLog("Screen Recording is not granted; refusing to start capture\n");
+            /* No Build was even attempted here, so there is no fresh capture
+               attempt to identify - pass whatever gCaptureSessionGeneration
+               already holds. Every repeated connection attempt while the
+               permission stays denied therefore collapses to ONE alert per
+               server run, deliberately: unlike a re-arm's distinct failed
+               attempts, a denied permission does not change from one
+               connection attempt to the next, and the fix is the user's to
+               make - re-nagging on every attempt would not be more honest,
+               only noisier. */
             if (macVNCScreenCaptureFailureHandler)
-                macVNCScreenCaptureFailureHandler(true, vncServerCurrentGeneration());
+                macVNCScreenCaptureFailureHandler(true, vncServerCurrentGeneration(),
+                                                  atomic_load(&gCaptureSessionGeneration));
         }
     } else if (!wanted && gCapturesRunning) {
         /* Keep warm: schedule the real stop 30s out. The decision here stays
            instant and lock-consistent; the stop itself runs OFF the control
-           mutex (it waits seconds for in-flight SCK work). */
+           mutex (it waits seconds for in-flight SCK work).
+
+           Deliberately macVNCMonotonicNow(), NOT macVNCUptimeNow(): the
+           dispatch_source timer below is itself scheduled in sleep-inclusive
+           (continuous) time by the OS and will not fire until that much real
+           time, asleep or not, has passed - comparing its firing against an
+           awake-only deadline could read as "not due yet" right when this
+           ONE-SHOT timer fires, with nothing left to ever re-check. The
+           watchdog's clock and this one answer different questions on
+           purpose; see macVNCMonotonicNow()'s comment. */
         macVNCEnsureStopQueue();
 #if defined(MACVNC_ENABLE_TEST_HOOKS)
         uint64_t warm = atomic_load(&gCaptureKeepWarmOverrideNs);
