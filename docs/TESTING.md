@@ -11,7 +11,7 @@ ctest --test-dir build-arm64 --output-on-failure
 Registered tests:
 
 - `keysym_mapping`: ASCII, RFB Unicode, legacy X11 Cyrillic lower/upper, `ё`/`Ё`, unsupported non-BMP input.
-- `display_layout`: negative origins, vertically offset displays, seams, gaps, order independence, overlap rejection, RFB size limits, pointer mapping.
+- `display_layout`: negative origins, vertically offset displays, seams, gaps, order independence, overlap rejection, RFB size limits, pointer mapping, and `macVNCDisplayLayoutsEqual` (identical, reordered, resized, moved, count differs, empty, canvas-size-only difference, NULL handling).
 - `compositor`: BGRA placement, padded source rows, alpha-only noise suppression, black gaps, unchanged frames, partial dirty tiles, isolation of unrelated pixels.
 - `pointer_state`: valid positions, gap suppression, drag into gap, and release at the last valid position.
 - `keyboard_modifiers`: left/right modifier tracking, macOS flag mapping, one-shot Fn auto-release, and reset.

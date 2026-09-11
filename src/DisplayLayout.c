@@ -92,3 +92,45 @@ macVNCMapFramebufferPoint(const MacVNCDisplayLayout *layout,
     }
     return false; /* black gap between physical displays */
 }
+
+/* See the header: a landmine-avoidance margin, not evidence of expected
+   drift - two reads of an unchanged desk return bit-identical doubles. */
+#define MACVNC_DISPLAY_LAYOUT_EPSILON 0.5
+
+static bool
+sameLogicalValue(double a, double b)
+{
+    return fabs(a - b) < MACVNC_DISPLAY_LAYOUT_EPSILON;
+}
+
+bool
+macVNCDisplayLayoutsEqual(const MacVNCDisplayLayout *a, const MacVNCDisplayLayout *b)
+{
+    if (!a || !b)
+        return a == b; /* both NULL: vacuously equal; exactly one: never */
+    if (a->count != b->count || a->width != b->width || a->height != b->height)
+        return false;
+
+    for (size_t i = 0; i < a->count; ++i) {
+        const MacVNCDisplayGeometry *ga = &a->displays[i];
+        const MacVNCDisplayGeometry *gb = &b->displays[i];
+        if (ga->input.displayID != gb->input.displayID)
+            return false;
+        if (!sameLogicalValue(ga->input.logicalX, gb->input.logicalX) ||
+            !sameLogicalValue(ga->input.logicalY, gb->input.logicalY) ||
+            !sameLogicalValue(ga->input.logicalWidth, gb->input.logicalWidth) ||
+            !sameLogicalValue(ga->input.logicalHeight, gb->input.logicalHeight))
+            return false;
+        if (ga->input.pixelWidth != gb->input.pixelWidth ||
+            ga->input.pixelHeight != gb->input.pixelHeight)
+            return false;
+        /* Derived by macVNCBuildDisplayLayout from the logical rect above, but
+           compared explicitly anyway: a hand-built MacVNCDisplayLayout (as in
+           a re-arm's before/after snapshots, or a test) could otherwise have a
+           stale or mismatched origin survive undetected. */
+        if (ga->framebufferX != gb->framebufferX ||
+            ga->framebufferY != gb->framebufferY)
+            return false;
+    }
+    return true;
+}

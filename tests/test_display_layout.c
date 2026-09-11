@@ -2,6 +2,7 @@
 
 #include <assert.h>
 #include <math.h>
+#include <string.h>
 
 static int near(double a, double b) { return fabs(a - b) < 0.001; }
 
@@ -52,5 +53,62 @@ int main(void)
 
     MacVNCDisplayInput tooLarge[] = {{1, 0, 0, 70000, 100, 70000, 100}};
     assert(!macVNCBuildDisplayLayout(tooLarge, 1, &layout));
+
+    /* --- macVNCDisplayLayoutsEqual --- */
+
+    MacVNCDisplayLayout twoA, twoB;
+    assert(macVNCBuildDisplayLayout(current, 2, &twoA));
+    assert(macVNCBuildDisplayLayout(current, 2, &twoB));
+    assert(macVNCDisplayLayoutsEqual(&twoA, &twoB));
+    assert(macVNCDisplayLayoutsEqual(&twoB, &twoA));
+
+    /* Reordered desk, identical geometry: positional comparison, NOT set
+       equality - see the header for why a reorder must count as a change. */
+    MacVNCDisplayLayout reorderedTwo;
+    assert(macVNCBuildDisplayLayout(reversed, 2, &reorderedTwo));
+    assert(!macVNCDisplayLayoutsEqual(&twoA, &reorderedTwo));
+
+    /* One display resized (logical AND pixel). */
+    MacVNCDisplayInput resized[] = {
+        {1, 0, 0, 3840, 2160, 3840, 2160},
+        {2, -1710, 1603, 1200, 800, 1200, 800},
+    };
+    MacVNCDisplayLayout resizedLayout;
+    assert(macVNCBuildDisplayLayout(resized, 2, &resizedLayout));
+    assert(!macVNCDisplayLayoutsEqual(&twoA, &resizedLayout));
+
+    /* One display moved (logical origin only, same size). */
+    MacVNCDisplayInput moved[] = {
+        {1, 0, 0, 3840, 2160, 3840, 2160},
+        {2, -1710, 1000, 1710, 1112, 1710, 1112},
+    };
+    MacVNCDisplayLayout movedLayout;
+    assert(macVNCBuildDisplayLayout(moved, 2, &movedLayout));
+    assert(!macVNCDisplayLayoutsEqual(&twoA, &movedLayout));
+
+    /* Count differs. */
+    MacVNCDisplayLayout oneOnly;
+    assert(macVNCBuildDisplayLayout(current, 1, &oneOnly));
+    assert(!macVNCDisplayLayoutsEqual(&twoA, &oneOnly));
+
+    /* Both empty (no displays built at all - the zeroed struct): vacuously
+       equal, nothing to compare and no canvas mismatch either. */
+    MacVNCDisplayLayout emptyA, emptyB;
+    memset(&emptyA, 0, sizeof(emptyA));
+    memset(&emptyB, 0, sizeof(emptyB));
+    assert(macVNCDisplayLayoutsEqual(&emptyA, &emptyB));
+
+    /* Canvas size differs while every display entry is identical: a
+       hand-built pair (never producible by macVNCBuildDisplayLayout itself)
+       that only a WIDTH/HEIGHT check, not a per-display scan, can catch. */
+    MacVNCDisplayLayout widerCanvas = twoA;
+    widerCanvas.width += 4;
+    assert(!macVNCDisplayLayoutsEqual(&twoA, &widerCanvas));
+
+    /* NULL handling: both NULL is vacuously equal, exactly one is never. */
+    assert(macVNCDisplayLayoutsEqual(NULL, NULL));
+    assert(!macVNCDisplayLayoutsEqual(&twoA, NULL));
+    assert(!macVNCDisplayLayoutsEqual(NULL, &twoA));
+
     return 0;
 }

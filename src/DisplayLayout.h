@@ -64,3 +64,39 @@ bool macVNCMapFramebufferPoint(const MacVNCDisplayLayout *layout,
                                double *globalX,
                                double *globalY,
                                uint32_t *displayID);
+
+/*
+ * True when two layouts describe the same desk in the same arrangement.
+ *
+ * The comparison is POSITIONAL, not set-equality: two layouts with the same
+ * displays but at different array indices are NOT equal. That is deliberate,
+ * not an oversight - two real callers read a MacVNCDisplayLayout BY INDEX and
+ * would silently misattribute data across different physical displays if a
+ * reorder were called "no change":
+ *   - the capture-liveness watchdog's per-display frame timestamps (mac.m)
+ *     are indexed by position; calling a reorder "equal" would skip resetting
+ *     them, so a timestamp measuring how long PANEL A has been silent would
+ *     keep being read as PANEL B's history the moment the two swap slots;
+ *   - `macVNCSelectDisplays` with a specific index (or falling back to "first
+ *     entry" for PRIMARY) picks BY POSITION in whatever CoreGraphics just
+ *     enumerated - an enumeration order that is not guaranteed to stay the
+ *     same across two reads of an otherwise-unchanged desk. Treating a reorder
+ *     as "no change" would let a later positional selection start capturing a
+ *     different monitor with nothing anywhere saying so.
+ * Whichever of those two risks would actually materialize for a given reorder
+ * depends on facts this module does not have (why the order changed, which
+ * selector is configured) - so the safe rule is the one that can never hide a
+ * real difference: order counts.
+ *
+ * Equal requires: same `count`, same canvas `width`/`height`, and per index the
+ * same `displayID`, logical rect, pixel size and framebuffer origin.
+ *
+ * Logical coordinates are direct `CGDisplayBounds` reads, not the result of
+ * arithmetic on them, so two reads of a truly unchanged desk return
+ * bit-identical doubles in practice. The epsilon below exists only so this
+ * function is not a landmine if that ever stops being exactly true - it is not
+ * evidence that real drift is expected, and it is far smaller than any change
+ * a display reconfiguration could plausibly produce.
+ */
+bool macVNCDisplayLayoutsEqual(const MacVNCDisplayLayout *a,
+                               const MacVNCDisplayLayout *b);
