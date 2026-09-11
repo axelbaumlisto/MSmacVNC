@@ -58,6 +58,8 @@ set(SOURCE_FILES
     src/MacVNCSweepSchedule.c
     src/DisplayReadiness.h
     src/DisplayReadiness.c
+    src/CaptureLiveness.h
+    src/CaptureLiveness.c
     src/MacVNCClamshellPolicy.h
     src/MacVNCClamshellPolicy.c
     src/MacVNCClamshellMarker.h
@@ -269,6 +271,14 @@ if(BUILD_TESTING)
                    src/DisplayReadiness.c)
     target_include_directories(test_display_readiness PRIVATE src)
     add_test(NAME display_readiness COMMAND test_display_readiness)
+
+    # A stream that stopped delivering must not look like a screen that
+    # stopped changing. Pure C on purpose: no ScreenCaptureKit, no
+    # LibVNCServer, no wall clock - see src/CaptureLiveness.h.
+    add_executable(test_capture_liveness tests/test_capture_liveness.c
+                   src/CaptureLiveness.c)
+    target_include_directories(test_capture_liveness PRIVATE src)
+    add_test(NAME capture_liveness COMMAND test_capture_liveness)
 
     add_executable(test_clamshell_policy tests/test_clamshell_policy.c
                    src/MacVNCClamshellPolicy.c)
@@ -572,6 +582,9 @@ if(BUILD_TESTING)
         # reconcileCaptureState() re-evaluates closed-display mode alongside the
         # power assertions, so the testable core carries it too.
         src/DisplayReadiness.c
+        # The liveness watchdog reconcileCaptureState() arms/disarms lives in
+        # mac.m; its pure decision half must link alongside it.
+        src/CaptureLiveness.c
         src/MacVNCClamshell.m
         src/MacVNCClamshellMarker.m
         src/MacVNCClamshellPolicy.c
@@ -625,6 +638,17 @@ if(BUILD_TESTING)
     target_link_libraries(test_capture_restart macvnc_core_testable)
     add_test(NAME capture_restart COMMAND test_capture_restart)
     set_tests_properties(capture_restart PROPERTIES SKIP_RETURN_CODE 77)
+
+    # One full re-arm cycle through the mac.m glue (watchdog timer,
+    # rearmCaptures(), the frame-arrival stamp) on a real server run, not just
+    # CaptureLiveness.c's pure resolver in isolation. Without this,
+    # macVNCCaptureRearmCountForTesting()/macVNCSetCaptureLivenessLimitsForTesting
+    # would ship as hooks nothing calls.
+    add_executable(test_capture_liveness_rearm tests/test_capture_liveness_rearm.m)
+    target_include_directories(test_capture_liveness_rearm PRIVATE src)
+    target_link_libraries(test_capture_liveness_rearm macvnc_core_testable)
+    add_test(NAME capture_liveness_rearm COMMAND test_capture_liveness_rearm)
+    set_tests_properties(capture_liveness_rearm PROPERTIES SKIP_RETURN_CODE 77)
 
     add_executable(test_first_frame_wait tests/test_first_frame_wait.m)
     target_include_directories(test_first_frame_wait PRIVATE src)

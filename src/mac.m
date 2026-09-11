@@ -43,6 +43,7 @@
 #import "NetworkPolicyResolver.h"
 #import "MacVNCDisplayWake.h"
 #import "DisplayReadiness.h"
+#import "CaptureLiveness.h"
 #import "MacVNCPowerMgmt.h"
 #import "MacVNCClamshell.h"
 #import "mac.h"
@@ -165,6 +166,46 @@ static void macVNCEnsureStopQueue(void)
             "net.christianbeier.macVNC.captureStop", DISPATCH_QUEUE_SERIAL);
     });
 }
+
+/*
+ * Whether a technically-running stream is delivering frames - see
+ * CaptureLiveness.h for why silence, not an SCStream error, is the signal
+ * this watches for.
+ *
+ * gLastFrameNs is indexed by POSITION in displayLayout, the same index
+ * compositeCapturedFrame's geometry pointer already encodes (geometry is
+ * `&displayLayout.displays[i]`, per MacVNCCaptureSession.m). 0 means "no frame
+ * yet for that slot" - macVNCMonotonicNow() never returns 0, so it doubles as
+ * a safe sentinel with no separate bool needed alongside it.
+ */
+static _Atomic uint64_t gLastFrameNs[MACVNC_MAX_DISPLAYS];
+/* When the currently running captures were told to start - the watchdog's
+   grace-period anchor and, absent any frame yet, its silence anchor too. */
+static _Atomic uint64_t gCapturesStartedNs = 0;
+static _Atomic uint64_t gLastRearmNs = 0;
+static _Atomic unsigned gRearmsSinceFrame = 0;
+/* Armed and disarmed by reconcileCaptureState() and its stop paths, always
+   under captureControlMutex alongside the gCapturesRunning write they pair
+   with - a plain (non-atomic) pointer toggled from more than one call site
+   would otherwise race between one thread's disarm and another's re-arm. */
+static dispatch_source_t gCaptureLivenessTimer;
+#if defined(MACVNC_ENABLE_TEST_HOOKS)
+static _Atomic unsigned gCaptureRearmCount = 0;
+/* 0 = no override, same sentinel style as gCaptureKeepWarmOverrideNs.
+   maxRearms is not overridable: a test can already reach it by advancing
+   through cooldown windows, and a zero override would be ambiguous between
+   "unset" and "give up on the first attempt". */
+static _Atomic uint64_t gCaptureLivenessGraceOverrideNs = 0;
+static _Atomic uint64_t gCaptureLivenessSilenceOverrideNs = 0;
+static _Atomic uint64_t gCaptureLivenessCooldownOverrideNs = 0;
+void macVNCSetCaptureLivenessLimitsForTesting(uint64_t graceNs, uint64_t silenceNs,
+                                              uint64_t cooldownNs)
+{
+    atomic_store(&gCaptureLivenessGraceOverrideNs, graceNs);
+    atomic_store(&gCaptureLivenessSilenceOverrideNs, silenceNs);
+    atomic_store(&gCaptureLivenessCooldownOverrideNs, cooldownNs);
+}
+#endif
 
 /* Per-client bookkeeping: which counters this client has been added to, so a
    disconnect subtracts from each exactly once. There are TWO because the two
@@ -456,6 +497,14 @@ buildClientAccessList(void)
 static MacVNCImageProfile gImageProfile;
 
 /*
+ * The capture rate this run was started with. Set once by ScreenInit,
+ * re-read by the liveness watchdog's re-arm: it rebuilds the SAME session
+ * ScreenInit built, and a session built at the wrong rate is exactly the kind
+ * of silent mismatch this whole mechanism exists to avoid introducing.
+ */
+static int gCaptureFramesPerSecond;
+
+/*
  * Whether an unencrypted viewer is admitted. Written once before
  * rfbInitServer publishes the screen, read on client threads.
  */
@@ -503,6 +552,26 @@ compositeCapturedFrame(const MacVNCDisplayGeometry *geometry,
 {
     if (!pixels || !geometry)
         return true; /* nothing to composite; not a retryable condition */
+
+    /* The ONE write point for "a frame arrived" - see CaptureLiveness.h. The
+       call reaching this function at all is the liveness signal, independent
+       of whether its geometry below turns out to match: a stream that is
+       delivering wrong-sized frames is a different bug from one that stopped
+       delivering anything, and only the watchdog cares about the latter.
+       `geometry` is `&displayLayout.displays[i]` (MacVNCCaptureSession.m), so
+       a pointer-equality scan recovers the same index the watchdog reads by. */
+    for (size_t i = 0; i < displayLayout.count; ++i) {
+        if (&displayLayout.displays[i] == geometry) {
+            atomic_store(&gLastFrameNs[i], macVNCMonotonicNow());
+            /* A delivered frame proves the stream that produced it is alive
+               again, so whatever re-arm count a PRIOR silence ran up no
+               longer describes the current situation - without this reset a
+               stream that recovers on its own after two re-arms would need
+               only one more silent minute to hit maxRearms and GiveUp. */
+            atomic_store(&gRearmsSinceFrame, 0);
+            break;
+        }
+    }
 
     /* Copy BY VALUE before checking and using: `geometry` points into
        displayLayout, a static the NEXT start memsets and rewrites. The
@@ -630,6 +699,7 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond,
      transmission ceiling. Input processing and deferPtrUpdateTime are unchanged. */
   rfbScreen->deferUpdateTime = framebufferDeferMilliseconds;
 
+  gCaptureFramesPerSecond = captureFramesPerSecond;
   gEncryptionPolicy = encryptionPolicy;
   rfbLog("Encryption: %s\n", macVNCEncryptionPolicyName(encryptionPolicy));
   gImageProfile = imageProfile;
@@ -694,6 +764,151 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond,
 }
 
 
+static MacVNCCaptureLivenessLimits
+captureLivenessLimits(void)
+{
+    MacVNCCaptureLivenessLimits limits = {
+        .graceNs    = MACVNC_CAPTURE_LIVENESS_GRACE_NANOSECONDS,
+        .silenceNs  = MACVNC_CAPTURE_LIVENESS_SILENCE_NANOSECONDS,
+        .cooldownNs = MACVNC_CAPTURE_LIVENESS_COOLDOWN_NANOSECONDS,
+        .maxRearms  = MACVNC_CAPTURE_LIVENESS_MAX_REARMS,
+    };
+#if defined(MACVNC_ENABLE_TEST_HOOKS)
+    uint64_t override;
+    if ((override = atomic_load(&gCaptureLivenessGraceOverrideNs)) != 0)
+        limits.graceNs = override;
+    if ((override = atomic_load(&gCaptureLivenessSilenceOverrideNs)) != 0)
+        limits.silenceNs = override;
+    if ((override = atomic_load(&gCaptureLivenessCooldownOverrideNs)) != 0)
+        limits.cooldownNs = override;
+#endif
+    return limits;
+}
+
+/* The minimum stamp over the displays actually in the layout: one dead panel
+   of two must be caught, not averaged away by a lively one. */
+static uint64_t
+oldestFrameStamp(void)
+{
+    if (displayLayout.count == 0)
+        return 0;
+    uint64_t oldest = UINT64_MAX;
+    for (size_t i = 0; i < displayLayout.count; ++i) {
+        uint64_t stamp = atomic_load(&gLastFrameNs[i]);
+        if (stamp < oldest)
+            oldest = stamp;
+    }
+    return oldest;
+}
+
+/*
+ * Stop and rebuild the SAME layout's streams - the fix for a stream that went
+ * silent with no SCStream error to react to (the measured bug: the desk
+ * changed shape, `didStopWithError` never fired, viewers kept a 42-hour-old
+ * frame). Re-reading the desk and swapping the canvas on a genuine shape
+ * change is a later step; this can only revive a stream that still has a
+ * correct layout to run on.
+ */
+static bool
+rearmCaptures(void)
+{
+    macVNCCaptureSessionStopAndWait();
+    for (size_t i = 0; i < MACVNC_MAX_DISPLAYS; ++i)
+        atomic_store(&gLastFrameNs[i], 0);
+    atomic_store(&gCapturesStartedNs, macVNCMonotonicNow());
+    /* Checked, not discarded: a failed rebuild leaves Count() == 0 (per the
+       session header), and starting anyway would be exactly the silent
+       nothing-happens failure this whole mechanism exists to replace.
+       Mirrors ScreenInit's own `if (!macVNCCaptureSessionBuild(...)) return
+       FALSE;` (this file, above) for the same call, on the same layout. */
+    if (!macVNCCaptureSessionBuild(&displayLayout, gCaptureFramesPerSecond,
+                                   compositeCapturedFrame, reportCaptureFailure))
+        return false;
+    macVNCCaptureSessionStart();
+    return true;
+}
+
+static void
+captureLivenessWatchdogFired(void)
+{
+    pthread_mutex_lock(&captureControlMutex);
+    MacVNCCaptureLivenessInput input = {
+        .capturesRunning   = gCapturesRunning,
+        .clientsConnected  = atomic_load(&vncConnectedClients) > 0,
+        .nowNs             = macVNCMonotonicNow(),
+        .lastFrameNs       = oldestFrameStamp(),
+        .capturesStartedNs = atomic_load(&gCapturesStartedNs),
+        .lastRearmNs       = atomic_load(&gLastRearmNs),
+        .rearmsSinceFrame  = atomic_load(&gRearmsSinceFrame),
+    };
+    pthread_mutex_unlock(&captureControlMutex);
+
+    MacVNCCaptureLivenessLimits limits = captureLivenessLimits();
+    switch (macVNCResolveCaptureLiveness(&input, &limits)) {
+    case MacVNCCaptureAlive:
+        return;
+    case MacVNCCaptureRearm: {
+        uint64_t sinceActivity = input.nowNs -
+            (input.lastFrameNs ? input.lastFrameNs : input.capturesStartedNs);
+        rfbLog("No capture frames for %.1f s; re-arming display captures\n",
+               (double)sinceActivity / 1e9);
+        if (!rearmCaptures()) {
+            /* Same layout, same call ScreenInit already trusted at startup,
+               now failing mid-run: there is nothing left to retry into, and
+               sitting through more silent cooldown cycles until maxRearms
+               reports GiveUp would only delay telling anyone about a failure
+               that is already known right now. */
+            rfbErr("Re-arm could not rebuild display captures; reporting a capture failure\n");
+            reportCaptureFailure(false);
+            return;
+        }
+        atomic_store(&gLastRearmNs, macVNCMonotonicNow());
+        atomic_fetch_add(&gRearmsSinceFrame, 1);
+#if defined(MACVNC_ENABLE_TEST_HOOKS)
+        atomic_fetch_add(&gCaptureRearmCount, 1);
+#endif
+        return;
+    }
+    case MacVNCCaptureGiveUp:
+        rfbLog("Display captures did not recover after %u re-arm(s); "
+               "reporting a capture failure\n", limits.maxRearms);
+        reportCaptureFailure(false);
+        return;
+    }
+}
+
+/* Armed only while gCapturesRunning: an idle server with no client has
+   nothing to watch (the pure resolver already answers Alive for it), but
+   arming the timer anyway would tick forever on a server nobody is using.
+   Caller must hold captureControlMutex - see gCaptureLivenessTimer. */
+static void
+startCaptureLivenessWatchdog(void)
+{
+    if (gCaptureLivenessTimer)
+        return;
+    macVNCEnsureStopQueue();
+    gCaptureLivenessTimer = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_TIMER, 0, 0, gCaptureStopQueue);
+    dispatch_source_set_timer(gCaptureLivenessTimer,
+        dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
+        NSEC_PER_SEC, NSEC_PER_SEC / 5);
+    dispatch_source_set_event_handler(gCaptureLivenessTimer, ^{
+        captureLivenessWatchdogFired();
+    });
+    dispatch_resume(gCaptureLivenessTimer);
+}
+
+/* Caller must hold captureControlMutex - see gCaptureLivenessTimer. */
+static void
+stopCaptureLivenessWatchdog(void)
+{
+    if (!gCaptureLivenessTimer)
+        return;
+    dispatch_source_cancel(gCaptureLivenessTimer);
+    dispatch_release(gCaptureLivenessTimer);
+    gCaptureLivenessTimer = NULL;
+}
+
 /*
  * Drives captures to match the one invariant that matters: they run if and only
  * if at least one authenticated client is connected.
@@ -725,7 +940,17 @@ static void reconcileCaptureState(void)
 #if defined(MACVNC_ENABLE_TEST_HOOKS)
             atomic_fetch_add(&gCaptureStartCount, 1);
 #endif
+            /* A fresh watch on a fresh clock: whatever the previous run's
+               streams did or did not deliver is not this run's problem, and
+               starting the grace window from a stale gCapturesStartedNs would
+               let the watchdog fire on its very first tick. */
+            for (size_t i = 0; i < MACVNC_MAX_DISPLAYS; ++i)
+                atomic_store(&gLastFrameNs[i], 0);
+            atomic_store(&gCapturesStartedNs, macVNCMonotonicNow());
+            atomic_store(&gLastRearmNs, 0);
+            atomic_store(&gRearmsSinceFrame, 0);
             gCapturesRunning = true;
+            startCaptureLivenessWatchdog();
             rfbLog("Client connected; starting %lu display captures\n",
                    (unsigned long)macVNCCaptureSessionCount());
         } else {
@@ -765,6 +990,10 @@ static void reconcileCaptureState(void)
             if (due && stillRunning && !stillWanted) {
                 gCapturesRunning = false;
                 atomic_store(&gCaptureWarmDeadlineNs, 0);
+                /* Under the same lock as the write above: a plain pointer
+                   toggled from here and from the reconnect branch with no
+                   shared lock would race. */
+                stopCaptureLivenessWatchdog();
             } else {
                 due = false; /* reconnected meanwhile: keep warm wins */
             }
@@ -818,7 +1047,21 @@ vncServerDropCaptures(void)
     bool wasRunning = gCapturesRunning;
     gCapturesRunning = false;
     atomic_store(&gCaptureWarmDeadlineNs, 0);
+    stopCaptureLivenessWatchdog(); /* under the lock - see gCaptureLivenessTimer */
     pthread_mutex_unlock(&captureControlMutex);
+
+    /* Rendezvous BEFORE the wasRunning check, not after: wasRunning can read
+       false here while a re-arm from a snapshot taken just before the flip
+       above is still mid-flight on gCaptureStopQueue, unprotected by
+       captureControlMutex by design (see rearmCaptures). That re-arm's own
+       Build/Start would otherwise be free to run after this function returns,
+       resurrecting a session nothing is left to stop - the fact that THIS
+       call had nothing to do is not proof nothing else is doing something.
+       Never called with captureControlMutex held (already released above),
+       so this cannot deadlock against a keep-warm or watchdog block that
+       needs it. */
+    macVNCEnsureStopQueue();
+    dispatch_sync(gCaptureStopQueue, ^{});
 
     if (!wasRunning)
         return;
@@ -1229,7 +1472,19 @@ vncServerStopLocked(void)
     pthread_mutex_lock(&captureControlMutex);
     gCapturesRunning = false;
     atomic_store(&gCaptureWarmDeadlineNs, 0); /* full stop beats keep-warm */
+    stopCaptureLivenessWatchdog(); /* under the lock - see gCaptureLivenessTimer */
     pthread_mutex_unlock(&captureControlMutex);
+    /* Rendezvous with gCaptureStopQueue BEFORE touching the session directly -
+       see the identical comment in vncServerDropCaptures(). Disarming the
+       timer above only stops FUTURE fires; a re-arm already past its
+       mutex-protected snapshot runs StopAndWait/Build/Start unprotected by
+       captureControlMutex (by design - see rearmCaptures), so without this a
+       Build+Start landing after the Reset below would leave live SCStreams
+       capturing after the server declared itself stopped, with nothing left
+       to ever stop them. Called with the lock already released, so this
+       cannot deadlock against a keep-warm or watchdog block that needs it. */
+    macVNCEnsureStopQueue();
+    dispatch_sync(gCaptureStopQueue, ^{});
     macVNCCaptureSessionStopAndWait();
     macVNCCaptureSessionReset();
     atomic_store(&vncConnectedClients, 0);
@@ -1459,6 +1714,12 @@ macVNCCaptureStopCountForTesting(void)
     return atomic_load(&gCaptureStopCount);
 }
 
+unsigned
+macVNCCaptureRearmCountForTesting(void)
+{
+    return atomic_load(&gCaptureRearmCount);
+}
+
 /*
  * A synthetic client, so the window between "authenticated" and "receiving
  * updates" - in production the first-frame wait, which can be seconds - can be
@@ -1514,6 +1775,7 @@ macVNCResetCaptureStateForTesting(void)
     reconcileCaptureState();
     atomic_store(&gCaptureStartCount, 0);
     atomic_store(&gCaptureStopCount, 0);
+    atomic_store(&gCaptureRearmCount, 0);
 }
 
 bool

@@ -259,6 +259,16 @@ unsigned macVNCCaptureStartCountForTesting(void);
 unsigned macVNCCaptureStopCountForTesting(void);
 /* Override the keep-warm window (nanoseconds) for tests. */
 void macVNCSetCaptureKeepWarmForTesting(uint64_t ns);
+
+/* How many times the liveness watchdog re-armed a silently dead capture
+   stream - one that stopped delivering frames without an SCStream error to
+   react to. See CaptureLiveness.h for why silence itself is the signal. */
+unsigned macVNCCaptureRearmCountForTesting(void);
+/* Shrinks the watchdog's grace/silence/cooldown windows (nanoseconds; 0 keeps
+   the shipped default) so an e2e run can force a re-arm in seconds instead of
+   the shipped ~35s. maxRearms is not overridable - see the definition site. */
+void macVNCSetCaptureLivenessLimitsForTesting(uint64_t graceNs, uint64_t silenceNs,
+                                              uint64_t cooldownNs);
 void macVNCResetCaptureStateForTesting(void);
 /* Runs the real start/stop reconciler for the current client count. */
 void macVNCReconcileCaptureForTesting(void);
