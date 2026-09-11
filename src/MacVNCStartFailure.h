@@ -37,20 +37,39 @@ MacVNCStartAdvice macVNCResolveStartAdvice(MacVNCStartOutcome outcome);
 /*
  * Should this capture-failure notification be ACTED on?
  *
- * Pure decision for handleScreenCaptureFailure:. Two ways to say no:
- *  - reported != current: the run that raised it is no longer live;
- *  - reported == *lastHandled: a notification of this same run was already
- *    acted on. With one capturer per display, several failures arrive
- *    back-to-back before the async stop has bumped the generation, and
- *    without this latch each one stacks another modal alert.
+ * Pure decision for handleScreenCaptureFailure:. Two INDEPENDENT questions,
+ * kept as separate parameters on purpose:
+ *  - reportedServerGeneration != currentServerGeneration: the SERVER RUN that
+ *    raised this failure is no longer live (stopped/restarted since) - never
+ *    act on a report from a dead run.
+ *  - occurrence == *lastHandledOccurrence: this exact CAPTURE ATTEMPT'S
+ *    failure was already acted on. With one capturer per display, several
+ *    failures can arrive back-to-back from the SAME attempt before the async
+ *    stop has taken effect, and without this latch each one stacks another
+ *    modal alert.
+ *
+ * Before the capture-liveness watchdog, one capture failure was the only
+ * thing that could happen in a server's whole run, so a single generation
+ * answered both questions at once (the original signature's single
+ * reported/current pair, reused as the latch too). The watchdog can now
+ * report several DISTINCT failures within one run - a failed re-arm attempt,
+ * then another, then an honest GiveUp - and latching all of them to the RUN
+ * silently swallowed every one after the first: exactly the class of silent
+ * failure this whole mechanism exists to surface, recreated one layer up in
+ * AppDelegate. `occurrence` gives the caller an identity for "which attempt",
+ * orthogonal to which server run it happened in - mac.m passes the capture-
+ * session generation (see gCaptureSessionGeneration), which already changes
+ * on every Build attempt, successful or not.
  */
-/* lastHandled is optional: passing NULL applies only the staleness rule, which
-   is a case the tests exercise deliberately. It was declared non-null by the
-   file-wide NS_ASSUME_NONNULL, so those tests compiled with a warning that an
-   incremental build then hid from every later "warning-free" claim. */
-bool macVNCShouldActOnCaptureFailure(uint64_t reported,
-                                     uint64_t current,
-                                     uint64_t *_Nullable lastHandled);
+/* lastHandledOccurrence is optional: passing NULL applies only the staleness
+   rule, which is a case the tests exercise deliberately. It was declared
+   non-null by the file-wide NS_ASSUME_NONNULL, so those tests compiled with a
+   warning that an incremental build then hid from every later "warning-free"
+   claim. */
+bool macVNCShouldActOnCaptureFailure(uint64_t reportedServerGeneration,
+                                     uint64_t currentServerGeneration,
+                                     uint64_t occurrence,
+                                     uint64_t *_Nullable lastHandledOccurrence);
 
 /*
  * What a capture failure should COST.

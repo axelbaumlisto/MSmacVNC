@@ -7,6 +7,16 @@ macVNCResolveCaptureLiveness(const MacVNCCaptureLivenessInput *input,
     if (!input->clientsConnected || !input->capturesRunning)
         return MacVNCCaptureAlive;
 
+    /* A sleeping display is not a dead stream: nothing this module can do
+       (re-arming rebuilds the SAME asleep display) makes a display wake up,
+       and spending the whole re-arm budget finding that out only delays
+       reporting a REAL failure once the display does wake and still says
+       silent. See the field's own comment for why this differs from rule 1
+       above (a client is connected here; the SCREEN is what is unavailable,
+       not the audience). */
+    if (!input->anyDisplayActive)
+        return MacVNCCaptureAlive;
+
     uint64_t sinceStart = input->nowNs - input->capturesStartedNs;
 
     /* Still warming up: no first frame yet, and a cold start (measured

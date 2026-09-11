@@ -27,9 +27,31 @@ static void test_total_deadline_budget(void)
     assert(split.tv_sec == 3 && split.tv_nsec == 1);
 }
 
+/* Cannot literally sleep the machine in a unit test, but the defining
+   relationship between the two clocks is checkable without doing that:
+   CLOCK_MONOTONIC counts everything CLOCK_UPTIME_RAW counts PLUS however long
+   the machine has slept since boot, so it can never read behind it - equal
+   only on a machine that has never slept since boot, strictly ahead on any
+   real one. This is the same fact measured directly (2354.2s of accumulated
+   sleep across 20 events) that justified adding macVNCUptimeNow() at all. */
+static void test_uptime_excludes_sleep_monotonic_does_not(void)
+{
+    uint64_t uptimeBefore = macVNCUptimeNow();
+    uint64_t monotonicBefore = macVNCMonotonicNow();
+    assert(uptimeBefore > 0);
+    assert(monotonicBefore >= uptimeBefore);
+
+    uint64_t uptimeAfter = macVNCUptimeNow();
+    uint64_t monotonicAfter = macVNCMonotonicNow();
+    assert(uptimeAfter >= uptimeBefore);
+    assert(monotonicAfter >= monotonicBefore);
+    assert(monotonicAfter >= uptimeAfter);
+}
+
 int main(void)
 {
     test_total_deadline_budget();
+    test_uptime_excludes_sleep_monotonic_does_not();
 
     puts("readiness policy tests passed");
     return 0;

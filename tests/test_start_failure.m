@@ -24,23 +24,35 @@ static MacVNCStartOutcome alreadyRunning(BOOL granted)
 
 static void testCaptureFailureLatch(void)
 {
-    uint64_t last = 0;
-    /* Fresh generation: act, and remember it. */
-    assert(macVNCShouldActOnCaptureFailure(7, 7, &last) == true);
-    assert(last == 7);
-    /* Same generation again (multi-display failure storm, stop still queued):
-       must NOT act a second time - each act stacks a modal alert. */
-    assert(macVNCShouldActOnCaptureFailure(7, 7, &last) == false);
-    assert(last == 7);
-    /* A genuinely new run: act again. */
-    assert(macVNCShouldActOnCaptureFailure(8, 8, &last) == true);
-    assert(last == 8);
-    /* Stale notification from a dead run: never act. */
-    assert(macVNCShouldActOnCaptureFailure(3, 8, &last) == false);
-    assert(last == 8);
-    /* NULL latch: only the staleness rule applies. */
-    assert(macVNCShouldActOnCaptureFailure(8, 8, NULL) == true);
-    assert(macVNCShouldActOnCaptureFailure(7, 8, NULL) == false);
+    uint64_t lastOccurrence = 0;
+    /* Fresh occurrence within a live run: act, and remember it. */
+    assert(macVNCShouldActOnCaptureFailure(7, 7, 100, &lastOccurrence) == true);
+    assert(lastOccurrence == 100);
+    /* Same occurrence again (multi-display failure storm from the SAME
+       capture attempt, stop still queued): must NOT act a second time - each
+       act stacks a modal alert. */
+    assert(macVNCShouldActOnCaptureFailure(7, 7, 100, &lastOccurrence) == false);
+    assert(lastOccurrence == 100);
+    /* A DISTINCT occurrence in the SAME server run (a failed re-arm attempt,
+       then another, then GiveUp) must still act - this is the bug a
+       whole-diff audit caught: before this fix, a single server-generation
+       latch swallowed every capture failure after the first one in a run,
+       silencing the watchdog's own GiveUp report. */
+    assert(macVNCShouldActOnCaptureFailure(7, 7, 101, &lastOccurrence) == true);
+    assert(lastOccurrence == 101);
+    /* And that new occurrence dedupes against ITSELF the same way. */
+    assert(macVNCShouldActOnCaptureFailure(7, 7, 101, &lastOccurrence) == false);
+    /* A genuinely new server run: act again, whatever occurrence number it
+       carries. */
+    assert(macVNCShouldActOnCaptureFailure(8, 8, 1, &lastOccurrence) == true);
+    assert(lastOccurrence == 1);
+    /* Stale notification from a dead run: never act, even for an occurrence
+       never handled before. */
+    assert(macVNCShouldActOnCaptureFailure(3, 8, 999, &lastOccurrence) == false);
+    assert(lastOccurrence == 1);
+    /* NULL latch: only the staleness rule applies, occurrence is ignored. */
+    assert(macVNCShouldActOnCaptureFailure(8, 8, 42, NULL) == true);
+    assert(macVNCShouldActOnCaptureFailure(7, 8, 42, NULL) == false);
 }
 
 int main(void)

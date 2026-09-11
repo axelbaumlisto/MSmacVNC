@@ -42,15 +42,21 @@ NSString *macVNCStartAdviceBody(MacVNCStartAdvice advice)
 }
 
 bool
-macVNCShouldActOnCaptureFailure(uint64_t reported, uint64_t current,
-                                uint64_t *lastHandled)
+macVNCShouldActOnCaptureFailure(uint64_t reportedServerGeneration,
+                                uint64_t currentServerGeneration,
+                                uint64_t occurrence,
+                                uint64_t *lastHandledOccurrence)
 {
-    if (reported != current)
+    /* Stale run first: a report about a server that already stopped or
+       restarted must never touch the live one, whatever occurrence it
+       carries - occurrence numbers are only unique WITHIN one server run
+       (see gCaptureSessionGeneration), not across a stop/restart. */
+    if (reportedServerGeneration != currentServerGeneration)
         return false;
-    if (lastHandled != NULL && reported == *lastHandled)
+    if (lastHandledOccurrence != NULL && occurrence == *lastHandledOccurrence)
         return false;
-    if (lastHandled != NULL)
-        *lastHandled = reported;
+    if (lastHandledOccurrence != NULL)
+        *lastHandledOccurrence = occurrence;
     return true;
 }
 

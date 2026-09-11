@@ -42,6 +42,15 @@ typedef struct {
 typedef struct {
     bool     capturesRunning;
     bool     clientsConnected;
+    /* Is any display CURRENTLY active (CGGetActiveDisplayList > 0), read at
+       the same moment as the rest of this snapshot? A denied/failed power
+       assertion (dimmingInit()) lets the display idle-sleep with a client
+       still connected - ScreenCaptureKit then goes silent for a legitimate
+       reason this watchdog must not confuse with the dead-stream bug it
+       exists to catch: rearming a sleeping display cannot wake it, and
+       burning the whole re-arm budget on it only delays the moment the
+       machine's OWN wake, not a rebuild, actually fixes the picture. */
+    bool     anyDisplayActive;
     uint64_t nowNs;
     uint64_t lastFrameNs;       /* 0 = no frame has arrived yet            */
     uint64_t capturesStartedNs;
@@ -56,20 +65,26 @@ typedef enum {
 } MacVNCCaptureLivenessVerdict;
 
 /*
- * The six ordered rules:
+ * The seven ordered rules:
  *  1. no client, or captures not running -> Alive (nothing to watch; this is
  *     what keeps a display that idled itself to sleep with nobody watching
  *     out of the loop - the discarded design's 3am wake cycle looked exactly
  *     like this rule inverted);
- *  2. no frame yet and within the grace window -> Alive (a cold start, not a
+ *  2. no display currently active -> Alive (a DIFFERENT, legitimate reason
+ *     for silence than rule 1: a client IS watching, but the screen it would
+ *     watch is asleep - most often a denied power assertion, not a broken
+ *     capture. Re-arming cannot wake a display, so trying is wasted budget;
+ *     the machine's own wake is what actually fixes this, and the frame that
+ *     follows will reset every counter the normal way);
+ *  3. no frame yet and within the grace window -> Alive (a cold start, not a
  *     dead stream);
- *  3. a frame (or the start, if none has arrived) within the silence window
+ *  4. a frame (or the start, if none has arrived) within the silence window
  *     -> Alive;
- *  4. a re-arm already in flight within the cooldown window -> Alive (one
+ *  5. a re-arm already in flight within the cooldown window -> Alive (one
  *     re-arm at a time, so the watchdog cannot queue a StopAndWait behind
  *     another every second a stream stays dead);
- *  5. the re-arm budget for this silence is spent -> GiveUp;
- *  6. otherwise -> Rearm.
+ *  6. the re-arm budget for this silence is spent -> GiveUp;
+ *  7. otherwise -> Rearm.
  */
 MacVNCCaptureLivenessVerdict macVNCResolveCaptureLiveness(
     const MacVNCCaptureLivenessInput *input,

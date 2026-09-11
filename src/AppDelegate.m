@@ -153,9 +153,11 @@ static BOOL macVNCAllowsTestPermissionGateBypass(void)
 /* Serial queue owning every server start/stop (see applicationDidFinishLaunching). */
 @property (nonatomic, strong) dispatch_queue_t lifecycleQueue;
 
-/* The generation whose capture failure we already acted on (see
-   macVNCShouldActOnCaptureFailure). */
-@property (nonatomic, assign) uint64_t handledFailureGeneration;
+/* The capture-attempt OCCURRENCE whose failure we already acted on (see
+   macVNCShouldActOnCaptureFailure) - the capture-session generation, not the
+   server generation: several distinct capture attempts can fail within one
+   server run, and each must be its own occurrence, not collapsed to one. */
+@property (nonatomic, assign) uint64_t handledCaptureOccurrence;
 
 /* Curtain mode. The controller owns the curtain, the tap and the clock; this
    object owns the controller and the bridge that lets the tap talk back. */
@@ -207,11 +209,13 @@ static void macVNCAuthenticatedClientsChanged_(void)
     }
 }
 
-static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t generation)
+static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t generation,
+                                      uint64_t captureGeneration)
 {
     [gSharedAppDelegate performSelectorOnMainThread:@selector(handleScreenCaptureFailure:)
                                          withObject:@{@"denied": @(likelyPermissionDenial),
-                                                      @"generation": @(generation)}
+                                                      @"generation": @(generation),
+                                                      @"captureGeneration": @(captureGeneration)}
                                       waitUntilDone:NO];
 }
 
@@ -784,9 +788,11 @@ static NSMenuItem *addRow(NSMenu *menu, NSString *title, SEL action,
     [self.curtainController noteCaptureStreamStopped];
 
     uint64_t reportedGeneration = [info[@"generation"] unsignedLongLongValue];
+    uint64_t captureOccurrence = [info[@"captureGeneration"] unsignedLongLongValue];
     if (!macVNCShouldActOnCaptureFailure(reportedGeneration,
                                          vncServerCurrentGeneration(),
-                                         &_handledFailureGeneration))
+                                         captureOccurrence,
+                                         &_handledCaptureOccurrence))
         return;
 
     /* How much this failure is allowed to cost. Stopping the server used to be

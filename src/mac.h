@@ -79,9 +79,16 @@ extern _Atomic int vncAuthenticatedClientsReceivingUpdates;
 /* likelyPermissionDenial is TRUE only when the underlying error is consistent
  * with a TCC/Screen-Recording denial. Other capture failures (display removed,
  * stream stopped for unrelated reasons) pass FALSE so the caller does not latch
- * a permanent "permission missing" state on a transient/topology error. */
+ * a permanent "permission missing" state on a transient/topology error.
+ *
+ * serverGeneration answers "is the run that raised this still live" (a stale
+ * report from a since-stopped/restarted server must never act); captureGeneration
+ * answers "which capture attempt" (see gCaptureSessionGeneration) and is what
+ * the caller must latch on to decide whether THIS failure was already acted
+ * on - the two are orthogonal, see macVNCShouldActOnCaptureFailure. */
 extern void (*macVNCScreenCaptureFailureHandler)(bool likelyPermissionDenial,
-                                                 uint64_t serverGeneration);
+                                                 uint64_t serverGeneration,
+                                                 uint64_t captureGeneration);
 
 /*
  * Optional handler invoked whenever `vncAuthenticatedClientsReceivingUpdates`

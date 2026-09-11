@@ -12,6 +12,14 @@ macVNCMonotonicNow(void)
     return (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
 }
 
+uint64_t
+macVNCUptimeNow(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_UPTIME_RAW, &now);
+    return (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
+}
+
 MacVNCFirstFrameBudget
 macVNCFirstFrameBudgetStart(uint64_t nowNanoseconds, uint64_t totalNanoseconds)
 {

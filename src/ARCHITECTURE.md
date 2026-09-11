@@ -74,7 +74,14 @@ Pure logic, each with a unit test wired into `ctest` (`.c` for C modules,
   access mode}`; fail-closed by default.
 - **FirstFrameBudget** — ONE deadline for "every display has produced its first
   frame", shared across displays so a two-monitor Mac does not double a client's
-  wait, plus `macVNCMonotonicNow()`, the one shared monotonic clock.
+  wait, plus `macVNCMonotonicNow()`, the shared sleep-INCLUSIVE clock (curtain
+  mode, power management, the keep-warm timer, the event tap) and
+  `macVNCUptimeNow()`, a second, sleep-EXCLUSIVE clock added for one consumer
+  only - CaptureLiveness's silence measurement, which must not count a system
+  sleep as stream death (measured: `CLOCK_MONOTONIC` advances during sleep on
+  this deployment target, `CLOCK_UPTIME_RAW` does not). Two clocks, not one
+  redefined, because everything else already depends on the first one's
+  existing, sleep-inclusive meaning.
 - **FrameMailbox** — thread-safe single-slot latest-frame handoff with
   injected release/activity callbacks.
 - **PointerState / KeyboardModifierState** — input resolution state machines.
@@ -90,6 +97,14 @@ Pure logic, each with a unit test wired into `ctest` (`.c` for C modules,
 - **MacVNCStartFailure** — what to say when the server does not come up.
   Silence on a real failure and a port-collision alert stacked over the
   permission panel are both wrong; the decision is pure and tested.
+  `macVNCShouldActOnCaptureFailure` separates two questions a single
+  server-generation parameter used to answer at once: is the reporting run
+  still live (staleness), and has THIS capture attempt's failure already been
+  acted on (the dedup latch, keyed on a caller-supplied `occurrence` - mac.m
+  passes the capture-session generation). Collapsing them into one value was
+  correct while a server run could only ever raise one capture failure; once
+  the capture-liveness watchdog could raise several distinct ones per run, the
+  same value silently swallowed every failure after the first.
 - **MacVNCLogSink** (`.c` half) — when to rotate the log file, given its
   current size and the length of the line about to be written. Pure so it
   cannot repeat the failure it exists to end: macVNC's stderr is `/dev/null`
@@ -509,6 +524,44 @@ pixels rather than points.
   against the CURRENT value before `compositeCapturedFrame` reads anything else
   - so a frame from any retired session is rejected the same way whether it is
   one re-arm stale or a hundred, and the address scan it replaced is gone.
+  A whole-diff integration audit of the above then caught four more seams,
+  fixed together as one follow-up:
+  1. A failed `rearmCaptures()` used to leave `gLastRearmNs`/`gRearmsSinceFrame`
+     untouched, so the very next 1Hz tick saw identical inputs, resolved
+     `Rearm` again, failed again - forever, with `maxRearms`/`GiveUp`
+     unreachable on exactly the path most likely to need them. A failed
+     attempt now advances both, on top of (not instead of) the immediate
+     failure report that attempt already sends.
+  2. That immediate report - and every watchdog report after the first in one
+     server run - used to be silently swallowed: `macVNCShouldActOnCaptureFailure`
+     deduplicated by the SERVER generation, which is fine for the one failure a
+     run used to be able to raise, and wrong once several distinct failures can
+     happen in the same run. It now takes the staleness check (server
+     generation: is this run still live) and the dedup latch (a caller-supplied
+     `occurrence` - mac.m passes the capture-session generation, which changes on
+     every `Build`, successful or not) as two independent parameters instead of
+     one value reused for both jobs.
+  3. The silence window was measured with `CLOCK_MONOTONIC`, which - measured
+     directly on this deployment target - advances during system sleep by
+     exactly as much as the machine slept. The first watchdog tick after any
+     sleep past the 4s silence window therefore saw mostly sleep as "silence"
+     and force-rebuilt a stream that was about to resume on its own. The
+     watchdog's own timestamps (`gLastFrameNs`, `gCapturesStartedNs`,
+     `gLastRearmNs`, the snapshot's `nowNs`) now use `macVNCUptimeNow()`
+     (`FirstFrameBudget.h`, `CLOCK_UPTIME_RAW`) instead - a SEPARATE clock, not a
+     redefinition of `macVNCMonotonicNow()`, because the keep-warm timer's
+     deadline deliberately still needs the sleep-INCLUSIVE clock to agree with
+     when its own `dispatch_source` timer actually fires, and curtain mode/power
+     management/the event tap already depend on `macVNCMonotonicNow()`'s
+     existing meaning.
+  4. A denied or failed power assertion (`dimmingInit()`) lets a display
+     idle-sleep with a client still connected, which is a legitimate reason for
+     `SCStream` to go silent that the watchdog could not tell apart from the bug
+     it exists to catch - burning the whole re-arm budget on a display no
+     rebuild can wake. `MacVNCCaptureLivenessInput` gained `anyDisplayActive`
+     (a plain, non-waking `CGGetActiveDisplayList` count); no display active is
+     now its own `Alive` rule, ahead of the timing rules, so it costs nothing
+     and reports nothing until a display is actually there to judge again.
 - **MacVNCClamshellPolicy / MacVNCClamshellMarker / MacVNCClamshell** —
   closed-display mode. The policy
   half is pure C and holds every rule; the marker owns the persisted record; the
