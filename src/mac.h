@@ -264,6 +264,30 @@ void macVNCSetCaptureKeepWarmForTesting(uint64_t ns);
    stream - one that stopped delivering frames without an SCStream error to
    react to. See CaptureLiveness.h for why silence itself is the signal. */
 unsigned macVNCCaptureRearmCountForTesting(void);
+
+/*
+ * Feeds one synthetic, correctly-sized (zeroed) frame for displayIndex
+ * directly through the real compositeCapturedFrame, carrying generation -
+ * bypassing ScreenCaptureKit entirely. This is the only way to prove the
+ * generation-rejection rule deterministically: a genuinely retired-session
+ * frame requires provoking an actual ScreenCaptureKit race, which is neither
+ * reproducible on demand nor available at all without a Screen Recording
+ * grant. Looks up displayIndex's real pixel size off the CURRENTLY
+ * published layout itself, so a mismatched generation is the only reason a
+ * test's frame can be rejected - never an incidental size mismatch. A no-op
+ * (nothing observable happens) if displayIndex is not in the current layout.
+ */
+void macVNCCompositeSyntheticFrameForTesting(uint64_t generation, size_t displayIndex);
+
+/* The CURRENT capture-session generation, so a test can compute the prior
+   generation without reaching into a private counter by name. */
+uint64_t macVNCCurrentCaptureGenerationForTesting(void);
+
+/* The per-display liveness timestamp gLastFrameNs holds, so a test can prove
+   a rejected synthetic frame left it untouched rather than merely hoping a
+   non-observable return value implies it. 0 = never stamped, same sentinel
+   convention as the production field this reads. */
+uint64_t macVNCLastFrameTimestampForTesting(size_t displayIndex);
 /* Shrinks the watchdog's grace/silence/cooldown windows (nanoseconds; 0 keeps
    the shipped default) so an e2e run can force a re-arm in seconds instead of
    the shipped ~35s. maxRearms is not overridable - see the definition site. */

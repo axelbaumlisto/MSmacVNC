@@ -48,6 +48,40 @@
  */
 
 /*
+ * Which display, within which capture-session generation, a frame belongs to.
+ *
+ * This replaced a design that recovered both facts by comparing the ADDRESS
+ * of a geometry pointer (`&layout->displays[i]`) against whichever layout was
+ * currently published - correct for a callback stuck across exactly ONE
+ * re-arm (its pointer then denotes a slot that is no longer the live one, so
+ * the scan found no match), wrong two re-arms later, when that same fixed
+ * slot is reused for a THIRD generation and the address match fires again
+ * against content that belongs to someone else entirely - silently
+ * attributing a long-dead display's frame to whatever now occupies that slot.
+ *
+ * `generation` has no such reuse window: mac.m hands Build() a value from a
+ * counter that is bumped once per Build and NEVER reused, so a frame whose
+ * generation does not equal the CURRENT one is rejected the same way whether
+ * it is one re-arm stale or a hundred. `displayIndex` is the plain position
+ * within the layout that generation was Built against - the frame no longer
+ * needs to carry a pointer into that layout at all, only the two small values
+ * that identify a place in it.
+ *
+ * NOT the same thing as ScreenCapturer's own `generation` property
+ * (ScreenCapturer.m): that one guards ONE capturer's internal mailbox and
+ * readiness state against ITS OWN stale async work across a start/stop of
+ * that same instance. This one distinguishes an entire SESSION (the whole
+ * set of capturers `macVNCCaptureSessionBuild` creates together) from the
+ * session that came before it. Same word, two different, unrelated layers -
+ * mentioned here only so the next reader does not go looking for one counter
+ * where there are actually two.
+ */
+typedef struct {
+    uint64_t generation;
+    size_t displayIndex;
+} MacVNCCaptureFrameOrigin;
+
+/*
  * Called on a capture queue with one display's freshly captured frame, already
  * unwrapped from ScreenCaptureKit.
  *
@@ -57,7 +91,7 @@
  * dropped, because after a static screen there may be no further frame for a
  * long time and its pixels would stay missing on the client.
  */
-typedef bool (*MacVNCCaptureFrameHandler)(const MacVNCDisplayGeometry *geometry,
+typedef bool (*MacVNCCaptureFrameHandler)(MacVNCCaptureFrameOrigin origin,
                                           const uint8_t *pixels,
                                           size_t stride,
                                           int width,
@@ -80,9 +114,21 @@ typedef void (*MacVNCCaptureFailureHandler)(bool likelyPermissionDenial);
  * believe it has no session while stale streams still hold their displays.
  * So on false, Count() == 0.
  *
+ * `generation` is stamped into every frame this session ever delivers, as
+ * part of its MacVNCCaptureFrameOrigin - the caller mints it (mac.m keeps one
+ * monotonically increasing, never-reused counter) and is responsible for
+ * minting a NEW one for every Build call, including a rebuild onto an
+ * otherwise-unchanged layout: two DIFFERENT sessions can be built against the
+ * very same MacVNCDisplayLayout object (a re-arm that finds the desk
+ * unchanged rebuilds onto the layout already published, rather than
+ * publishing a second, identical copy), and only a generation that changes on
+ * every Build - independent of whether the layout content did - tells the
+ * frame handler that the OLD session's stream is no longer the current one.
+ *
  * Does NOT start capture - Start does, once a client is authenticated.
  */
 bool macVNCCaptureSessionBuild(const MacVNCDisplayLayout *layout,
+                               uint64_t generation,
                                int captureFramesPerSecond,
                                MacVNCCaptureFrameHandler frameHandler,
                                MacVNCCaptureFailureHandler failureHandler);

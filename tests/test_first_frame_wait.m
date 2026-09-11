@@ -27,10 +27,10 @@
 #import "TestDisplayLayout.h"
 
 static bool
-acceptFrame(const MacVNCDisplayGeometry *geometry, const uint8_t *pixels,
+acceptFrame(MacVNCCaptureFrameOrigin origin, const uint8_t *pixels,
             size_t stride, int width, int height, const MacVNCDirtyHint *hint)
 {
-    (void)geometry; (void)pixels; (void)stride;
+    (void)origin; (void)pixels; (void)stride;
     (void)width; (void)height; (void)hint;
     return true;
 }
@@ -63,7 +63,7 @@ main(void)
             return 77;
         }
 
-        if (!macVNCCaptureSessionBuild(&layout, 30, acceptFrame, noteFailure)) {
+        if (!macVNCCaptureSessionBuild(&layout, 1, 30, acceptFrame, noteFailure)) {
             puts("test_first_frame_wait: SKIP (capture session unavailable)");
             return 77;
         }
