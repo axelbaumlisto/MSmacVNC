@@ -295,47 +295,22 @@ readOnlineDisplays(uint32_t *out, size_t capacity)
 }
 
 /*
- * Enumerate the displays to capture, waiting for the whole desk.
+ * Turn the CURRENTLY ACTIVE CoreGraphics display list into MacVNCDisplayInput
+ * entries. No waking, no waiting - a plain read of whatever is awake right
+ * now, so it is safe to call from a context that must not light a sleeping
+ * panel (see the re-arm path below).
  *
- * This used to break out of its retry loop at the FIRST non-zero active count.
- * On a sleeping desk that is whichever panel woke first: macVNC came up with a
- * 3840x2160 canvas for a 5550x2715 desk and the second monitor stayed invisible
- * to every viewer until the app was restarted by hand. The loop knew a slept
- * screen reports zero - its own comment said so - but had no idea how many to
- * expect, so any partial answer ended it.
+ * Split out of readAttachedDisplays() so that path (startup, which must wait
+ * for a sleeping desk to wake) and the capture-liveness re-arm path (which
+ * must NOT wake one - .pi/plans/display-reconfiguration.md rejected a
+ * reconfiguration watcher partly because re-resolving woke the panel at 3am)
+ * share this one reading, instead of a second copy that could drift from it.
  */
 static rfbBool
-readAttachedDisplays(MacVNCDisplayInput *displays, size_t *count, int *primaryIndex)
+collectDisplayInputs(MacVNCDisplayInput *displays, size_t *count, int *primaryIndex)
 {
   CGDirectDisplayID ids[MACVNC_MAX_DISPLAYS];
   CGDisplayCount reported = 0;
-
-  uint32_t expected[MACVNC_MAX_DISPLAYS];
-  size_t expectedCount = readOnlineDisplays(expected, MACVNC_MAX_DISPLAYS);
-
-  uint32_t awakeIDs[MACVNC_MAX_DISPLAYS];
-  size_t awakeCount = 0;
-
-  macVNCWakeDisplays();
-  for (int attempt = 0; attempt < 20; ++attempt) {
-      awakeCount = readActiveDisplayIDs(awakeIDs, MACVNC_MAX_DISPLAYS);
-      if (awakeCount > 0 &&
-          macVNCDisplaysAllActive(awakeIDs, awakeCount, expected, expectedCount))
-          break;
-      macVNCWakeDisplays();
-      usleep(250000); /* 250ms */
-  }
-
-  /* Timed out with part of the desk still dark: serve what there is rather
-     than refuse, and name what is missing - a bare count leaves the user
-     guessing which cable to check. */
-  uint32_t missing[MACVNC_MAX_DISPLAYS];
-  size_t missingCount = macVNCDisplaysMissing(awakeIDs, awakeCount,
-                                              expected, expectedCount,
-                                              missing, MACVNC_MAX_DISPLAYS);
-  for (size_t i = 0; i < missingCount; ++i)
-      rfbLog("Display %u is attached but did not wake in time; it will not be "
-             "part of this session\n", missing[i]);
 
   /* Ask for the TOTAL (NULL list), not just what fits: filling a 16-slot array
      caps the answer at 16, which would silently drop the 17th display instead
@@ -380,20 +355,66 @@ readAttachedDisplays(MacVNCDisplayInput *displays, size_t *count, int *primaryIn
   return TRUE;
 }
 
-/* Discover displays, apply the configured selection, build the composite
-   layout. Split out of ScreenInit: display topology has nothing to do with
-   networking, auth or framebuffer setup, and the selection rules are now
-   unit-tested in DisplaySelection.c. */
+/*
+ * Enumerate the displays to capture, waiting for the whole desk.
+ *
+ * This used to break out of its retry loop at the FIRST non-zero active count.
+ * On a sleeping desk that is whichever panel woke first: macVNC came up with a
+ * 3840x2160 canvas for a 5550x2715 desk and the second monitor stayed invisible
+ * to every viewer until the app was restarted by hand. The loop knew a slept
+ * screen reports zero - its own comment said so - but had no idea how many to
+ * expect, so any partial answer ended it.
+ *
+ * STARTUP ONLY: this wakes the desk. The re-arm path re-reads with
+ * collectDisplayInputs() directly and never calls this function.
+ */
 static rfbBool
-resolveDisplayLayout(void)
+readAttachedDisplays(MacVNCDisplayInput *displays, size_t *count, int *primaryIndex)
 {
-  MacVNCDisplayInput attached[MACVNC_MAX_DISPLAYS];
-  MacVNCDisplayInput selected[MACVNC_MAX_DISPLAYS];
-  size_t attachedCount = 0, selectedCount = 0;
-  int primaryIndex = -1;
+  uint32_t expected[MACVNC_MAX_DISPLAYS];
+  size_t expectedCount = readOnlineDisplays(expected, MACVNC_MAX_DISPLAYS);
 
-  if (!readAttachedDisplays(attached, &attachedCount, &primaryIndex))
-      return FALSE;
+  uint32_t awakeIDs[MACVNC_MAX_DISPLAYS];
+  size_t awakeCount = 0;
+
+  macVNCWakeDisplays();
+  for (int attempt = 0; attempt < 20; ++attempt) {
+      awakeCount = readActiveDisplayIDs(awakeIDs, MACVNC_MAX_DISPLAYS);
+      if (awakeCount > 0 &&
+          macVNCDisplaysAllActive(awakeIDs, awakeCount, expected, expectedCount))
+          break;
+      macVNCWakeDisplays();
+      usleep(250000); /* 250ms */
+  }
+
+  /* Timed out with part of the desk still dark: serve what there is rather
+     than refuse, and name what is missing - a bare count leaves the user
+     guessing which cable to check. */
+  uint32_t missing[MACVNC_MAX_DISPLAYS];
+  size_t missingCount = macVNCDisplaysMissing(awakeIDs, awakeCount,
+                                              expected, expectedCount,
+                                              missing, MACVNC_MAX_DISPLAYS);
+  for (size_t i = 0; i < missingCount; ++i)
+      rfbLog("Display %u is attached but did not wake in time; it will not be "
+             "part of this session\n", missing[i]);
+
+  return collectDisplayInputs(displays, count, primaryIndex);
+}
+
+/* Apply the configured selection to an already-read attached-display list and
+   build the composite layout INTO *layout. Shared by startup (fed by the
+   waking readAttachedDisplays()) and re-arm (fed by the non-waking
+   collectDisplayInputs()), so the selection rules - and macVNCBuildDisplayLayout
+   itself - exist in exactly one place regardless of how the desk was read.
+   Does not log the result: callers differ on whether "Capturing N
+   display(s)..." is the right line to emit (a probe made only to COMPARE
+   against the live layout is not a publish), so that stays with them. */
+static rfbBool
+applySelectionAndBuildLayout(const MacVNCDisplayInput *attached, size_t attachedCount,
+                             int primaryIndex, MacVNCDisplayLayout *layout)
+{
+  MacVNCDisplayInput selected[MACVNC_MAX_DISPLAYS];
+  size_t selectedCount = 0;
 
   switch (macVNCSelectDisplays(attached, attachedCount, primaryIndex,
                                displayNumber, selected, &selectedCount)) {
@@ -408,27 +429,69 @@ resolveDisplayLayout(void)
       return FALSE;
   }
 
-  if (!macVNCBuildDisplayLayout(selected, selectedCount, &displayLayout)) {
+  if (!macVNCBuildDisplayLayout(selected, selectedCount, layout)) {
       rfbErr("Could not build a non-overlapping RFB display layout\n");
       return FALSE;
   }
-  /* Name the displays, not just how many. displayNumber >= 0 selects by
-     POSITION in the enumeration, so after a monitor is unplugged the same
-     stored number designates a different physical screen - a switch that would
-     otherwise happen with nothing said. */
+  return TRUE;
+}
+
+/* Name the displays, not just how many. displayNumber >= 0 selects by
+   POSITION in the enumeration, so after a monitor is unplugged the same
+   stored number designates a different physical screen - a switch that would
+   otherwise happen with nothing said. Split out of resolveDisplayLayout() so
+   a re-arm that actually changes the published layout can announce it with
+   the same line startup uses, instead of a second copy of this formatting. */
+static void
+logCapturingLayout(const MacVNCDisplayLayout *layout)
+{
   char ids[MACVNC_MAX_DISPLAYS * 12 + 1];
   size_t used = 0;
   ids[0] = '\0';
-  for (size_t i = 0; i < displayLayout.count && used < sizeof ids - 1; ++i) {
+  for (size_t i = 0; i < layout->count && used < sizeof ids - 1; ++i) {
       int n = snprintf(ids + used, sizeof ids - used, "%s%u",
-                       i ? "," : "", displayLayout.displays[i].input.displayID);
+                       i ? "," : "", layout->displays[i].input.displayID);
       if (n < 0)
           break;
       used += (size_t)n;
   }
   rfbLog("Capturing %zu display(s) [id %s]; composite framebuffer: %dx%d\n",
-         displayLayout.count, ids, displayLayout.width, displayLayout.height);
+         layout->count, ids, layout->width, layout->height);
+}
+
+/* Discover displays, apply the configured selection, build the composite
+   layout. Split out of ScreenInit: display topology has nothing to do with
+   networking, auth or framebuffer setup, and the selection rules are now
+   unit-tested in DisplaySelection.c. */
+static rfbBool
+resolveDisplayLayout(void)
+{
+  MacVNCDisplayInput attached[MACVNC_MAX_DISPLAYS];
+  size_t attachedCount = 0;
+  int primaryIndex = -1;
+
+  if (!readAttachedDisplays(attached, &attachedCount, &primaryIndex))
+      return FALSE;
+  if (!applySelectionAndBuildLayout(attached, attachedCount, primaryIndex, &displayLayout))
+      return FALSE;
+  logCapturingLayout(&displayLayout);
   return TRUE;
+}
+
+/* Re-read the desk WITHOUT waking it and run it through the SAME selection
+   and layout rules resolveDisplayLayout() trusts at startup, into a caller-
+   owned scratch layout rather than the live displayLayout - see rearmCaptures,
+   which must not publish anything until the canvas it describes exists. */
+static rfbBool
+resolveDeskLayoutWithoutWaking(MacVNCDisplayLayout *layout)
+{
+  MacVNCDisplayInput attached[MACVNC_MAX_DISPLAYS];
+  size_t attachedCount = 0;
+  int primaryIndex = -1;
+
+  if (!collectDisplayInputs(attached, &attachedCount, &primaryIndex))
+      return FALSE;
+  return applySelectionAndBuildLayout(attached, attachedCount, primaryIndex, layout);
 }
 
 /* Install VNC password authentication. Refuses an empty password: an
@@ -802,12 +865,13 @@ oldestFrameStamp(void)
 }
 
 /*
- * Stop and rebuild the SAME layout's streams - the fix for a stream that went
- * silent with no SCStream error to react to (the measured bug: the desk
- * changed shape, `didStopWithError` never fired, viewers kept a 42-hour-old
- * frame). Re-reading the desk and swapping the canvas on a genuine shape
- * change is a later step; this can only revive a stream that still has a
- * correct layout to run on.
+ * Stop, re-read the desk, and rebuild - either the SAME layout's streams (a
+ * stream that went silent with no SCStream error to react to: the measured
+ * bug, where the desk changed shape, `didStopWithError` never fired, and
+ * viewers kept a 42-hour-old frame) or, when the re-read shows the desk
+ * itself changed shape, a NEW canvas and layout to match it. That second case
+ * is what actually fixes the measured incident: a stream restart alone cannot
+ * help when the geometry it was restarted onto is no longer the truth.
  */
 static bool
 rearmCaptures(void)
@@ -816,11 +880,83 @@ rearmCaptures(void)
     for (size_t i = 0; i < MACVNC_MAX_DISPLAYS; ++i)
         atomic_store(&gLastFrameNs[i], 0);
     atomic_store(&gCapturesStartedNs, macVNCMonotonicNow());
-    /* Checked, not discarded: a failed rebuild leaves Count() == 0 (per the
-       session header), and starting anyway would be exactly the silent
-       nothing-happens failure this whole mechanism exists to replace.
-       Mirrors ScreenInit's own `if (!macVNCCaptureSessionBuild(...)) return
-       FALSE;` (this file, above) for the same call, on the same layout. */
+
+    /* Re-read the desk WITHOUT waking it: resolveDeskLayoutWithoutWaking()
+       calls collectDisplayInputs(), never readAttachedDisplays(), and a
+       Rearm verdict already implies a client is connected (CaptureLiveness's
+       first rule), so there is no viewer-less desk here to needlessly light
+       up. On failure there is nothing left to retry into - same as a failed
+       rebuild below. */
+    MacVNCDisplayLayout freshLayout;
+    if (!resolveDeskLayoutWithoutWaking(&freshLayout)) {
+        rfbErr("Re-arm could not re-read the desk\n");
+        return false;
+    }
+
+    if (macVNCDisplayLayoutsEqual(&displayLayout, &freshLayout)) {
+        /* Same shape: rebuild onto the unchanged, already-published layout.
+           Checked, not discarded: a failed rebuild leaves Count() == 0 (per
+           the session header), and starting anyway would be exactly the
+           silent nothing-happens failure this whole mechanism exists to
+           replace. Mirrors ScreenInit's own
+           `if (!macVNCCaptureSessionBuild(...)) return FALSE;` (this file,
+           above) for the same call, on the same layout. */
+        if (!macVNCCaptureSessionBuild(&displayLayout, gCaptureFramesPerSecond,
+                                       compositeCapturedFrame, reportCaptureFailure))
+            return false;
+        macVNCCaptureSessionStart();
+        return true;
+    }
+
+    /* The desk changed shape: swap the canvas before rebuilding capture on
+       the new layout. The order below is deliberate, and every early return
+       from here on leaves the compositor attached to a VALID screen with a
+       VALID (never freed) frameBuffer - the caller's only recourse on
+       `false` is reportCaptureFailure(false), never a server stop, so
+       nothing downstream may assume a torn-down screen.
+         1. Allocate and zero the NEW canvas FIRST, before touching anything
+            published: a failed allocation then leaves the old canvas and old
+            displayLayout completely untouched.
+         2. Detach the compositor: macVNCCompositorSetScreen(NULL) blocks
+            until any in-flight composite finishes, so once it returns
+            nothing can still be writing through the OLD width/stride - the
+            publish below would otherwise race a composite mid-frame.
+         3. Publish the new displayLayout and swap frameBufferOne only once
+            the canvas they describe exists and no composite can touch the
+            old one, then rfbNewFramebuffer - LibVNCServer resizes the screen
+            and tells every connected client (NewFBSize/ExtDesktopSize,
+            confirmed in a real TigerVNC handshake), which is why no client
+            needs to be dropped for this.
+         4. macVNCInputSetContext right after: PtrAddEvent maps a client's
+            pointer through the OLD layout/screen until this call, and it is
+            reachable the instant rfbNewFramebuffer returns.
+         5. Re-attach the compositor last, only once the screen it will
+            composite onto is fully described.
+         6. Free the OLD canvas only now: no composite can still be running
+            against it (step 2) and rfbScreen->frameBuffer no longer points at
+            it (step 3), so freeing earlier would be premature and freeing
+            never would leak one canvas per re-arm. */
+    size_t bufSize = (size_t)freshLayout.width * (size_t)freshLayout.height * 4;
+    void *newBuffer = calloc(1, bufSize);
+    if (!newBuffer) {
+        rfbErr("Re-arm could not allocate a %dx%d canvas for the new desk shape\n",
+               freshLayout.width, freshLayout.height);
+        return false;
+    }
+
+    macVNCCompositorSetScreen(NULL);
+    void *oldBuffer = frameBufferOne;
+    displayLayout = freshLayout;
+    frameBufferOne = newBuffer;
+    rfbNewFramebuffer(rfbScreen, (char *)newBuffer,
+                      displayLayout.width, displayLayout.height, 8, 3, 4);
+    macVNCInputSetContext(rfbScreen, &displayLayout);
+    macVNCCompositorSetScreen(rfbScreen);
+    free(oldBuffer);
+
+    rfbLog("Desk shape changed since this session started; rebuilding the composite canvas\n");
+    logCapturingLayout(&displayLayout);
+
     if (!macVNCCaptureSessionBuild(&displayLayout, gCaptureFramesPerSecond,
                                    compositeCapturedFrame, reportCaptureFailure))
         return false;

@@ -59,7 +59,11 @@ Pure logic, each with a unit test wired into `ctest` (`.c` for C modules,
 `.m` for the Objective-C ones — `MacVNCStatusText`, `MacVNCPermissionUI`,
 `MacVNCStartFailure`, which are Foundation-only and free of AppKit):
 - **DisplayLayout** — build a non-overlapping composite layout; map a
-  framebuffer point back to a global display coordinate.
+  framebuffer point back to a global display coordinate; compare two layouts
+  POSITIONALLY (`macVNCDisplayLayoutsEqual`) so a re-arm can tell "the same
+  desk" from "the desk changed shape" - a reorder counts as a change, because
+  two real callers read a layout by array index and a reorder that looked like
+  "no change" would misattribute their per-index state across displays.
 - **DisplaySelection** — which attached displays a run captures (all / primary /
   one index); order is preserved because the composite layout depends on it.
 - **CompositeFramebuffer** — tile-diff copy of one BGRA display into the shared
@@ -464,9 +468,12 @@ pixels rather than points.
   hand. `mac.m` stamps a per-display timestamp at the one place a frame becomes
   pixels (`compositeCapturedFrame`); a 1Hz watchdog on the existing capture-stop
   queue reads the oldest one and asks this module for a verdict: `Alive`,
-  `Rearm` (stop and rebuild the SAME layout's streams - no re-read, no server
-  restart), or `GiveUp` (report the failure through the path that already
-  handles a real capture error). No client, or captures not running, is always
+  `Rearm` (stop, re-read the desk WITHOUT waking it, and either rebuild the
+  SAME layout's streams or - when the re-read shows the desk itself changed
+  shape, per `macVNCDisplayLayoutsEqual` - swap the canvas with
+  `rfbNewFramebuffer` and rebuild onto the new one; no server restart either
+  way), or `GiveUp` (report the failure through the path that already handles
+  a real capture error). No client, or captures not running, is always
   `Alive` - the design this replaces would have re-armed a display that idled
   itself to sleep with nobody watching.
 - **MacVNCClamshellPolicy / MacVNCClamshellMarker / MacVNCClamshell** —
