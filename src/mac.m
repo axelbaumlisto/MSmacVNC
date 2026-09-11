@@ -132,7 +132,83 @@ vncServerCopyPassword(char *buffer, size_t size)
     buffer[length] = '\0';
     return length;
 }
-static MacVNCDisplayLayout displayLayout;
+/*
+ * The published display layout, double-buffered.
+ *
+ * Before this, `displayLayout` was a single static struct that a re-arm
+ * overwrote IN PLACE (`displayLayout = freshLayout;`) whenever the desk
+ * changed shape. compositeCapturedFrame() - the per-display capture hot path,
+ * running at up to 60 fps per display - read that same struct with no lock:
+ * it scans `displayLayout.count` comparing `&displayLayout.displays[i]` against
+ * its `geometry` pointer, then snapshots `*geometry`. A capture callback from
+ * the just-stopped OLD session can still be in flight when that copy runs -
+ * MacVNCCaptureSession.h documents exactly this: StopAndWait's wait is
+ * bounded, and a stream whose work never quiesced is deliberately leaked
+ * rather than freed because a callback may still touch it. So the multi-field
+ * copy could tear against that read: `count` from one generation compared
+ * against `displays[]` from another. Bounded (displays[] is a fixed
+ * MACVNC_MAX_DISPLAYS array, never out-of-bounds; worst case is a dropped
+ * frame or one stale-pixel frame that heals on the next real one - see
+ * .pi/plans/capture-liveness.md), but new exposure from the shape-changed
+ * re-arm, not present before it.
+ *
+ * The fix is PUBLISH BY POINTER SWAP, never mutate what is currently
+ * published: two fixed slots hold successive generations of the layout, and
+ * an atomic pointer says which one is current. A reader loads that pointer
+ * ONCE and reads only through it, so every field it sees belongs to the same
+ * generation - no lock needed on the hot path, because nothing ever writes
+ * into the slot the pointer currently designates as published.
+ *
+ * Two slots, not one-per-generation: a writer publishing generation N+1
+ * always targets whichever slot is NOT currently published (the one holding
+ * generation N-1, already retired one publish ago), so it never touches the
+ * live slot. A stuck callback from generation N-1 - already an accepted,
+ * documented edge case above - keeps a valid (never freed) pointer into that
+ * slot; the only way it can read something unexpected is if TWO MORE re-arms
+ * land before that callback finally shows up, at which point the slot has
+ * been reused for generation N+1. That is bounded and memory-safe (still a
+ * valid MacVNCDisplayLayout, never out-of-bounds, never freed memory) - it is
+ * not a promise that a callback that late reads consistent data, and nothing
+ * downstream needs that promise (see compositeCapturedFrame). An unbounded
+ * leak per re-arm - keeping every retired generation alive forever - was
+ * rejected as unnecessary: nothing reads a generation more than one publish
+ * removed from current, so two slots already give every real reader a valid
+ * answer.
+ *
+ * Writers (resolveDisplayLayout at startup, rearmCaptures on re-arm) are
+ * always serialised - startup runs once before any capture session exists,
+ * and re-arm is the only thing scheduled on gCaptureStopQueue, a serial
+ * queue - so no lock is needed on the write side either; the atomic pointer
+ * is what makes the SWAP itself visible to readers as a single indivisible
+ * step, not what serialises writers against each other.
+ */
+static MacVNCDisplayLayout gDisplayLayoutSlots[2];
+static _Atomic(MacVNCDisplayLayout *) gPublishedLayout = NULL;
+
+/* The currently published layout. Callers that need more than one field must
+   load this ONCE into a local and read every field through that local - see
+   compositeCapturedFrame for why re-reading this accessor mid-function would
+   defeat the whole point of the pointer swap below. */
+static MacVNCDisplayLayout *
+currentDisplayLayout(void)
+{
+    return atomic_load(&gPublishedLayout);
+}
+
+/* Copy `fresh` into whichever slot is NOT currently published, then publish
+   it with one atomic store. Returns the new current pointer, so a caller that
+   just published can keep using it without a second load. */
+static MacVNCDisplayLayout *
+publishDisplayLayout(const MacVNCDisplayLayout *fresh)
+{
+    MacVNCDisplayLayout *live = atomic_load(&gPublishedLayout);
+    MacVNCDisplayLayout *target = (live == &gDisplayLayoutSlots[0])
+        ? &gDisplayLayoutSlots[1] : &gDisplayLayoutSlots[0];
+    *target = *fresh;
+    atomic_store(&gPublishedLayout, target);
+    return target;
+}
+
 static rfbBool rfbServerInitialized = FALSE;
 static _Atomic int publishedServerPort = -1;
 /* Bumped by every start; stamped into capture-failure notifications so stale
@@ -172,9 +248,13 @@ static void macVNCEnsureStopQueue(void)
  * CaptureLiveness.h for why silence, not an SCStream error, is the signal
  * this watches for.
  *
- * gLastFrameNs is indexed by POSITION in displayLayout, the same index
- * compositeCapturedFrame's geometry pointer already encodes (geometry is
- * `&displayLayout.displays[i]`, per MacVNCCaptureSession.m). 0 means "no frame
+ * gLastFrameNs is indexed by POSITION within whichever layout generation is
+ * CURRENTLY published, the same index compositeCapturedFrame's geometry
+ * pointer already encodes (geometry is `&layout->displays[i]` for the
+ * `layout` a capture session was Built against, per MacVNCCaptureSession.m).
+ * A callback whose session was built against an OLDER, already-retired
+ * generation simply will not match any index in the current one (see
+ * gPublishedLayout) and is skipped rather than misindexed. 0 means "no frame
  * yet for that slot" - macVNCMonotonicNow() never returns 0, so it doubles as
  * a safe sentinel with no separate bool needed alongside it.
  */
@@ -472,15 +552,21 @@ resolveDisplayLayout(void)
 
   if (!readAttachedDisplays(attached, &attachedCount, &primaryIndex))
       return FALSE;
-  if (!applySelectionAndBuildLayout(attached, attachedCount, primaryIndex, &displayLayout))
+
+  /* Build into a stack-local scratch layout, same as the re-arm path below,
+     then publish through the one swap point - so "how a layout becomes THE
+     published layout" has exactly one implementation, used at startup and at
+     every re-arm alike. */
+  MacVNCDisplayLayout freshLayout;
+  if (!applySelectionAndBuildLayout(attached, attachedCount, primaryIndex, &freshLayout))
       return FALSE;
-  logCapturingLayout(&displayLayout);
+  logCapturingLayout(publishDisplayLayout(&freshLayout));
   return TRUE;
 }
 
 /* Re-read the desk WITHOUT waking it and run it through the SAME selection
    and layout rules resolveDisplayLayout() trusts at startup, into a caller-
-   owned scratch layout rather than the live displayLayout - see rearmCaptures,
+   owned scratch layout rather than the published one - see rearmCaptures,
    which must not publish anything until the canvas it describes exists. */
 static rfbBool
 resolveDeskLayoutWithoutWaking(MacVNCDisplayLayout *layout)
@@ -616,15 +702,29 @@ compositeCapturedFrame(const MacVNCDisplayGeometry *geometry,
     if (!pixels || !geometry)
         return true; /* nothing to composite; not a retryable condition */
 
+    /* Load the published layout EXACTLY ONCE and read every field below
+       through this local - see gPublishedLayout above for why. Before the
+       double-buffer swap this touched the `displayLayout` global directly,
+       field by field, which raced a re-arm's in-place overwrite of that same
+       global; loading the pointer once makes this whole function see a
+       single, self-consistent generation no matter what a concurrent re-arm
+       publishes in the meantime. */
+    MacVNCDisplayLayout *layout = currentDisplayLayout();
+
     /* The ONE write point for "a frame arrived" - see CaptureLiveness.h. The
        call reaching this function at all is the liveness signal, independent
        of whether its geometry below turns out to match: a stream that is
        delivering wrong-sized frames is a different bug from one that stopped
        delivering anything, and only the watchdog cares about the latter.
-       `geometry` is `&displayLayout.displays[i]` (MacVNCCaptureSession.m), so
-       a pointer-equality scan recovers the same index the watchdog reads by. */
-    for (size_t i = 0; i < displayLayout.count; ++i) {
-        if (&displayLayout.displays[i] == geometry) {
+       `geometry` is `&layout->displays[i]` for the layout the capture session
+       producing it was Built against (MacVNCCaptureSession.m), so a
+       pointer-equality scan recovers the same index the watchdog reads by -
+       and a callback from an OLDER, already-retired generation simply finds
+       no match here (its geometry points into a different slot entirely) and
+       falls through without touching gLastFrameNs, which is correct: a stale
+       callback must not resurrect liveness for either generation. */
+    for (size_t i = 0; i < layout->count; ++i) {
+        if (&layout->displays[i] == geometry) {
             atomic_store(&gLastFrameNs[i], macVNCMonotonicNow());
             /* A delivered frame proves the stream that produced it is alive
                again, so whatever re-arm count a PRIOR silence ran up no
@@ -636,12 +736,12 @@ compositeCapturedFrame(const MacVNCDisplayGeometry *geometry,
         }
     }
 
-    /* Copy BY VALUE before checking and using: `geometry` points into
-       displayLayout, a static the NEXT start memsets and rewrites. The
-       stuck-capturer path deliberately leaves a callback of the old run
-       running across that boundary, so without the snapshot the check can
-       pass against the old dimensions and the composite loop read the new
-       ones - an out-of-bounds source read. */
+    /* Copy BY VALUE before checking and using: `geometry` may point into a
+       slot this same function no longer considers current (the stuck-capturer
+       case above), and slots are reused two publishes later - see
+       gPublishedLayout. The snapshot is what makes the width/height guard
+       below compare against the generation THIS frame actually belongs to,
+       not whatever `layout` most recently loaded to. */
     MacVNCDisplayGeometry snapshot = *geometry;
 
     if (width != snapshot.input.pixelWidth ||
@@ -698,11 +798,14 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond,
 
   if (!resolveDisplayLayout())
       return FALSE;
-
+  /* Loaded once, right after publish, on this single-threaded startup path -
+     no capture session or watchdog exists yet to publish a newer generation
+     out from under this local, so one load is enough for the whole function. */
+  MacVNCDisplayLayout *layout = currentDisplayLayout();
 
   rfbScreen = rfbGetScreen(&dummyArgc, dummyArgv,
-                           displayLayout.width,
-                           displayLayout.height,
+                           layout->width,
+                           layout->height,
                            bitsPerSample,
                            3,
                            4);
@@ -774,7 +877,7 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond,
   rfbScreen->thisHost[254] = '\0'; /* gethostname need not NUL-terminate on truncation */
 
   /* A single zeroed composite canvas keeps uncovered display gaps black. */
-  size_t bufSize = (size_t)displayLayout.width * (size_t)displayLayout.height * 4;
+  size_t bufSize = (size_t)layout->width * (size_t)layout->height * 4;
   frameBufferOne = calloc(1, bufSize);
   if (!frameBufferOne) {
       rfbErr("Could not allocate composite framebuffer\n");
@@ -797,12 +900,12 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond,
 
   rfbScreen->ptrAddEvent = PtrAddEvent;
   rfbScreen->kbdAddEvent = KbdAddEvent;
-  macVNCInputSetContext(rfbScreen, &displayLayout);
+  macVNCInputSetContext(rfbScreen, layout);
 
   /* One call: MacVNCCaptureSession owns ScreenCaptureKit, unwraps each frame
      to plain pixels and classifies capture errors, so this file needs neither
      SCStream nor SCStreamError. */
-  if (!macVNCCaptureSessionBuild(&displayLayout, captureFramesPerSecond,
+  if (!macVNCCaptureSessionBuild(layout, captureFramesPerSecond,
                                  compositeCapturedFrame, reportCaptureFailure))
       return FALSE;
 
@@ -853,10 +956,11 @@ captureLivenessLimits(void)
 static uint64_t
 oldestFrameStamp(void)
 {
-    if (displayLayout.count == 0)
+    MacVNCDisplayLayout *layout = currentDisplayLayout();
+    if (layout->count == 0)
         return 0;
     uint64_t oldest = UINT64_MAX;
-    for (size_t i = 0; i < displayLayout.count; ++i) {
+    for (size_t i = 0; i < layout->count; ++i) {
         uint64_t stamp = atomic_load(&gLastFrameNs[i]);
         if (stamp < oldest)
             oldest = stamp;
@@ -893,7 +997,16 @@ rearmCaptures(void)
         return false;
     }
 
-    if (macVNCDisplayLayoutsEqual(&displayLayout, &freshLayout)) {
+    /* Loaded once: re-arm is the only writer that ever runs (it is the sole
+       thing scheduled on gCaptureStopQueue, a serial queue, and startup's
+       resolveDisplayLayout() cannot overlap it - the server is already up),
+       so nothing can publish a newer generation between this load and the
+       swap below. Both branches below compare against and read through this
+       SAME pointer rather than re-deriving it, for the same reason
+       compositeCapturedFrame loads it once - see gPublishedLayout. */
+    MacVNCDisplayLayout *liveLayout = currentDisplayLayout();
+
+    if (macVNCDisplayLayoutsEqual(liveLayout, &freshLayout)) {
         /* Same shape: rebuild onto the unchanged, already-published layout.
            Checked, not discarded: a failed rebuild leaves Count() == 0 (per
            the session header), and starting anyway would be exactly the
@@ -901,7 +1014,7 @@ rearmCaptures(void)
            replace. Mirrors ScreenInit's own
            `if (!macVNCCaptureSessionBuild(...)) return FALSE;` (this file,
            above) for the same call, on the same layout. */
-        if (!macVNCCaptureSessionBuild(&displayLayout, gCaptureFramesPerSecond,
+        if (!macVNCCaptureSessionBuild(liveLayout, gCaptureFramesPerSecond,
                                        compositeCapturedFrame, reportCaptureFailure))
             return false;
         macVNCCaptureSessionStart();
@@ -915,18 +1028,22 @@ rearmCaptures(void)
        `false` is reportCaptureFailure(false), never a server stop, so
        nothing downstream may assume a torn-down screen.
          1. Allocate and zero the NEW canvas FIRST, before touching anything
-            published: a failed allocation then leaves the old canvas and old
-            displayLayout completely untouched.
+            published: a failed allocation then leaves the old canvas and the
+            currently published layout completely untouched.
          2. Detach the compositor: macVNCCompositorSetScreen(NULL) blocks
             until any in-flight composite finishes, so once it returns
             nothing can still be writing through the OLD width/stride - the
             publish below would otherwise race a composite mid-frame.
-         3. Publish the new displayLayout and swap frameBufferOne only once
-            the canvas they describe exists and no composite can touch the
-            old one, then rfbNewFramebuffer - LibVNCServer resizes the screen
-            and tells every connected client (NewFBSize/ExtDesktopSize,
-            confirmed in a real TigerVNC handshake), which is why no client
-            needs to be dropped for this.
+         3. Publish the new layout - via publishDisplayLayout()'s atomic
+            pointer swap into the OTHER slot, never the in-place
+            `displayLayout = freshLayout` this replaced (see gPublishedLayout
+            for the race that had with compositeCapturedFrame's unsynchronised
+            hot-path read) - and swap frameBufferOne only once the canvas they
+            describe exists and no composite can touch the old one, then
+            rfbNewFramebuffer - LibVNCServer resizes the screen and tells
+            every connected client (NewFBSize/ExtDesktopSize, confirmed in a
+            real TigerVNC handshake), which is why no client needs to be
+            dropped for this.
          4. macVNCInputSetContext right after: PtrAddEvent maps a client's
             pointer through the OLD layout/screen until this call, and it is
             reachable the instant rfbNewFramebuffer returns.
@@ -946,18 +1063,18 @@ rearmCaptures(void)
 
     macVNCCompositorSetScreen(NULL);
     void *oldBuffer = frameBufferOne;
-    displayLayout = freshLayout;
+    MacVNCDisplayLayout *publishedLayout = publishDisplayLayout(&freshLayout);
     frameBufferOne = newBuffer;
     rfbNewFramebuffer(rfbScreen, (char *)newBuffer,
-                      displayLayout.width, displayLayout.height, 8, 3, 4);
-    macVNCInputSetContext(rfbScreen, &displayLayout);
+                      publishedLayout->width, publishedLayout->height, 8, 3, 4);
+    macVNCInputSetContext(rfbScreen, publishedLayout);
     macVNCCompositorSetScreen(rfbScreen);
     free(oldBuffer);
 
     rfbLog("Desk shape changed since this session started; rebuilding the composite canvas\n");
-    logCapturingLayout(&displayLayout);
+    logCapturingLayout(publishedLayout);
 
-    if (!macVNCCaptureSessionBuild(&displayLayout, gCaptureFramesPerSecond,
+    if (!macVNCCaptureSessionBuild(publishedLayout, gCaptureFramesPerSecond,
                                    compositeCapturedFrame, reportCaptureFailure))
         return false;
     macVNCCaptureSessionStart();
