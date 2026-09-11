@@ -63,7 +63,7 @@ main(void)
             return 77;
         }
 
-        if (!macVNCCaptureSessionBuild(&layout, 1, 30, acceptFrame, noteFailure)) {
+        if (!macVNCCaptureSessionBuild(&layout, 1, 30, acceptFrame, noteFailure, false)) {
             puts("test_first_frame_wait: SKIP (capture session unavailable)");
             return 77;
         }

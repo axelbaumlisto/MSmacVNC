@@ -61,7 +61,7 @@ int main(void)
             layout.displays[i].framebufferX = (int)i * 50;
         }
 
-        assert(macVNCCaptureSessionBuild(&layout, 1, 30, acceptFrame, noteFailure));
+        assert(macVNCCaptureSessionBuild(&layout, 1, 30, acceptFrame, noteFailure, false));
         /* One stream PER display: a Build that stopped after the first would
            silently capture only one monitor. */
         assert(macVNCCaptureSessionCount() == 2);
@@ -78,21 +78,21 @@ int main(void)
         single.displays[0].input.displayID = CGMainDisplayID();
         single.displays[0].input.pixelWidth = 50;
         single.displays[0].input.pixelHeight = 50;
-        assert(macVNCCaptureSessionBuild(&single, 2, 30, acceptFrame, noteFailure));
+        assert(macVNCCaptureSessionBuild(&single, 2, 30, acceptFrame, noteFailure, false));
         assert(macVNCCaptureSessionCount() == 1);
-        assert(macVNCCaptureSessionBuild(&layout, 3, 30, acceptFrame, noteFailure));
+        assert(macVNCCaptureSessionBuild(&layout, 3, 30, acceptFrame, noteFailure, false));
         assert(macVNCCaptureSessionCount() == 2);
 
         /* Refused inputs must leave NO session installed. */
-        assert(macVNCCaptureSessionBuild(&layout, 4, 30, NULL, noteFailure) == false);
+        assert(macVNCCaptureSessionBuild(&layout, 4, 30, NULL, noteFailure, false) == false);
         assert(macVNCCaptureSessionCount() == 0);
-        assert(macVNCCaptureSessionBuild(NULL, 5, 30, acceptFrame, noteFailure) == false);
+        assert(macVNCCaptureSessionBuild(NULL, 5, 30, acceptFrame, noteFailure, false) == false);
         MacVNCDisplayLayout empty;
         memset(&empty, 0, sizeof(empty));
-        assert(macVNCCaptureSessionBuild(&empty, 6, 30, acceptFrame, noteFailure) == false);
+        assert(macVNCCaptureSessionBuild(&empty, 6, 30, acceptFrame, noteFailure, false) == false);
         assert(macVNCCaptureSessionCount() == 0);
 
-        assert(macVNCCaptureSessionBuild(&layout, 7, 30, acceptFrame, noteFailure));
+        assert(macVNCCaptureSessionBuild(&layout, 7, 30, acceptFrame, noteFailure, false));
 
         /* Reset releases the previous set - the one MRC operation in the module.
            Running it twice also proves it is idempotent between runs. */

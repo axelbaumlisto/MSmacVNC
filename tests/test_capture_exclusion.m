@@ -117,7 +117,7 @@ static void testBuiltSessionAnswersEveryRequest(void)
 {
     MacVNCDisplayLayout layout;
     fillLayout(&layout, 2);
-    assert(macVNCCaptureSessionBuild(&layout, 1, 30, acceptFrame, noteFailure));
+    assert(macVNCCaptureSessionBuild(&layout, 1, 30, acceptFrame, noteFailure, false));
     assert(macVNCCaptureSessionCount() == 2);
 
     int before = atomic_load(&gAnswers);
@@ -156,7 +156,7 @@ static void testRequestsSurviveConcurrentRebuild(void)
                    this stress test's own assertions, but a Build call site
                    that reused a literal here would be modelling something
                    production never does. */
-                macVNCCaptureSessionBuild(&layout, (uint64_t)(i + 1), 30, acceptFrame, noteFailure);
+                macVNCCaptureSessionBuild(&layout, (uint64_t)(i + 1), 30, acceptFrame, noteFailure, false);
                 macVNCCaptureSessionReset();
             }
         }
@@ -187,12 +187,16 @@ static void testRequestsSurviveConcurrentRebuild(void)
 }
 
 /*
- * The exclusion belongs to ONE session, and a session that was rebuilt is not
- * excluding anything - however many times it was asked before.
+ * The exclusion belongs to ONE session, and a session that was rebuilt WITHOUT
+ * asking to preserve it (desiredExcluded false - the ordinary case: no
+ * curtain, or the very first Build of a server run) is not excluding
+ * anything - however many times it was asked before.
  *
  * This is the state the curtain's ordering rules otherwise forbid: windows up
  * while the stream carries them again. Nothing reports it, so it has to be
- * ASKED, which is what macVNCCaptureSessionSelfExcluded() is for.
+ * ASKED, which is what macVNCCaptureSessionSelfExcluded() is for. See
+ * testDesiredExclusionSurvivesARebuildImmediately below for the OTHER half -
+ * a rebuild that IS asked to preserve it.
  */
 static void testExclusionDoesNotSurviveARebuild(void)
 {
@@ -201,8 +205,9 @@ static void testExclusionDoesNotSurviveARebuild(void)
 
     MacVNCDisplayLayout layout;
     fillLayout(&layout, 1);
-    assert(macVNCCaptureSessionBuild(&layout, 1, 30, acceptFrame, noteFailure));
-    /* Build always constructs the DEFAULT filter. */
+    assert(macVNCCaptureSessionBuild(&layout, 1, 30, acceptFrame, noteFailure, false));
+    /* Build always constructs the DEFAULT filter, and desiredExcluded=false
+       here asked for nothing more. */
     assert(!macVNCCaptureSessionSelfExcluded());
 
     int before = atomic_load(&gAnswers);
@@ -213,6 +218,84 @@ static void testExclusionDoesNotSurviveARebuild(void)
        or a curtain would stay up on the strength of it. */
     assert(!macVNCCaptureSessionSelfExcluded());
 
+    macVNCCaptureSessionReset();
+    assert(!macVNCCaptureSessionSelfExcluded());
+}
+
+/*
+ * B3's fix, pinned directly: a rebuild that IS asked to preserve exclusion
+ * (desiredExcluded=true) must report macVNCCaptureSessionSelfExcluded() as
+ * TRUE from the moment Build returns - immediately, before Start(), before
+ * any SCStream exists, before any completion has ever run. A whole-diff
+ * review found the previous design (Build always resets to false; mac.m
+ * re-asked only AFTER Start(), which usually lost the SCStream-readiness
+ * race on the first try) left the curtain's un-debounced, 1Hz heartbeat a
+ * multi-second exposed window on every rearm - this is the proof that window
+ * is CLOSED, not merely narrowed: nothing in between Build and Start ever
+ * reads false.
+ */
+static void testDesiredExclusionSurvivesARebuildImmediately(void)
+{
+    macVNCCaptureSessionReset();
+
+    MacVNCDisplayLayout layout;
+    fillLayout(&layout, 1);
+    assert(macVNCCaptureSessionBuild(&layout, 1, 30, acceptFrame, noteFailure, true));
+    /* TRUE immediately - the whole point of the fix. No stream exists yet:
+       Start() has not even been called. */
+    assert(macVNCCaptureSessionSelfExcluded());
+
+    macVNCCaptureSessionReset();
+    /* Reset always clears it, whatever a rebuild was asked to preserve -
+       there is no session left for the flag to describe. */
+    assert(!macVNCCaptureSessionSelfExcluded());
+}
+
+/*
+ * The optimistic true from a desiredExcluded rebuild is a BOUNDED grace, not
+ * a permanent lie: a session whose streams can never actually confirm the
+ * swap (no ScreenCaptureKit session reaches a real stream in this bare test
+ * binary - it owns no on-screen window for -resolveOwnApplicationWithCompletionHandler:
+ * to find, the same precondition testDiscoveryWithoutThisProcessFailsClosed
+ * pins directly) must eventually - once its bounded retries are exhausted,
+ * never on the very first failed attempt - report false, so a genuinely
+ * broken exclusion still lifts the curtain instead of hiding behind an
+ * optimistic flag forever.
+ */
+static void testDesiredExclusionEventuallyLapsesIfNeverConfirmed(void)
+{
+    macVNCCaptureSessionReset();
+
+    MacVNCDisplayLayout layout;
+    fillLayout(&layout, 1);
+    assert(macVNCCaptureSessionBuild(&layout, 1, 30, acceptFrame, noteFailure, true));
+    assert(macVNCCaptureSessionSelfExcluded());
+
+    macVNCCaptureSessionStart(); /* kicks off the automatic retry internally */
+
+    /* Immediately after Start(): still optimistically true, nothing exhausted
+       yet - this is exactly the instant the OLD design's exposed window began
+       (Build already reset to false, mac.m had not yet even tried to
+       re-request it). Proves the window really is closed at its worst point,
+       not merely narrowed. */
+    assert(macVNCCaptureSessionSelfExcluded());
+
+    /* Pump the main queue - every retry and its completion runs there - until
+       either it lapses or a generous bound elapses. Real time: 5 retries *
+       200ms is the shipped budget (~1s); bounded well above that for a loaded
+       CI box, matching this project's own style for a real, if short, wait
+       (see test_capture_liveness_rearm_failure.m's 20s bound for a similar
+       real-time convergence). */
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:10.0];
+    while (macVNCCaptureSessionSelfExcluded() && deadline.timeIntervalSinceNow > 0) {
+        @autoreleasepool {
+            [[NSRunLoop mainRunLoop] runMode:NSDefaultRunLoopMode
+                                  beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+        }
+    }
+    assert(!macVNCCaptureSessionSelfExcluded());
+
+    macVNCCaptureSessionStopAndWait();
     macVNCCaptureSessionReset();
     assert(!macVNCCaptureSessionSelfExcluded());
 }
@@ -243,7 +326,7 @@ static void testStopQueueReadersSurviveAConcurrentStop(void)
             @autoreleasepool {
                 MacVNCDisplayLayout layout;
                 fillLayout(&layout, (i % 2) + 1);
-                macVNCCaptureSessionBuild(&layout, (uint64_t)(i + 1), 30, acceptFrame, noteFailure);
+                macVNCCaptureSessionBuild(&layout, (uint64_t)(i + 1), 30, acceptFrame, noteFailure, false);
                 macVNCCaptureSessionReset();
             }
         }
@@ -559,6 +642,8 @@ int main(void)
         testBuiltSessionAnswersEveryRequest();
         testRequestsSurviveConcurrentRebuild();
         testExclusionDoesNotSurviveARebuild();
+        testDesiredExclusionSurvivesARebuildImmediately();
+        testDesiredExclusionEventuallyLapsesIfNeverConfirmed();
         testStopQueueReadersSurviveAConcurrentStop();
         printf("capture exclusion: all assertions passed (%d answers)\n",
                atomic_load(&gAnswers));

@@ -562,6 +562,99 @@ pixels rather than points.
      (a plain, non-waking `CGGetActiveDisplayList` count); no display active is
      now its own `Alive` rule, ahead of the timing rules, so it costs nothing
      and reports nothing until a display is actually there to judge again.
+
+  A second follow-up ("FIX-B") then closed what that audit found ADJACENT to
+  the watchdog rather than inside it - the recovery paths a live re-arm feeds
+  into, which the first follow-up left untouched:
+  1. `reconcileCaptureState()`'s connect branch used to call only
+     `macVNCCaptureSessionStart()` - a plain restart of whichever
+     `ScreenCapturer` set the last successful `Build` produced, silently bound
+     to whatever the desk looked like THEN. Neither a full keep-warm stop nor
+     `vncServerDropCaptures()` (the recovery a capture failure's
+     `KeepServing` response takes) ever calls `Build` again on its own, so a
+     capture failure used to loop "GiveUp -> KeepServing -> restart the SAME
+     already-dead session -> silent again -> GiveUp", forever, with no
+     user-visible report after the first. A monitor added or removed while
+     nobody was connected - the ordinary way the measured incident's own
+     trigger happens - stayed invisible to the composite canvas the same way,
+     indefinitely. `startCapturesForNewClient()` (`mac.m`) now reuses
+     `rearmCaptures()`'s own same-shape/different-shape rebuild for every
+     connect EXCEPT the one that immediately follows `ScreenInit`'s own
+     waking resolve (`gCaptureSessionFreshAtStartup`, consumed once), off
+     `captureControlMutex` and serialised on the same `gCaptureStopQueue`
+     re-arm already owns exclusively - a second client arriving mid-rebuild is
+     a no-op once it sees `gCapturesRunning` already true, not a second
+     rebuild racing the first.
+  2. A rebuild's `macVNCCaptureSessionBuild()` always installs the default,
+     non-excluding filter, so curtain mode's exclusion silently dropped out
+     from under every re-arm - including the common, fast, otherwise
+     invisible "same shape, stream came back" case - and the curtain
+     controller's own heartbeat (which may only ever LIFT, by design, with no
+     debounce or grace period) took the curtain down for the rest of that
+     session, logged as if the stream had actually died. The first attempt at
+     this fix kept Build's reset and had `mac.m` re-request exclusion
+     AFTER `Start()` instead - a fresh review measured that as **not
+     actually closing the race, only narrowing it**: `Start()` constructs the
+     `SCStream` asynchronously, so the post-`Start()` request routinely lost
+     that race on its first try, and the whole of the PRECEDING
+     `StopAndWait`/`Build` interval - documented elsewhere in this same file
+     as "bounded but real seconds" - was already exposed to the heartbeat
+     with no protection at all. At 1 Hz, real seconds means at least one
+     heartbeat tick lands inside that window on essentially every rearm, not
+     a rare tail case.
+     The fix that actually closes it moves the decision INTO the rebuild
+     instead of racing to correct it afterwards: `macVNCCaptureSessionBuild()`
+     takes a `desiredExcluded` parameter (`mac.m` passes whatever
+     `macVNCCaptureSessionSelfExcluded()` read a moment before the rebuild),
+     and when true, publishes `macVNCCaptureSessionSelfExcluded() == true`
+     from the moment `Build` RETURNS - before any `SCStream` exists, before
+     `Start()` has even been called. `macVNCCaptureSessionStart()` then drives
+     the same bounded, best-effort retry the first attempt had, but now
+     entirely inside `MacVNCCaptureSession.m`: a failed attempt's `false`
+     write is immediately re-asserted back to `true` (for the same session
+     generation) within the SAME main-queue callback that wrote it, before
+     control ever returns to the run loop - and because the curtain
+     heartbeat is itself only ever scheduled onto that same main queue, no
+     other block can observe the value in between the two writes. Only once
+     every retry is exhausted does the `false` reading stand, which is the
+     one case a lift is actually owed. The curtain controller and its
+     heartbeat are untouched: the fix removes the false reading at its
+     source rather than teaching the reader to tolerate it, which is also why
+     it needed no debounce added on the controller's side.
+     Pinned directly in `tests/test_capture_exclusion.m`:
+     `testDesiredExclusionSurvivesARebuildImmediately` (true from the instant
+     `Build` returns, no stream, no `Start()`) and
+     `testDesiredExclusionEventuallyLapsesIfNeverConfirmed` (a rebuild that
+     can never actually confirm still lapses to `false`, only after its
+     retries are exhausted, never on the first failed attempt).
+  3. `displayNumber >= 0` selects by POSITION in whatever CoreGraphics just
+     enumerated, so a desk event that reorders the enumeration can make a live
+     re-arm silently redirect a PINNED selection to a DIFFERENT physical
+     monitor - a bug the original display-reconfiguration plan named and
+     deferred as startup-only, now reachable live and unattended.
+     `logIfPinnedSelectionChangedDisplay()` names it distinctly in the log
+     (previous id vs. resolved id) rather than leaving it inside the generic
+     "desk shape changed" line; pinning by display ID instead of position
+     remains its own, larger, still-deferred change.
+  4. With repeated failures now individually counted (item 1 above plus the
+     first follow-up's occurrence-based dedup), calling
+     `reportCaptureFailure()` - the one function that can turn into an
+     `NSAlert`, or a `KeepServing`/`StopServer` decision, in `AppDelegate` -
+     from every failed attempt would mean up to `maxRearms` distinct
+     user-visible events inside one ~30s budget, for a condition that is,
+     until the LAST attempt, still recoverable. Shipped instead: an
+     intermediate failed attempt is a LOG event only (`rfbErr`, naming the
+     attempt number out of `maxRearms`); `reportCaptureFailure()` is called
+     ONLY from `GiveUp`, the one point this mechanism actually owes the user
+     an answer. The bookkeeping (`gRearmsSinceFrame`, `gLastRearmNs`) still
+     advances on every failed attempt regardless of who is watching the log,
+     so `GiveUp` remains reachable on the same budget either way - and
+     `GiveUp`'s call still flows through the pre-existing
+     `macVNCResolveCaptureFailure()` decision unchanged, so "no displays
+     attached -> stop the server" is exactly as it was before this diff.
+     (`docs/TESTING.md`'s `capture_liveness_rearm_failure` target is the
+     integration proof that the count `GiveUp` depends on actually advances
+     on failure, not just on success.)
 - **MacVNCClamshellPolicy / MacVNCClamshellMarker / MacVNCClamshell** —
   closed-display mode. The policy
   half is pure C and holds every rule; the marker owns the persisted record; the
@@ -664,7 +757,7 @@ pixels rather than points.
 
 ## Tests
 
-`ctest` runs 46 targets (the number is enforced: `architecture_doc` compares
+`ctest` runs 47 targets (the number is enforced: `architecture_doc` compares
 this sentence against CMakeLists.txt's `add_test` count, so a target added or
 commented out fails the suite until this line is updated deliberately). Every
 assertion added here is checked by mutating the source and confirming the test

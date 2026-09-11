@@ -46,7 +46,7 @@ int main(void)
             puts("test_capture_restart: SKIP (no usable display)");
             return 77;
         }
-        assert(macVNCCaptureSessionBuild(&layout, 1, 5, acceptFrame, noteFailure));
+        assert(macVNCCaptureSessionBuild(&layout, 1, 5, acceptFrame, noteFailure, false));
 
         /* Round 1: start, expect frames. */
         macVNCCaptureSessionStart();

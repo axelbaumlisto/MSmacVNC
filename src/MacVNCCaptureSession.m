@@ -8,6 +8,7 @@
 
 #include <assert.h>
 #include <stdatomic.h>
+#include <stdlib.h>
 #include <pthread.h>
 
 /* Capturers for the current run; nil between runs. */
@@ -51,6 +52,28 @@ static bool gSelfExcluded;
 static uint64_t gSessionGeneration;
 
 /*
+ * What Build's desiredExcluded parameter asked THIS session to (re-)establish
+ * once it starts. Read by Start() to decide whether to kick off the
+ * automatic reestablishment retry below - kept separate from gSelfExcluded
+ * because the two answer different questions: gSelfExcluded is "what should a
+ * reader believe right now" (optimistically true while a retry is still in
+ * its budget), gDesiredExcluded is "does THIS session owe a retry at all".
+ */
+static bool gDesiredExcluded;
+
+/* Forward-declared: Start() calls this, but it is defined after
+   macVNCCaptureSessionSetSelfExcluded(), which it reuses rather than
+   duplicating the per-stream fan-out. */
+static void reestablishExclusion(uint64_t generation, int attemptsLeft);
+
+/* Bounded, best-effort retry budget for reestablishing exclusion after a
+   desiredExcluded rebuild - same values mac.m's own retry used before this
+   moved here, so the shipped timing is unchanged, only WHERE it lives and
+   what it does to gSelfExcluded meanwhile. */
+#define MACVNC_EXCLUSION_REESTABLISH_RETRY_MAX 5
+#define MACVNC_EXCLUSION_REESTABLISH_RETRY_DELAY_NS (200ULL * 1000000ULL) /* 200ms */
+
+/*
  * Moves the list out of the global under the lock and hands ownership to the
  * caller, which releases it OUTSIDE the lock. Splitting it this way is what
  * keeps the critical section down to a pointer swap: releasing inside would
@@ -62,12 +85,13 @@ static NSMutableArray<ScreenCapturer *> *detachCapturers(void)
     NSMutableArray<ScreenCapturer *> *detached = gCapturers;   /* +1 moves out */
     gCapturers = nil;
     gSelfExcluded = false;
+    gDesiredExcluded = false;
     ++gSessionGeneration;
     pthread_mutex_unlock(&gCapturersMutex);
     return detached;
 }
 
-static void installCapturers(NSMutableArray<ScreenCapturer *> *capturers)
+static void installCapturers(NSMutableArray<ScreenCapturer *> *capturers, bool desiredExcluded)
 {
     pthread_mutex_lock(&gCapturersMutex);
     /* Build drops the previous session FIRST; overwriting a live list here
@@ -75,7 +99,12 @@ static void installCapturers(NSMutableArray<ScreenCapturer *> *capturers)
        was enforced nowhere. */
     assert(gCapturers == nil);
     gCapturers = [capturers retain];
-    gSelfExcluded = false;
+    /* Optimistic when desired: reported true from THIS line, before any
+       stream exists - see macVNCCaptureSessionBuild's header for why that is
+       the fix, not a shortcut. Start() below is what makes it come true for
+       real, or - only once its retries are exhausted - honestly false. */
+    gSelfExcluded = desiredExcluded;
+    gDesiredExcluded = desiredExcluded;
     ++gSessionGeneration;
     pthread_mutex_unlock(&gCapturersMutex);
 }
@@ -194,7 +223,8 @@ bool macVNCCaptureSessionBuild(const MacVNCDisplayLayout *layout,
                                uint64_t generation,
                                int captureFramesPerSecond,
                                MacVNCCaptureFrameHandler frameHandler,
-                               MacVNCCaptureFailureHandler failureHandler)
+                               MacVNCCaptureFailureHandler failureHandler,
+                               bool desiredExcluded)
 {
   @autoreleasepool {
     /* Drop any previous session FIRST, whatever happens next. A failed rebuild
@@ -285,7 +315,7 @@ bool macVNCCaptureSessionBuild(const MacVNCDisplayLayout *layout,
         [capturer release];
     }
 
-    installCapturers(built);
+    installCapturers(built, desiredExcluded);
     return true;
   }
 }
@@ -304,9 +334,25 @@ void macVNCCaptureSessionStart(void)
        pool; anything autoreleased below (NSLog formatting, error.description)
        would leak permanently with "autoreleased with no pool in place". */
     @autoreleasepool {
-    NSArray<ScreenCapturer *> *capturers = [copyCapturers(NULL) autorelease];
+    /* generation and gDesiredExcluded read together with the list, under the
+       SAME lock acquisition: a rebuild racing this call must not pair THIS
+       session's capturers with a LATER session's desiredExcluded, or the
+       retry kicked off below could reestablish exclusion for a generation
+       already superseded. */
+    pthread_mutex_lock(&gCapturersMutex);
+    NSArray<ScreenCapturer *> *capturers = [[gCapturers copy] autorelease];
+    uint64_t generation = gSessionGeneration;
+    bool needsReestablish = gDesiredExcluded;
+    pthread_mutex_unlock(&gCapturersMutex);
+
     for (ScreenCapturer *capturer in capturers)
         [capturer startCapture];
+
+    /* Only once the streams have actually been asked to start: reestablishExclusion
+       waits for the same async SCStream construction Start() just triggered,
+       via its own bounded retry (see the header on macVNCCaptureSessionBuild). */
+    if (needsReestablish)
+        reestablishExclusion(generation, MACVNC_EXCLUSION_REESTABLISH_RETRY_MAX);
     }
 }
 
@@ -428,6 +474,87 @@ void macVNCCaptureSessionSetSelfExcluded(bool excluded,
     dispatch_release(group);
     [request release];   /* the blocks above hold their own references */
   }
+}
+
+/*
+ * Tiny heap-allocated context, not a static: attempts for two different
+ * generations (an old one still retrying when a new rebuild starts) must
+ * never share mutable state, and there is no natural single owner to hang a
+ * struct off otherwise. Freed exactly once, in reestablishExclusionCompleted,
+ * regardless of outcome.
+ */
+typedef struct {
+    uint64_t generation;
+    int attemptsLeft;
+} MacVNCExclusionReestablishContext;
+
+/*
+ * The retry that closes the race a whole-diff review found: mac.m used to run
+ * this same bounded loop AFTER Start(), with nothing protecting the gap
+ * before the first attempt even landed - gSelfExcluded read false (Build's
+ * doing) for the WHOLE of StopAndWait/Build/early-Start, which the curtain's
+ * 1Hz heartbeat, with no debounce, could and did observe.
+ *
+ * Living here instead, driven by Start() itself (see macVNCCaptureSessionStart),
+ * this never lets gSelfExcluded read false while a retry is still owed: a
+ * FAILED attempt (success == false, checked below) re-asserts optimistic true
+ * before scheduling the next one, all synchronously within this ONE main-queue
+ * callback - the same callback noteExclusionOutcome (called by
+ * macVNCCaptureSessionSetSelfExcluded's own reportCompletion, which runs
+ * BEFORE this) already flipped false a moment earlier in the SAME call stack.
+ * Because the curtain heartbeat is itself only ever scheduled onto the main
+ * queue (MacVNCCurtainMainQueueScheduler, asserted by
+ * -[MacVNCCurtainController heartbeatWithGeneration:]), nothing can observe
+ * gSelfExcluded between that write and this one: a serial queue runs one
+ * block to completion before the next, and both writes happen inside this
+ * single block. Only once attemptsLeft is exhausted does this let the false
+ * reading noteExclusionOutcome already wrote stand - which is the one case a
+ * lift is actually owed. */
+static void
+reestablishExclusionCompleted(void *rawContext, bool success)
+{
+    MacVNCExclusionReestablishContext *ctx = rawContext;
+    uint64_t generation = ctx->generation;
+    int attemptsLeft = ctx->attemptsLeft;
+    free(ctx);
+
+    if (success)
+        return; /* noteExclusionOutcome already recorded gSelfExcluded=true */
+
+    if (attemptsLeft <= 0)
+        return; /* exhausted: noteExclusionOutcome's false stands - correctly */
+
+    /* Re-assert BEFORE scheduling the next attempt, and before returning from
+       this callback - see the function comment for why nothing can observe
+       the false value noteExclusionOutcome just wrote. */
+    pthread_mutex_lock(&gCapturersMutex);
+    if (generation == gSessionGeneration)
+        gSelfExcluded = true;
+    pthread_mutex_unlock(&gCapturersMutex);
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)MACVNC_EXCLUSION_REESTABLISH_RETRY_DELAY_NS),
+                   dispatch_get_main_queue(), ^{
+        reestablishExclusion(generation, attemptsLeft - 1);
+    });
+}
+
+static void
+reestablishExclusion(uint64_t generation, int attemptsLeft)
+{
+    /* A newer rebuild moved on since this retry was scheduled: nothing to
+       reestablish for a generation that is no longer current - the new one
+       carries its own desiredExcluded and, if true, its own retry chain. */
+    pthread_mutex_lock(&gCapturersMutex);
+    bool stillCurrent = (generation == gSessionGeneration);
+    pthread_mutex_unlock(&gCapturersMutex);
+    if (!stillCurrent)
+        return;
+
+    MacVNCExclusionReestablishContext *ctx = malloc(sizeof(*ctx));
+    ctx->generation = generation;
+    ctx->attemptsLeft = attemptsLeft;
+    macVNCCaptureSessionSetSelfExcluded(true, reestablishExclusionCompleted, ctx);
 }
 
 bool macVNCCaptureSessionWaitForFirstFrames(uint64_t timeoutNanoseconds)
