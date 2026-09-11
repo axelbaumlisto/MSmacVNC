@@ -1,0 +1,186 @@
+# A stream that stopped delivering must not look like a screen that stopped changing
+
+## What was actually wrong
+
+11.09.2026: macVNC served a viewer a frame from **10.09 02:40** for ~42 hours.
+No error, no modal, no log line — the listener, the auth and the framebuffer
+path all worked. Measured with an RFB probe:
+
+- three full-framebuffer requests in a row returned the **same** md5
+  (`6af5aa5db7`), while the real screen was changing;
+- an incremental request got **nothing for 20 s** (viewer sees a still image);
+- process CPU grew 0.18 s per 40 s — no frames were arriving at all;
+- framebuffer was `1472x956` = ONE display in the layout, while the desk had
+  two (`id=3` 3840x2160 main, `id=1` 1710x1112 built-in), both online/active;
+- `2026-09-10 02:38:32 WindowServer (SkyLight) WSDisplayStreamGetDisplay:
+  display = NULL, displayStream->displayID = 1` — the desk changed shape two
+  minutes before the last delivered frame. The server had started at 00:39,
+  when the built-in was alone and its logical size was 1472x956.
+
+On every new connection macVNC dutifully built a fresh `SCStream` for the
+stale `displayID`/geometry (confirmed in the ScreenCaptureKit log:
+`initWithFilter` → `addStreamOutput` → `startCaptureWithCompletionHandler`,
+no error) and that stream delivered nothing either. A restart of the app fixed
+it instantly: `fb 5552x2715`, changing md5s, incremental in 0.0 s.
+
+## What this refutes
+
+`.pi/plans/display-reconfiguration.md` closed "react to reconfiguration while
+running" as out of scope, with one load-bearing claim:
+
+> The unplug case never reaches it anyway. `reportCaptureFailure` already stops
+> the server and shows a modal within milliseconds of a monitor going away.
+
+Measured false. A desk change can leave `SCStream` **silent rather than
+failed**: `didStopWithError` never fires, so nothing on the failure path runs.
+That is the gap this plan closes. Its other three objections stand and shape
+the design below — no waking probe, no server restart, no reconfiguration
+subscription.
+
+## The invariant
+
+Today: *captures run if and only if a client is connected*
+(`reconcileCaptureState`). Extend it by what the viewer actually needs:
+
+> While a client is connected, captures must **deliver frames**. Silence is a
+> failure to act on, not a screen that happens to be still.
+
+Safe because a still screen is not silence: ScreenCaptureKit keeps delivering
+frames at the configured rate whether or not pixels changed.
+
+## The change
+
+Four small pieces, one responsibility each. Nothing new subscribes to
+CoreGraphics notifications; nothing restarts the server; no new thread.
+
+### 1. `src/CaptureLiveness.{h,c}` — pure decision (new, tested)
+
+```c
+typedef struct {            /* limits, injected — not constants in glue */
+    uint64_t graceNs;       /* after a start, before silence counts   */
+    uint64_t silenceNs;     /* no frame for this long = not alive     */
+    uint64_t cooldownNs;    /* minimum spacing between re-arms        */
+    unsigned maxRearms;     /* then stop lying and report the failure */
+} MacVNCCaptureLivenessLimits;
+
+typedef struct {
+    bool     capturesRunning;
+    bool     clientsConnected;
+    uint64_t nowNs, lastFrameNs, capturesStartedNs, lastRearmNs;
+    unsigned rearmsSinceFrame;
+} MacVNCCaptureLivenessInput;
+
+typedef enum { MacVNCCaptureAlive, MacVNCCaptureRearm, MacVNCCaptureGiveUp }
+    MacVNCCaptureLivenessVerdict;
+
+MacVNCCaptureLivenessVerdict macVNCResolveCaptureLiveness(
+    const MacVNCCaptureLivenessInput *, const MacVNCCaptureLivenessLimits *);
+```
+
+Rules, in order — all six are test rows:
+1. no client, or captures not running → `Alive` (do nothing; this is what kept
+   the old plan's 3am wake-loop out of the design);
+2. no frame yet and `now - capturesStartedNs < graceNs` → `Alive`;
+3. `now - max(lastFrameNs, capturesStartedNs) < silenceNs` → `Alive`;
+4. `now - lastRearmNs < cooldownNs` → `Alive` (one re-arm in flight per window);
+5. `rearmsSinceFrame >= maxRearms` → `GiveUp`;
+6. otherwise → `Rearm`.
+
+Shipped limits: grace 6 s (first-frame budget is 5 s), silence 4 s (= 120
+missed frames at 30 fps), cooldown 10 s, maxRearms 3 → a dead stream is either
+alive again or honestly reported inside ~35 s.
+
+### 2. One write point for "a frame arrived" (DRY)
+
+`compositeCapturedFrame()` (`src/mac.m:499`) is the only place a frame becomes
+pixels, so it is the only place that stamps time:
+`atomic_store(&gLastFrameNs[displayIndex], macVNCMonotonicNow())`.
+Per display, indexed by layout position; the watchdog reads the **minimum**
+over the layout, so one dead panel of two is caught, not averaged away.
+
+### 3. The watchdog — glue in `mac.m`
+
+One 1 Hz `dispatch_source` timer on the **existing** `gCaptureStopQueue`
+(no second queue), armed and disarmed by `reconcileCaptureState()` alongside
+the captures it watches. Body: take a snapshot under `captureControlMutex`,
+release it, call the pure resolver, then act — the keep-warm timer's exact
+shape, for the same reason (a re-arm waits on in-flight SCK work).
+
+- `Rearm` → `rearmCaptures()`, then `++rearmsSinceFrame`, `lastRearmNs = now`.
+- `GiveUp` → `reportCaptureFailure(false)`, the path that already exists:
+  `macVNCResolveCaptureFailure` decides keep-serving vs stop, the curtain comes
+  down, the menu and the modal already say what happened.
+
+### 4. `rearmCaptures()` — the only new operation
+
+1. `macVNCCaptureSessionStopAndWait()`.
+2. Re-read the desk **without waking it**: `readAttachedDisplays()` split into
+   `collectDisplayInputs(wake:)` + the waiting loop, so re-arm reuses the
+   reading and skips `macVNCWakeDisplays()` (the old plan's second objection).
+3. `macVNCDisplayLayoutsEqual(old,new)` — new pure function in
+   `DisplayLayout.c`, next to the builder that owns that struct.
+4. Equal → `macVNCCaptureSessionBuild(&displayLayout, fps, ...)` +
+   `macVNCCaptureSessionStart()`. Same two calls `ScreenInit` uses. Done.
+5. Different → swap the canvas in place, in this order:
+   `macVNCCompositorSetScreen(NULL)` (returns only when no composite is in
+   flight) → allocate new canvas → `rfbNewFramebuffer(rfbScreen, buf, w, h,
+   8,3,4)` (viewers already announce NewFBSize/ExtDesktopSize — verified in the
+   TigerVNC handshake log) → `macVNCInputSetContext(rfbScreen, &displayLayout)`
+   (**mandatory**: without it the pointer maps to the old desk) →
+   `macVNCCompositorSetScreen(rfbScreen)` → free the old canvas → Build+Start.
+6. Any failure → listener untouched, `reportCaptureFailure(false)`. The server
+   never takes itself down over this; the old plan's "restart has no safe
+   failure branch" objection is answered by not restarting the server.
+
+### 5. Logs that survive (separate, tiny, and why we were blind)
+
+`macVNC`'s stderr is `/dev/null` when launched from Finder — 29 KB of `rfbLog`
+was thrown away during this incident. Install a log sink (LibVNCServer's
+`rfbLog`/`rfbErr` function pointers) writing to
+`~/Library/Logs/macVNC/macvnc.log`, size-capped with one rotation. No
+LaunchAgent required, works however the app is started.
+
+## SOLID / DRY / KISS
+
+- **SRP** — decide (`CaptureLiveness`), execute (`rearmCaptures`), observe
+  (timestamp in the one composite callback), read hardware (`collectDisplayInputs`):
+  four separate things that used to be one missing thing.
+- **OCP** — limits are a parameter, so the policy changes without touching the
+  executor; tests pin the shipped values.
+- **DIP** — the resolver knows neither ScreenCaptureKit nor LibVNCServer; time
+  enters through the existing `macVNCMonotonicNow()` seam.
+- **DRY** — one frame-arrival stamp; one capture start pair
+  (`Build`+`Start`); one timer queue; one failure path (`reportCaptureFailure`);
+  layout comparison lives with layout construction; display reading shared with
+  startup.
+- **KISS** — 1 Hz timer, three verdicts, four limits. No reconfiguration
+  callback, no server restart, no extra thread, no new IPC.
+
+## Tests
+
+| test | asserts |
+|---|---|
+| `tests/test_capture_liveness.c` (new ctest `capture_liveness`) | the six rules; recovery resets `rearmsSinceFrame`; cooldown blocks a second re-arm; `GiveUp` after the cap; idle server is always `Alive` |
+| `tests/test_display_layout.c` (extend) | `macVNCDisplayLayoutsEqual`: identical, reordered, one display resized, count differs, empty |
+| `MACVNC_ENABLE_TEST_HOOKS` | add `gCaptureRearmCount` + a limits override, so an e2e run can force silence in seconds |
+| `tests/manual/desk-change.md` | the RFB probe procedure used above: connect, change the desk, assert incremental frames resume and `fb` size follows |
+
+## Staging
+
+1. **S1** timestamp + `CaptureLiveness` + watchdog, `Rearm` = stop/Build/Start
+   with the same layout. Catches a silently dead stream.
+2. **S2** `macVNCDisplayLayoutsEqual` + non-waking re-read + canvas swap with
+   `rfbNewFramebuffer` + input context. Catches this incident.
+3. **S3** log sink.
+4. **S4** (optional, latent bug from the old plan) pin `displayNumber` by
+   display ID, not list index.
+
+Each stage ships alone and is verifiable alone.
+
+## Out of scope
+
+- Subscribing to `CGDisplayRegisterReconfigurationCallback` (the watchdog needs
+  no notification, and the old plan's reasons against it still hold).
+- Restarting the server, the listener or the auth on any of this.
+- Mirroring changes, resolution changes inside one display beyond what the
+  layout comparison already covers.
