@@ -10,6 +10,7 @@
 #import "MacVNCRelauncher.h"
 #import "MacVNCStatusText.h"
 #import "MacVNCStartFailure.h"
+#import "MacVNCLogSink.h"
 #import "MacVNCPermissionsPanel.h"
 #import "MacVNCInput.h"
 #import "MacVNCPowerMgmt.h"
@@ -222,6 +223,13 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
 
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification
 {
+    /* FIRST, before anything else can call rfbLog/rfbErr: macVNC's stderr is
+       /dev/null when launched from Finder, which is how a 42-hour capture
+       outage left not one readable log line behind it. Every rfbLog call
+       from here on lands in ~/Library/Logs/macVNC/macvnc.log too - see
+       MacVNCLogSink.h for why there is no matching teardown call. */
+    macVNCLogSinkInstall();
+
     gSharedAppDelegate = self;
     /* ALL server start/stop work runs on this ONE serial queue. It used to be
        three dispatches onto the CONCURRENT global queue, where a user's Start

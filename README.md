@@ -275,6 +275,8 @@ nohup "$PWD/build-arm64/macVNC.app/Contents/MacOS/macVNC" \
 
 `MACVNC_DISPLAY=-2` exposes all active displays in one RFB `ServerInit`. Display rectangles retain the macOS arrangement. Areas not covered by a display remain black and ignore pointer input.
 
+Every build also writes its own copy of this log to `~/Library/Logs/macVNC/macvnc.log` (rotated once to `macvnc.log.1`), regardless of how the app is launched. This exists because macVNC's stderr is `/dev/null` when started from Finder — the normal way — which otherwise leaves no record at all.
+
 ## macOS permissions
 
 Enable both permissions for the exact binary/app signature being run:

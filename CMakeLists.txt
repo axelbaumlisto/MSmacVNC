@@ -127,6 +127,9 @@ set(SOURCE_FILES
     src/MacVNCStatusText.m
     src/MacVNCStartFailure.h
     src/MacVNCStartFailure.m
+    src/MacVNCLogSink.h
+    src/MacVNCLogSink.c
+    src/MacVNCLogSink.m
     src/MacVNCAllowlistPlan.h
     src/MacVNCAllowlistPlan.m
     src/MacVNCPassword.h
@@ -284,6 +287,14 @@ if(BUILD_TESTING)
                    src/MacVNCClamshellPolicy.c)
     target_include_directories(test_clamshell_policy PRIVATE src)
     add_test(NAME clamshell_policy COMMAND test_clamshell_policy)
+
+    # The rotation decision only: a log line that never reaches disk is the
+    # /dev/null-stderr bug this file exists to end. Pure C on purpose, no
+    # filesystem - see src/MacVNCLogSink.h.
+    add_executable(test_log_sink tests/test_log_sink.c
+                   src/MacVNCLogSink.c)
+    target_include_directories(test_log_sink PRIVATE src)
+    add_test(NAME log_sink COMMAND test_log_sink)
 
     # The curtain's capture half from the session's side: one answer per
     # request, on the main thread, and requests that survive a session being

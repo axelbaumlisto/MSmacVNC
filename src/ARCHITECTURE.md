@@ -90,10 +90,25 @@ Pure logic, each with a unit test wired into `ctest` (`.c` for C modules,
 - **MacVNCStartFailure** — what to say when the server does not come up.
   Silence on a real failure and a port-collision alert stacked over the
   permission panel are both wrong; the decision is pure and tested.
+- **MacVNCLogSink** (`.c` half) — when to rotate the log file, given its
+  current size and the length of the line about to be written. Pure so it
+  cannot repeat the failure it exists to end: macVNC's stderr is `/dev/null`
+  under Finder, so a rfbLog line that never reaches a file never reaches
+  anyone.
 
 Objective-C glue:
 - **AppDelegate** — status-bar UI, timers, server start/stop, permission flow;
-  installs the capture-permission policy into the core.
+  installs the capture-permission policy into the core; the first thing it
+  does on launch is `macVNCLogSinkInstall()`, before anything else can call
+  `rfbLog`.
+- **MacVNCLogSink** (`.m` half) — opens `~/Library/Logs/macVNC/macvnc.log`,
+  installs itself as LibVNCServer's `rfbLog`/`rfbErr`, and serialises every
+  call (client threads, capture callbacks, `gCaptureStopQueue`, main thread)
+  behind one mutex. Also writes stderr, unconditionally and first, so running
+  the binary from a terminal keeps working exactly as documented in the
+  README. Never uninstalled — see the header for why an explicit teardown
+  would reintroduce a shutdown-time race for the very mutex it exists to
+  avoid.
 - **MacVNCCompositor** — composites raw BGRA pixels into the shared canvas
   (`macVNCCompositorSubmitFrame(geometry, pixels, stride, hint)`); OWNS the screen
   pointer (`macVNCCompositorSetScreen`) — detach takes the compositor lock, so
@@ -596,7 +611,7 @@ pixels rather than points.
 
 ## Tests
 
-`ctest` runs 45 targets (the number is enforced: `architecture_doc` compares
+`ctest` runs 46 targets (the number is enforced: `architecture_doc` compares
 this sentence against CMakeLists.txt's `add_test` count, so a target added or
 commented out fails the suite until this line is updated deliberately). Every
 assertion added here is checked by mutating the source and confirming the test
