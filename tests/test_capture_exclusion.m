@@ -37,12 +37,12 @@
  * thread, none reporting success - hold deterministically either way.
  */
 
-static bool acceptFrame(const MacVNCDisplayGeometry *geometry,
+static bool acceptFrame(MacVNCCaptureFrameOrigin origin,
                         const uint8_t *pixels, size_t stride,
                         int width, int height,
                         const MacVNCDirtyHint *hint)
 {
-    (void)geometry; (void)pixels; (void)stride;
+    (void)origin; (void)pixels; (void)stride;
     (void)width; (void)height; (void)hint;
     return true;
 }
@@ -117,7 +117,7 @@ static void testBuiltSessionAnswersEveryRequest(void)
 {
     MacVNCDisplayLayout layout;
     fillLayout(&layout, 2);
-    assert(macVNCCaptureSessionBuild(&layout, 30, acceptFrame, noteFailure));
+    assert(macVNCCaptureSessionBuild(&layout, 1, 30, acceptFrame, noteFailure));
     assert(macVNCCaptureSessionCount() == 2);
 
     int before = atomic_load(&gAnswers);
@@ -151,7 +151,12 @@ static void testRequestsSurviveConcurrentRebuild(void)
             @autoreleasepool {
                 MacVNCDisplayLayout layout;
                 fillLayout(&layout, (i % 2) + 1);
-                macVNCCaptureSessionBuild(&layout, 30, acceptFrame, noteFailure);
+                /* i+1: a distinct generation per rebuild, matching mac.m's own
+                   rule that a Build never reuses one - not load-bearing for
+                   this stress test's own assertions, but a Build call site
+                   that reused a literal here would be modelling something
+                   production never does. */
+                macVNCCaptureSessionBuild(&layout, (uint64_t)(i + 1), 30, acceptFrame, noteFailure);
                 macVNCCaptureSessionReset();
             }
         }
@@ -196,7 +201,7 @@ static void testExclusionDoesNotSurviveARebuild(void)
 
     MacVNCDisplayLayout layout;
     fillLayout(&layout, 1);
-    assert(macVNCCaptureSessionBuild(&layout, 30, acceptFrame, noteFailure));
+    assert(macVNCCaptureSessionBuild(&layout, 1, 30, acceptFrame, noteFailure));
     /* Build always constructs the DEFAULT filter. */
     assert(!macVNCCaptureSessionSelfExcluded());
 
@@ -238,7 +243,7 @@ static void testStopQueueReadersSurviveAConcurrentStop(void)
             @autoreleasepool {
                 MacVNCDisplayLayout layout;
                 fillLayout(&layout, (i % 2) + 1);
-                macVNCCaptureSessionBuild(&layout, 30, acceptFrame, noteFailure);
+                macVNCCaptureSessionBuild(&layout, (uint64_t)(i + 1), 30, acceptFrame, noteFailure);
                 macVNCCaptureSessionReset();
             }
         }

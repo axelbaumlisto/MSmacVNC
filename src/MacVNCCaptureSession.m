@@ -191,6 +191,7 @@ void macVNCCaptureSessionReset(void)
 }
 
 bool macVNCCaptureSessionBuild(const MacVNCDisplayLayout *layout,
+                               uint64_t generation,
                                int captureFramesPerSecond,
                                MacVNCCaptureFrameHandler frameHandler,
                                MacVNCCaptureFailureHandler failureHandler)
@@ -221,9 +222,19 @@ bool macVNCCaptureSessionBuild(const MacVNCDisplayLayout *layout,
         [[[NSMutableArray alloc] initWithCapacity:layout->count] autorelease];
 
     for (size_t i = 0; i < layout->count; ++i) {
-        /* Points into the caller's layout, which outlives the session: mac.m
-           keeps it in the run's private state. */
+        /* A plain local for what THIS loop iteration still needs before the
+           block below - the display id to open a stream on, and a name for
+           the error log two lines down. It is not what the block captures:
+           see `origin`. */
         const MacVNCDisplayGeometry *geometry = &layout->displays[i];
+        /* Captured BY VALUE, two plain scalars, not a pointer into the
+           caller's layout: the frame handler used to receive `geometry`
+           itself and recover its display index by comparing that pointer's
+           ADDRESS against whichever layout was currently published - see
+           MacVNCCaptureFrameOrigin for why that stopped being enough. A
+           value capture has no lifetime question at all, which a pointer
+           into memory this module does not own always will. */
+        MacVNCCaptureFrameOrigin origin = { .generation = generation, .displayIndex = i };
         /* Per-display, per-block state. Each loop iteration creates a fresh
            block, so displays cannot share (or race on) the deadline; frames
            of one display are delivered serially, so it needs no lock. */
@@ -254,7 +265,7 @@ bool macVNCCaptureSessionBuild(const MacVNCDisplayLayout *layout,
                 CVPixelBufferLockBaseAddress(pixelBuffer,
                                              kCVPixelBufferLock_ReadOnly);
                 bool accepted = frameHandler(
-                    geometry,
+                    origin,
                     CVPixelBufferGetBaseAddress(pixelBuffer),
                     CVPixelBufferGetBytesPerRow(pixelBuffer),
                     (int)CVPixelBufferGetWidth(pixelBuffer),

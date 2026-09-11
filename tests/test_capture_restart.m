@@ -12,12 +12,12 @@
 #include <unistd.h>
 
 static _Atomic unsigned framesSeen = 0;
-static bool acceptFrame(const MacVNCDisplayGeometry *geometry,
+static bool acceptFrame(MacVNCCaptureFrameOrigin origin,
                         const uint8_t *pixels, size_t stride,
                         int width, int height,
                         const MacVNCDirtyHint *hint)
 {
-    (void)geometry; (void)pixels; (void)stride; (void)width; (void)height;
+    (void)origin; (void)pixels; (void)stride; (void)width; (void)height;
     (void)hint;
     atomic_fetch_add(&framesSeen, 1);
     return true;
@@ -46,7 +46,7 @@ int main(void)
             puts("test_capture_restart: SKIP (no usable display)");
             return 77;
         }
-        assert(macVNCCaptureSessionBuild(&layout, 5, acceptFrame, noteFailure));
+        assert(macVNCCaptureSessionBuild(&layout, 1, 5, acceptFrame, noteFailure));
 
         /* Round 1: start, expect frames. */
         macVNCCaptureSessionStart();

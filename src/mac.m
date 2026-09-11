@@ -145,7 +145,7 @@ vncServerCopyPassword(char *buffer, size_t size)
  * MacVNCCaptureSession.h documents exactly this: StopAndWait's wait is
  * bounded, and a stream whose work never quiesced is deliberately leaked
  * rather than freed because a callback may still touch it. So the multi-field
- * copy could tear against that read: `count` from one generation compared
+ * copy could tear against that read: `count` from one publish compared
  * against `displays[]` from another. Bounded (displays[] is a fixed
  * MACVNC_MAX_DISPLAYS array, never out-of-bounds; worst case is a dropped
  * frame or one stale-pixel frame that heals on the next real one - see
@@ -153,27 +153,35 @@ vncServerCopyPassword(char *buffer, size_t size)
  * re-arm, not present before it.
  *
  * The fix is PUBLISH BY POINTER SWAP, never mutate what is currently
- * published: two fixed slots hold successive generations of the layout, and
+ * published: two fixed slots hold successive publications of the layout, and
  * an atomic pointer says which one is current. A reader loads that pointer
  * ONCE and reads only through it, so every field it sees belongs to the same
- * generation - no lock needed on the hot path, because nothing ever writes
- * into the slot the pointer currently designates as published.
+ * publish - no lock needed on the hot path, because nothing ever writes into
+ * the slot the pointer currently designates as published.
  *
- * Two slots, not one-per-generation: a writer publishing generation N+1
- * always targets whichever slot is NOT currently published (the one holding
- * generation N-1, already retired one publish ago), so it never touches the
- * live slot. A stuck callback from generation N-1 - already an accepted,
- * documented edge case above - keeps a valid (never freed) pointer into that
- * slot; the only way it can read something unexpected is if TWO MORE re-arms
- * land before that callback finally shows up, at which point the slot has
- * been reused for generation N+1. That is bounded and memory-safe (still a
- * valid MacVNCDisplayLayout, never out-of-bounds, never freed memory) - it is
- * not a promise that a callback that late reads consistent data, and nothing
- * downstream needs that promise (see compositeCapturedFrame). An unbounded
- * leak per re-arm - keeping every retired generation alive forever - was
- * rejected as unnecessary: nothing reads a generation more than one publish
- * removed from current, so two slots already give every real reader a valid
- * answer.
+ * Two slots, not one-per-publish: a writer publishing into slot N+1 always
+ * targets whichever slot is NOT currently published (the one last holding
+ * publish N-1, already retired one publish ago), so it never touches the live
+ * slot. A stuck callback from publish N-1 keeps a valid (never freed) pointer
+ * into that slot; if TWO MORE re-arms land before that callback finally shows
+ * up, the slot has since been reused for publish N+1, and the callback reads
+ * WHATEVER publish N+1 put there - not a torn read (still one atomic load's
+ * worth of a complete, self-consistent MacVNCDisplayLayout, never
+ * out-of-bounds, never freed memory), but not that callback's own generation
+ * either.
+ *
+ * That residual case is closed by a DIFFERENT mechanism, not by adding a
+ * third slot: compositeCapturedFrame no longer identifies a frame by which
+ * slot its geometry pointer happens to still address at all - see
+ * MacVNCCaptureFrameOrigin and gCaptureSessionGeneration below, which reject
+ * a stale frame by an explicit, never-reused counter BEFORE it ever reads a
+ * slot's content, so a callback from ANY retired generation - one re-arm
+ * stale or a hundred - never reaches a read of this structure in the first
+ * place. What these two slots still exist for is narrower and unrelated: give
+ * every reader that DOES pass that check (or never needed it - oldestFrameStamp,
+ * ScreenInit) a torn-free, single-load view of the layout's own fields, so a
+ * concurrent re-arm publishing a new shape can never be observed as `count`
+ * from one shape and `displays[]` from another.
  *
  * Writers (resolveDisplayLayout at startup, rearmCaptures on re-arm) are
  * always serialised - startup runs once before any capture session exists,
@@ -207,6 +215,47 @@ publishDisplayLayout(const MacVNCDisplayLayout *fresh)
     *target = *fresh;
     atomic_store(&gPublishedLayout, target);
     return target;
+}
+
+/*
+ * Which capture session a frame came from - orthogonal to which LAYOUT is
+ * published above. A re-arm that finds the desk unchanged rebuilds its
+ * session onto the SAME already-published MacVNCDisplayLayout object (see
+ * rearmCaptures's same-shape branch) rather than publishing a second,
+ * identical copy of it - so a layout publish and a new capture session are
+ * NOT the same event, and identifying a session by "which layout publish it
+ * used" would fail to tell two such sessions apart. This counter is bumped
+ * once per macVNCCaptureSessionBuild() call, always, whether or not the
+ * layout changed, and never reused - so a frame carrying any value other than
+ * the CURRENT one came from a session that is no longer THE session,
+ * regardless of how many re-arms separate the two or whether the desk's
+ * shape ever changed at all. See MacVNCCaptureFrameOrigin for how a frame
+ * carries this, and compositeCapturedFrame for where it is checked.
+ *
+ * 0 is reserved for "never Built against a real generation" and cannot
+ * collide with a real one - the first claimed generation is 1 (see
+ * nextCaptureSessionGeneration). No capture session is ever Built with
+ * generation 0 in practice, but reserving it costs nothing and gives a
+ * frame with a garbage/zeroed origin an unambiguous "never matches" answer.
+ */
+static _Atomic uint64_t gCaptureSessionGeneration = 0;
+
+/* Claims the generation the NEXT macVNCCaptureSessionBuild() call will use.
+   Called exactly once per Build call site, and in rearmCaptures BEFORE
+   StopAndWait rather than right before Build - see rearmCaptures for why
+   that ordering, not proximity to Build, is what actually matters: claiming
+   it here means ANY frame the old, about-to-be-stopped session might still
+   deliver - even one delivered while StopAndWait is still draining, even one
+   from a stream that never quiesced and was deliberately leaked - already
+   finds gCaptureSessionGeneration advanced past its own value, however early
+   it arrives. */
+static uint64_t
+nextCaptureSessionGeneration(void)
+{
+    /* fetch_add returns the PRE-increment value; +1 gives the generation this
+       call just claimed, so the very first call returns 1, never the 0
+       sentinel above. */
+    return atomic_fetch_add(&gCaptureSessionGeneration, 1) + 1;
 }
 
 static rfbBool rfbServerInitialized = FALSE;
@@ -248,15 +297,16 @@ static void macVNCEnsureStopQueue(void)
  * CaptureLiveness.h for why silence, not an SCStream error, is the signal
  * this watches for.
  *
- * gLastFrameNs is indexed by POSITION within whichever layout generation is
- * CURRENTLY published, the same index compositeCapturedFrame's geometry
- * pointer already encodes (geometry is `&layout->displays[i]` for the
- * `layout` a capture session was Built against, per MacVNCCaptureSession.m).
- * A callback whose session was built against an OLDER, already-retired
- * generation simply will not match any index in the current one (see
- * gPublishedLayout) and is skipped rather than misindexed. 0 means "no frame
- * yet for that slot" - macVNCMonotonicNow() never returns 0, so it doubles as
- * a safe sentinel with no separate bool needed alongside it.
+ * gLastFrameNs is indexed by the `displayIndex` a frame's MacVNCCaptureFrameOrigin
+ * carries - the same position within the layout its session was Built
+ * against (MacVNCCaptureSession.m mints one origin per display, in loop
+ * order). A callback whose session is no longer the current one is rejected
+ * by its `generation` (see gCaptureSessionGeneration) before
+ * compositeCapturedFrame ever reaches this array, so an index here is always
+ * live-session-fresh, never a stale session's position reinterpreted against
+ * the current one. 0 means "no frame yet for that slot" - macVNCMonotonicNow()
+ * never returns 0, so it doubles as a safe sentinel with no separate bool
+ * needed alongside it.
  */
 static _Atomic uint64_t gLastFrameNs[MACVNC_MAX_DISPLAYS];
 /* When the currently running captures were told to start - the watchdog's
@@ -694,55 +744,68 @@ applyImageProfile(rfbClientPtr cl)
 }
 
 static bool
-compositeCapturedFrame(const MacVNCDisplayGeometry *geometry,
+compositeCapturedFrame(MacVNCCaptureFrameOrigin origin,
                        const uint8_t *pixels, size_t stride,
                        int width, int height,
                        const MacVNCDirtyHint *hint)
 {
-    if (!pixels || !geometry)
+    if (!pixels)
         return true; /* nothing to composite; not a retryable condition */
+
+    /* Reject a frame from a session that is no longer current BEFORE reading
+       anything else - this replaces a scan that compared `geometry`'s
+       ADDRESS against the published layout's slots, which only rejected a
+       callback stuck across exactly ONE re-arm; reused two re-arms later, it
+       could resurrect gLastFrameNs for a display the frame has nothing to do
+       with (see gPublishedLayout and MacVNCCaptureFrameOrigin). An explicit,
+       monotonically increasing, NEVER REUSED generation has no reuse window:
+       whatever this frame carries either equals the CURRENT generation or it
+       does not, however many re-arms separate the two. */
+    if (origin.generation != atomic_load(&gCaptureSessionGeneration))
+        return true; /* stale session; not retryable, nothing to composite */
 
     /* Load the published layout EXACTLY ONCE and read every field below
        through this local - see gPublishedLayout above for why. Before the
        double-buffer swap this touched the `displayLayout` global directly,
        field by field, which raced a re-arm's in-place overwrite of that same
        global; loading the pointer once makes this whole function see a
-       single, self-consistent generation no matter what a concurrent re-arm
+       single, self-consistent publish no matter what a concurrent re-arm
        publishes in the meantime. */
     MacVNCDisplayLayout *layout = currentDisplayLayout();
 
-    /* The ONE write point for "a frame arrived" - see CaptureLiveness.h. The
-       call reaching this function at all is the liveness signal, independent
-       of whether its geometry below turns out to match: a stream that is
-       delivering wrong-sized frames is a different bug from one that stopped
-       delivering anything, and only the watchdog cares about the latter.
-       `geometry` is `&layout->displays[i]` for the layout the capture session
-       producing it was Built against (MacVNCCaptureSession.m), so a
-       pointer-equality scan recovers the same index the watchdog reads by -
-       and a callback from an OLDER, already-retired generation simply finds
-       no match here (its geometry points into a different slot entirely) and
-       falls through without touching gLastFrameNs, which is correct: a stale
-       callback must not resurrect liveness for either generation. */
-    for (size_t i = 0; i < layout->count; ++i) {
-        if (&layout->displays[i] == geometry) {
-            atomic_store(&gLastFrameNs[i], macVNCMonotonicNow());
-            /* A delivered frame proves the stream that produced it is alive
-               again, so whatever re-arm count a PRIOR silence ran up no
-               longer describes the current situation - without this reset a
-               stream that recovers on its own after two re-arms would need
-               only one more silent minute to hit maxRearms and GiveUp. */
-            atomic_store(&gRearmsSinceFrame, 0);
-            break;
-        }
-    }
+    /* Defensive, not expected: the generation check above already guarantees
+       `origin.displayIndex` was valid for the layout the CURRENT generation
+       was Built against, and that layout cannot have changed since without
+       ALSO bumping the generation (both only ever change together, inside
+       one re-arm, on the single serial gCaptureStopQueue writer - see
+       nextCaptureSessionGeneration). Trusting an index from a capture
+       callback without a bounds check anyway is the kind of shortcut that
+       turns a future refactor into an out-of-bounds read. */
+    if (origin.displayIndex >= layout->count)
+        return true;
 
-    /* Copy BY VALUE before checking and using: `geometry` may point into a
-       slot this same function no longer considers current (the stuck-capturer
-       case above), and slots are reused two publishes later - see
-       gPublishedLayout. The snapshot is what makes the width/height guard
-       below compare against the generation THIS frame actually belongs to,
-       not whatever `layout` most recently loaded to. */
-    MacVNCDisplayGeometry snapshot = *geometry;
+    /* The ONE write point for "a frame arrived" - see CaptureLiveness.h. The
+       call reaching this function AND matching the current generation is the
+       liveness signal, independent of whether the size check below turns out
+       to match: a stream delivering wrong-sized frames is a different bug
+       from one that stopped delivering anything, and only the watchdog cares
+       about the latter. */
+    atomic_store(&gLastFrameNs[origin.displayIndex], macVNCMonotonicNow());
+    /* A delivered frame proves the stream that produced it is alive again, so
+       whatever re-arm count a PRIOR silence ran up no longer describes the
+       current situation - without this reset a stream that recovers on its
+       own after two re-arms would need only one more silent minute to hit
+       maxRearms and GiveUp. */
+    atomic_store(&gRearmsSinceFrame, 0);
+
+    /* Copy BY VALUE before using: a concurrent re-arm cannot publish a NEWER
+       layout out from under `layout` without ALSO bumping the generation this
+       function already checked above, so unlike before this snapshot is not
+       guarding against that case - it exists so the width/height guard and
+       the compositor call below read one coherent struct instead of the
+       array element potentially twice, at two different optimizer-visible
+       times. */
+    MacVNCDisplayGeometry snapshot = layout->displays[origin.displayIndex];
 
     if (width != snapshot.input.pixelWidth ||
         height != snapshot.input.pixelHeight) {
@@ -904,8 +967,12 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond,
 
   /* One call: MacVNCCaptureSession owns ScreenCaptureKit, unwraps each frame
      to plain pixels and classifies capture errors, so this file needs neither
-     SCStream nor SCStreamError. */
-  if (!macVNCCaptureSessionBuild(layout, captureFramesPerSecond,
+     SCStream nor SCStreamError. The very first generation ever claimed - no
+     older session exists yet to invalidate, so unlike rearmCaptures there is
+     no ordering requirement on when this happens relative to anything else
+     here. */
+  if (!macVNCCaptureSessionBuild(layout, nextCaptureSessionGeneration(),
+                                 captureFramesPerSecond,
                                  compositeCapturedFrame, reportCaptureFailure))
       return FALSE;
 
@@ -980,6 +1047,17 @@ oldestFrameStamp(void)
 static bool
 rearmCaptures(void)
 {
+    /* Claim the NEW generation FIRST, before anything else - see
+       nextCaptureSessionGeneration for why order matters here: any frame the
+       OLD session might still deliver (StopAndWait's drain is bounded, and a
+       stream whose work never quiesced is deliberately leaked rather than
+       freed while a callback may still touch it, per
+       MacVNCCaptureSession.h) must find gCaptureSessionGeneration ALREADY
+       advanced, however early it arrives - even mid-drain, even before the
+       new session exists. Claiming it any later would leave exactly that
+       window open. Used by whichever branch below actually rebuilds. */
+    uint64_t generation = nextCaptureSessionGeneration();
+
     macVNCCaptureSessionStopAndWait();
     for (size_t i = 0; i < MACVNC_MAX_DISPLAYS; ++i)
         atomic_store(&gLastFrameNs[i], 0);
@@ -1014,7 +1092,7 @@ rearmCaptures(void)
            replace. Mirrors ScreenInit's own
            `if (!macVNCCaptureSessionBuild(...)) return FALSE;` (this file,
            above) for the same call, on the same layout. */
-        if (!macVNCCaptureSessionBuild(liveLayout, gCaptureFramesPerSecond,
+        if (!macVNCCaptureSessionBuild(liveLayout, generation, gCaptureFramesPerSecond,
                                        compositeCapturedFrame, reportCaptureFailure))
             return false;
         macVNCCaptureSessionStart();
@@ -1074,7 +1152,7 @@ rearmCaptures(void)
     rfbLog("Desk shape changed since this session started; rebuilding the composite canvas\n");
     logCapturingLayout(publishedLayout);
 
-    if (!macVNCCaptureSessionBuild(publishedLayout, gCaptureFramesPerSecond,
+    if (!macVNCCaptureSessionBuild(publishedLayout, generation, gCaptureFramesPerSecond,
                                    compositeCapturedFrame, reportCaptureFailure))
         return false;
     macVNCCaptureSessionStart();
@@ -1971,6 +2049,42 @@ unsigned
 macVNCCaptureRearmCountForTesting(void)
 {
     return atomic_load(&gCaptureRearmCount);
+}
+
+/* Bypasses ScreenCaptureKit entirely - see mac.h for why a synthetic frame,
+   sized off the real current layout, is the only deterministic way to prove
+   a stale generation is rejected. */
+void
+macVNCCompositeSyntheticFrameForTesting(uint64_t generation, size_t displayIndex)
+{
+    MacVNCDisplayLayout *layout = currentDisplayLayout();
+    if (displayIndex >= layout->count)
+        return;
+    MacVNCDisplayGeometry *geometry = &layout->displays[displayIndex];
+    int width = geometry->input.pixelWidth;
+    int height = geometry->input.pixelHeight;
+    size_t stride = (size_t)width * 4;
+    uint8_t *pixels = calloc(1, stride * (size_t)height);
+    if (!pixels)
+        return;
+    MacVNCCaptureFrameOrigin origin = { .generation = generation, .displayIndex = displayIndex };
+    MacVNCDirtyHint hint = { NULL, 0 };
+    compositeCapturedFrame(origin, pixels, stride, width, height, &hint);
+    free(pixels);
+}
+
+uint64_t
+macVNCCurrentCaptureGenerationForTesting(void)
+{
+    return atomic_load(&gCaptureSessionGeneration);
+}
+
+uint64_t
+macVNCLastFrameTimestampForTesting(size_t displayIndex)
+{
+    if (displayIndex >= MACVNC_MAX_DISPLAYS)
+        return 0;
+    return atomic_load(&gLastFrameNs[displayIndex]);
 }
 
 /*

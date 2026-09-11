@@ -113,6 +113,47 @@ main(void)
         }
 
         unsigned finalCount = macVNCCaptureRearmCountForTesting();
+
+        /*
+         * The guarantee S2c added: a frame from a RETIRED generation must be
+         * rejected before it can touch gLastFrameNs, however many re-arms
+         * separate it from the current one - not just the one-re-arm-stale
+         * case the previous, address-based scan happened to also catch. Run
+         * BEFORE vncServerStop() below, while the session and its published
+         * layout are still live - stop is what tears both down, and this is
+         * not a test of what happens to a synthetic frame fed to a torn-down
+         * server.
+         *
+         * A real stuck ScreenCaptureKit callback cannot be provoked on
+         * demand, so this feeds a SYNTHETIC frame - correctly sized off the
+         * real current layout, so a mismatched generation is the only reason
+         * it can be rejected - directly through the real
+         * compositeCapturedFrame, carrying a generation from before every
+         * re-arm this run already observed.
+         */
+        if (rearmed) {
+            uint64_t current = macVNCCurrentCaptureGenerationForTesting();
+            assert(current >= 2); /* the initial Build plus at least one re-arm */
+            uint64_t retired = current - (uint64_t)finalCount;
+            /* A retired generation must still be a real, already-superseded
+               one - never generation 0, the "nothing was ever Built"
+               sentinel, which would trivially never match and prove
+               nothing. */
+            assert(retired >= 1 && retired < current);
+
+            uint64_t beforeStamp = macVNCLastFrameTimestampForTesting(0);
+            macVNCCompositeSyntheticFrameForTesting(retired, 0);
+            uint64_t afterStale = macVNCLastFrameTimestampForTesting(0);
+            assert(afterStale == beforeStamp); /* retired generation: rejected, untouched */
+
+            /* Same call, CURRENT generation: proves the rejection above was
+               about `retired` specifically, not a hook that never touches
+               gLastFrameNs at all. */
+            macVNCCompositeSyntheticFrameForTesting(current, 0);
+            uint64_t afterCurrent = macVNCLastFrameTimestampForTesting(0);
+            assert(afterCurrent != beforeStamp && afterCurrent > afterStale);
+        }
+
         macVNCEndClientForTesting(client);
         vncServerStop(); /* exercises the item-1 rendezvous with any in-flight re-arm */
 
@@ -123,6 +164,7 @@ main(void)
         }
 
         assert(finalCount >= 1);
+
         printf("test_capture_liveness_rearm: all assertions passed (rearm count=%u)\n",
                finalCount);
     }

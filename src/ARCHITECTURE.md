@@ -483,7 +483,17 @@ pixels rather than points.
   still be reading it - see `MacVNCCaptureSession.h` on why StopAndWait's wait
   is bounded rather than infinite). The swap is now a single atomic pointer
   store into whichever slot is not currently published, and every reader loads
-  the pointer exactly once per call so it sees one self-consistent generation.
+  the pointer exactly once per call so it sees one self-consistent publish.
+  A frame no longer identifies ITS OWN display by comparing pointer addresses
+  into those two slots either: that recovered the right index for a callback
+  stuck across exactly one re-arm, and the wrong one two re-arms later, when
+  the same slot is reused and the address match fires again against content
+  that belongs to a different session entirely. `MacVNCCaptureFrameOrigin`
+  (`MacVNCCaptureSession.h`) carries a `generation` instead - a counter `mac.m`
+  bumps once per `macVNCCaptureSessionBuild` call and never reuses, checked
+  against the CURRENT value before `compositeCapturedFrame` reads anything else
+  - so a frame from any retired session is rejected the same way whether it is
+  one re-arm stale or a hundred, and the address scan it replaced is gone.
 - **MacVNCClamshellPolicy / MacVNCClamshellMarker / MacVNCClamshell** —
   closed-display mode. The policy
   half is pure C and holds every rule; the marker owns the persisted record; the
