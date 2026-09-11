@@ -476,6 +476,14 @@ pixels rather than points.
   a real capture error). No client, or captures not running, is always
   `Alive` - the design this replaces would have re-armed a display that idled
   itself to sleep with nobody watching.
+  The published layout itself is double-buffered (`mac.m`, two fixed slots plus
+  an atomic pointer): the first version of the shape-changed swap published a
+  new layout with an in-place struct copy, which raced `compositeCapturedFrame`'s
+  unsynchronised read of that same global (a stuck old-generation callback can
+  still be reading it - see `MacVNCCaptureSession.h` on why StopAndWait's wait
+  is bounded rather than infinite). The swap is now a single atomic pointer
+  store into whichever slot is not currently published, and every reader loads
+  the pointer exactly once per call so it sees one self-consistent generation.
 - **MacVNCClamshellPolicy / MacVNCClamshellMarker / MacVNCClamshell** —
   closed-display mode. The policy
   half is pure C and holds every rule; the marker owns the persisted record; the
