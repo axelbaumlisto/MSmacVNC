@@ -506,8 +506,10 @@ resolveDisplayLayout(void)
 
 /* Re-read the desk WITHOUT waking it, into a caller-owned scratch layout
    rather than the published one (rearmCaptures must not publish until the
-   canvas it describes exists). `logEnumeration` - see ARCHITECTURE.md's
-   FIX-D entry for the log-spam bug it fixes and who passes which value. */
+   canvas it describes exists). `logEnumeration`: TRUE from a caller already
+   committed to act on the read (rearmCaptures), FALSE from one merely comparing
+   it against the published layout (the desk-shape debounce), which must stay
+   silent when they turn out equal - see ARCHITECTURE.md's FIX-D entry. */
 static rfbBool
 resolveDeskLayoutWithoutWaking(MacVNCDisplayLayout *layout, bool logEnumeration)
 {
@@ -1032,6 +1034,11 @@ swapCanvas(const MacVNCDisplayLayout *freshLayout)
                       publishedLayout->width, publishedLayout->height, 8, 3, 4);
     applyServerPixelFormat(rfbScreen);
     refreshConnectedClientTranslators(rfbScreen);
+    /* A client thread may have encoded one update through the wrong translator
+       between rfbNewFramebuffer() and the refresh above. Re-dirty the whole
+       canvas so that update is repainted correctly now - an idle desk sends
+       no SCK frames, so nothing else would ever heal it. */
+    rfbMarkRectAsModified(rfbScreen, 0, 0, publishedLayout->width, publishedLayout->height);
     macVNCInputSetContext(rfbScreen, publishedLayout);
     macVNCCompositorSetScreen(rfbScreen);
     free(oldBuffer);
