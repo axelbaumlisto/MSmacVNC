@@ -749,6 +749,25 @@ reportCaptureFailureForSupervisor(void)
     reportCaptureFailure(false);
 }
 
+/*
+ * SCK hands us BGRA in memory (ScreenCapturer.m's kCVPixelFormatType_32BGRA):
+ * red is BYTE offset 2, i.e. BIT shift 16 in a little-endian 32-bit read.
+ * LibVNCServer's rfbInitServerFormat() instead defaults to redShift=0 (as if
+ * we were RGBA), and BOTH rfbGetScreen() (startup) and rfbNewFramebuffer()
+ * (every desk-shape swap, see swapCanvas()) call it - so this must be
+ * reapplied after EITHER, not just once at startup. Measured 2026-09-12: a
+ * fresh start announced 16/8/0 to a connecting client; after two live
+ * rebuilds a NEW client was announced 0/8/16 - a live red/blue swap.
+ */
+static void
+applyServerPixelFormat(rfbScreenInfoPtr screen)
+{
+    const int bitsPerSample = 8; /* one BGRA channel/sample - see ScreenInit */
+    screen->serverFormat.redShift   = bitsPerSample * 2;
+    screen->serverFormat.greenShift = bitsPerSample * 1;
+    screen->serverFormat.blueShift  = 0;
+}
+
 static rfbBool
 ScreenInit(int port, const char *password, int captureFramesPerSecond,
            MacVNCImageProfile imageProfile,
@@ -839,9 +858,7 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond,
   if (!installPassword(password))
       return FALSE;
 
-  rfbScreen->serverFormat.redShift   = bitsPerSample * 2;
-  rfbScreen->serverFormat.greenShift = bitsPerSample * 1;
-  rfbScreen->serverFormat.blueShift  = 0;
+  applyServerPixelFormat(rfbScreen);
 
   /* Coalesce dirty regions from every display into one per-client framebuffer
      transmission ceiling. Input processing and deferPtrUpdateTime are unchanged. */
@@ -989,22 +1006,51 @@ rearmSameShape(const MacVNCDisplayLayout *liveLayout, uint64_t generation, bool 
 }
 
 /*
- * The desk changed shape: swap the canvas, THEN rebuild capture onto it.
- * Order is deliberate - detach (blocks out any in-flight composite) before
- * publish, publish before the pointer swap, swap before rfbNewFramebuffer,
- * re-attach only once the new screen is fully described, free the old
- * buffer only once nothing can still be reading or writing it. See
+ * rfbNewFramebuffer() snapshots rfbScreen->serverFormat, calls
+ * rfbInitServerFormat() (which resets it to the wrong RGBA default - see
+ * applyServerPixelFormat()), and if that snapshot differs from the result,
+ * calls screen->setTranslateFunction(cl) for every ALREADY-CONNECTED client
+ * right then and there - confirmed by disassembling libvncserver.0.9.15
+ * (_rfbNewFramebuffer, offsets 0x3d48-0x3d60: `blr` through
+ * screen->setTranslateFunction, inside the `rfbGetClientIterator` loop,
+ * gated on a before/after compare of the 16 bytes at serverFormat's start).
+ * Since our format IS about to change again right here (back to the correct
+ * one), that library-driven refresh happens against the WRONG intermediate
+ * format and is immediately stale. Anyone connected across a swap would
+ * keep a translator built for redShift=0 while the canvas is really BGRA -
+ * a live colour swap with no reconnect in sight. Re-running the same call
+ * the library just made, now that the format is correct again, is the fix. */
+static void
+refreshConnectedClientTranslators(rfbScreenInfoPtr screen)
+{
+    rfbClientIteratorPtr iterator = rfbGetClientIterator(screen);
+    rfbClientPtr cl;
+    while ((cl = rfbClientIteratorNext(iterator)) != NULL)
+        screen->setTranslateFunction(cl);
+    rfbReleaseClientIterator(iterator);
+}
+
+/*
+ * The desk changed shape: swap the canvas. Order is deliberate - detach
+ * (blocks out any in-flight composite) before publish, publish before the
+ * pointer swap, swap before rfbNewFramebuffer, format and client
+ * translators restored to correct BEFORE re-attaching (a connected client
+ * must never be handed a frame under the format rfbNewFramebuffer() just
+ * reset), re-attach only once the new screen is fully described, free the
+ * old buffer only once nothing can still be reading or writing it. See
  * ARCHITECTURE.md § CaptureLiveness for the full step-by-step proof.
+ * Returns the newly published layout, or NULL if the new canvas could not
+ * be allocated (nothing here is undone in that case - same as before).
  */
-static bool
-swapCanvasAndRearm(const MacVNCDisplayLayout *freshLayout, uint64_t generation, bool wasExcluded)
+static const MacVNCDisplayLayout *
+swapCanvas(const MacVNCDisplayLayout *freshLayout)
 {
     size_t bufSize = (size_t)freshLayout->width * (size_t)freshLayout->height * 4;
     void *newBuffer = calloc(1, bufSize);
     if (!newBuffer) {
         rfbErr("Re-arm could not allocate a %dx%d canvas for the new desk shape\n",
                freshLayout->width, freshLayout->height);
-        return false;
+        return NULL;
     }
 
     macVNCCompositorSetScreen(NULL);
@@ -1013,12 +1059,23 @@ swapCanvasAndRearm(const MacVNCDisplayLayout *freshLayout, uint64_t generation, 
     frameBufferOne = newBuffer;
     rfbNewFramebuffer(rfbScreen, (char *)newBuffer,
                       publishedLayout->width, publishedLayout->height, 8, 3, 4);
+    applyServerPixelFormat(rfbScreen);
+    refreshConnectedClientTranslators(rfbScreen);
     macVNCInputSetContext(rfbScreen, publishedLayout);
     macVNCCompositorSetScreen(rfbScreen);
     free(oldBuffer);
 
     rfbLog("Desk shape changed since this session started; rebuilding the composite canvas\n");
     logCapturingLayout(publishedLayout);
+    return publishedLayout;
+}
+
+static bool
+swapCanvasAndRearm(const MacVNCDisplayLayout *freshLayout, uint64_t generation, bool wasExcluded)
+{
+    const MacVNCDisplayLayout *publishedLayout = swapCanvas(freshLayout);
+    if (!publishedLayout)
+        return false;
 
     return buildAndStartCapture(publishedLayout, generation, wasExcluded);
 }
@@ -2060,6 +2117,36 @@ macVNCCompositeSyntheticFrameForTesting(uint64_t generation, size_t displayIndex
     MacVNCDirtyHint hint = { NULL, 0 };
     compositeCapturedFrame(origin, pixels, stride, width, height, &hint);
     free(pixels);
+}
+
+/* rfbScreen->serverFormat's three shifts, so a test can assert the BGRA
+   values (16/8/0) survive a real rfbNewFramebuffer() call - see
+   applyServerPixelFormat()'s own comment for the bug this guards. */
+void
+macVNCServerPixelFormatForTesting(uint8_t *redShift, uint8_t *greenShift, uint8_t *blueShift)
+{
+    *redShift   = rfbScreen->serverFormat.redShift;
+    *greenShift = rfbScreen->serverFormat.greenShift;
+    *blueShift  = rfbScreen->serverFormat.blueShift;
+}
+
+/* Drives the REAL swapCanvas() - the exact rfbNewFramebuffer() call site
+   the format-reset bug lives in - on the CURRENTLY published layout's own
+   dimensions (a same-shape self-swap, deliberately: this hook exercises
+   ONLY the canvas-swap MECHANISM, independent of the shape-changed
+   DECISION already covered by macVNCForceDeskShapeDifferentForTesting and
+   test_capture_liveness_rearm_deskshape.m - that decision cannot be forced
+   to take the real swap branch without physically reconfiguring a display,
+   which this box's single external monitor cannot do on demand). Returns
+   whether the new canvas was allocated. */
+bool
+macVNCRebuildFramebufferForTesting(void)
+{
+    const MacVNCDisplayLayout *live = macVNCLayoutRegistryCurrent();
+    if (!live)
+        return false;
+    MacVNCDisplayLayout copy = *live;
+    return swapCanvas(&copy) != NULL;
 }
 
 /* How many displays the CURRENTLY published layout actually has - so a test

@@ -261,6 +261,16 @@ void macVNCSetCaptureKeepWarmForTesting(uint64_t ns);
  */
 void macVNCCompositeSyntheticFrameForTesting(uint64_t generation, size_t displayIndex);
 
+/* rfbScreen->serverFormat's three shifts - see applyServerPixelFormat() in
+   mac.m for the BGRA-vs-RGBA bug this lets a test assert against. */
+void macVNCServerPixelFormatForTesting(uint8_t *redShift, uint8_t *greenShift,
+                                        uint8_t *blueShift);
+/* Drives the real canvas-swap mechanism (rfbNewFramebuffer + format +
+   client-translator refresh) on the current layout's own dimensions,
+   independent of the shape-changed DECISION - see its own comment in
+   mac.m. Returns whether the new canvas was allocated. */
+bool macVNCRebuildFramebufferForTesting(void);
+
 /* How many displays the CURRENTLY published layout has - lets a multi-display
    test SKIP honestly on a box that only has one. */
 size_t macVNCCurrentDisplayLayoutCountForTesting(void);
