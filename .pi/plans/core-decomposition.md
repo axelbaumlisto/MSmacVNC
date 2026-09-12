@@ -217,3 +217,23 @@ mac.m       2795 → 2279     globals(static g*) 44 → 12
 `macVNCPinnedDisplayIDForTesting` (6 мест) читают состояние
 `MacVNCLayoutRegistry`, а не жизненный цикл сервера. Осознанное исключение,
 не забытая уборка.
+
+### Шаг 10 — форма (после 7–9, поведение 0)
+
+Замер после шага 9: `mac.m` 1198 строк кода / 47% комментариев, 17 блоков
+длиннее 12 строк; `CaptureSupervisor.m` 51%, блок в 40 строк над одним
+`atomic_store`; `LayoutRegistry.c` 74%. Функции: `rearmCaptures` 121,
+`reconcileCaptureState` 102, `startCapturesForNewClient` 89,
+`captureLivenessWatchdogFired` 78.
+
+- `rearmCaptures` → две функции по веткам (та же форма / новый холст),
+  хвост `Build+Start` написан один раз;
+- `reconcileCaptureState`, `startCapturesForNewClient`,
+  `captureLivenessWatchdogFired` — вынести именованные шаги, цель ≤60 строк;
+- комментарии-эссе → правило + ссылка на `ARCHITECTURE.md`; история
+  инцидента живёт в документе (дописать туда, если её там нет), в коде
+  остаётся ПОЧЕМУ в ≤12 строк;
+- границы: `mac.m`, `mac.h`, `MacVNCCaptureSupervisor.m`,
+  `MacVNCLayoutRegistry.c`. Curtain*/TLS/ScreenCapturer не трогать.
+- **проверка:** I1 — 52 теста с неизменёнными ассертами; ни одного
+  изменённого условия или порядка вызовов в diff; живой прогон.
