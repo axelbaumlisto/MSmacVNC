@@ -79,7 +79,18 @@ Pure logic, each with a unit test wired into `ctest` (`.c` for C modules,
   Set-once enforcement for the pin is deliberately NOT here - the registry's
   own `PinDisplay` is last-write-wins, and mac.m's `applySelectionAndBuildLayout`
   is what refuses to call it a second time in a run - see the header for why
-  that split stays where it is.
+  that split stays where it is. The pin is `_Atomic` (step 10/H2) even though
+  this module never contends on it itself: the only cross-thread access is
+  `macVNCPinnedDisplayIDForTesting()` reading it from a test's own thread
+  while the capture control path writes it, and before this fix that safety
+  depended on an incidental happens-before edge through a completely
+  different counter (a rearm/rebuild count) a future refactor could silently
+  move - the atomic makes the ordering guarantee explicit instead of
+  accidental. The session generation counter is independent of a layout
+  publish, not a proxy for it: a same-shape re-arm bumps the generation
+  without publishing a new layout at all (it rebuilds onto the layout already
+  published), so identifying a frame's session by which layout copy it used
+  would not work - the generation counter is what actually does that job.
 - **CompositeFramebuffer** — tile-diff copy of one BGRA display into the shared
   canvas; reports dirty rects through an injected callback.
 - **NetworkAccess / NetworkCIDR / NetworkInventory** — IPv4/CIDR parsing,
@@ -95,7 +106,16 @@ Pure logic, each with a unit test wired into `ctest` (`.c` for C modules,
   sleep as stream death (measured: `CLOCK_MONOTONIC` advances during sleep on
   this deployment target, `CLOCK_UPTIME_RAW` does not). Two clocks, not one
   redefined, because everything else already depends on the first one's
-  existing, sleep-inclusive meaning.
+  existing, sleep-inclusive meaning. `mac.m`'s
+  `INITIAL_READINESS_TIMEOUT_NANOSECONDS` (8s) is why viewers never show their
+  "no data yet" checkerboard placeholder - `AUTH_OK` is held back until real
+  pixels exist for every display. It grew from the original 3s (chosen when
+  captures were always warm) because measured cold starts on this machine are
+  1.3-2.1s for two displays, and that margin disappeared once power
+  assertions became session-scoped - the panel may now be asleep and
+  ScreenCaptureKit has to wake it first. A CEILING, not a delay: the wait
+  returns the moment every display has delivered, so a warm reconnect still
+  costs 0.00s.
 - **FrameMailbox** — thread-safe single-slot latest-frame handoff with
   injected release/activity callbacks.
 - **PointerState / KeyboardModifierState** — input resolution state machines.
@@ -495,7 +515,12 @@ pixels rather than points.
   declared where a client is COUNTED, i.e. after authentication: doing it on
   TCP accept let anyone who could reach the port wake this Mac's screen without
   the password, and left the assertion held forever because an unauthenticated
-  client never reaches the reconciler that releases it.
+  client never reaches the reconciler that releases it. Released paired with
+  the OTHER capture assertions, not with a full server stop - holding a
+  `UserIsActive` assertion with no viewer connected is a `caffeinate` by
+  another name, measured on a live machine as "macVNC remote session" held for
+  HOURS after the last client left, which by itself stopped the display from
+  ever idle-sleeping.
 - **DisplayReadiness** — whether the whole desk has woken up. The enumeration in
   `mac.m` used to wait for "at least one active display", which on a sleeping
   desk is whichever panel woke first: the server then built a 3840x2160 canvas
@@ -541,6 +566,14 @@ pixels rather than points.
   against the CURRENT value before `compositeCapturedFrame` reads anything else
   - so a frame from any retired session is rejected the same way whether it is
   one re-arm stale or a hundred, and the address scan it replaced is gone.
+  `rearmCaptures()` claims the NEW generation FIRST, before anything else -
+  before `StopAndWait`, before the old session's streams have even begun
+  tearing down: any frame the OLD session might still deliver (`StopAndWait`'s
+  drain is bounded, and a stream whose work never quiesced is deliberately
+  leaked rather than freed while a callback may still touch it) must find the
+  generation already advanced, however early it arrives - even mid-drain,
+  even before the new session exists. Claiming it any later would leave
+  exactly that window open.
   Why the layout publish is its own lock-free mechanism rather than a second
   use of `compositorMutex`, which `macVNCCompositorSubmitFrame` already takes
   once per frame: that mutex is held only for the duration of one pixel copy.
@@ -714,6 +747,20 @@ pixels rather than points.
   check already reports `Alive` before the counter is even read. `GiveUp`
   remains reachable specifically because reaching it requires the one
   condition (no display, ever) under which that reset never fires at all.
+  Before the MIN-to-MAX fix, this same unconditional reset was the OTHER half
+  of the measured bug: silence was judged by the OLDEST (idle display's)
+  stamp while the reset fired on the NEWEST (working display's) frame, so the
+  two disagreed - the working display's frames kept clearing a counter the
+  idle display's silence kept trying to raise, twelve re-arms in two minutes,
+  `GiveUp` never reached. Fixing the silence definition alone already closes
+  that; it was never a separate defect in the reset. Bounded, not absolute,
+  even now: `captureLivenessWatchdogFired()` reads `freshestFrameStamp()` and
+  `rearmsSinceFrame` as two SEPARATE lock-free loads, not one atomic
+  transaction, so a frame landing on the capture-callback thread between
+  those two reads can pair a now-stale timestamp with a just-cleared counter
+  - reading as more silence than is true for exactly one watchdog tick, at
+  most one spurious re-arm, never compounding, and never blocking `GiveUp`
+  (reachable within `maxRearms`+1 attempts either way).
   Also added, small enough to ship alongside: when silence is observed, the
   watchdog cannot otherwise tell "stream is dead" from "Screen Recording
   access is not granted" - SCK raises no error for the latter, it simply
@@ -942,7 +989,14 @@ pixels rather than points.
   `vncConnectedClients` moves at password-accept time because captures have to
   start before any frame can exist. A curtain raised on the earlier number
   would black the local screen out for up to the readiness timeout while the
-  remote viewer still had a placeholder.
+  remote viewer still had a placeholder. The count moves when the wait ENDS,
+  not when it SUCCEEDS - a deliberate choice: on timeout the client is counted
+  anyway, so a curtain can go up over a viewer still holding a placeholder,
+  the same failure shape as counting at password-accept time, bounded to that
+  timeout. Gating on success instead would silently disable curtain mode for
+  every viewer whose displays are merely slow rather than broken; the
+  genuinely broken case is covered separately, by the curtain controller's
+  own heartbeat re-checking that a capture stream is live.
 - `vncServerCopyPassword` — the password the RUNNING server authenticates
   against, whatever it was configured from. Curtain mode arms its escape hatch
   with THAT secret and no other: one read from defaults instead would arm the
