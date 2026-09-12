@@ -671,6 +671,17 @@ if(BUILD_TESTING)
     add_test(NAME capture_liveness_rearm_failure COMMAND test_capture_liveness_rearm_failure)
     set_tests_properties(capture_liveness_rearm_failure PROPERTIES SKIP_RETURN_CODE 77)
 
+    # FIX-C: a production regression neither of the two tests above could see -
+    # both only ever ran a single-display layout. Test A pins "an idle SECOND
+    # display cannot trigger a re-arm" (the MIN-to-MAX fix on the frame-arrival
+    # stamp); Test B pins "total silence across every display still reaches
+    # GiveUp" (the SUCCESS-branch complement of _failure's forced-failure case).
+    add_executable(test_capture_liveness_rearm_multidisplay tests/test_capture_liveness_rearm_multidisplay.m)
+    target_include_directories(test_capture_liveness_rearm_multidisplay PRIVATE src)
+    target_link_libraries(test_capture_liveness_rearm_multidisplay macvnc_core_testable)
+    add_test(NAME capture_liveness_rearm_multidisplay COMMAND test_capture_liveness_rearm_multidisplay)
+    set_tests_properties(capture_liveness_rearm_multidisplay PROPERTIES SKIP_RETURN_CODE 77)
+
     add_executable(test_first_frame_wait tests/test_first_frame_wait.m)
     target_include_directories(test_first_frame_wait PRIVATE src)
     target_link_libraries(test_first_frame_wait macvnc_core_testable)

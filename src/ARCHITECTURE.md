@@ -497,7 +497,9 @@ pixels rather than points.
   macVNC served viewers a 42-hour-old canvas until someone restarted the app by
   hand. `mac.m` stamps a per-display timestamp at the one place a frame becomes
   pixels (`compositeCapturedFrame`); a 1Hz watchdog on the existing capture-stop
-  queue reads the oldest one and asks this module for a verdict: `Alive`,
+  queue reads the freshest one (`freshestFrameStamp()` - see FIX-C below for
+  why it is the maximum over the layout's displays, not the minimum this
+  originally shipped as) and asks this module for a verdict: `Alive`,
   `Rearm` (stop, re-read the desk WITHOUT waking it, and either rebuild the
   SAME layout's streams or - when the re-read shows the desk itself changed
   shape, per `macVNCDisplayLayoutsEqual` - swap the canvas with
@@ -655,6 +657,47 @@ pixels rather than points.
      (`docs/TESTING.md`'s `capture_liveness_rearm_failure` target is the
      integration proof that the count `GiveUp` depends on actually advances
      on failure, not just on success.)
+
+  A third follow-up ("FIX-C") corrected the plan's own founding assumption,
+  disproved by the FIRST live production run of everything above: "a still
+  screen is not silence: ScreenCaptureKit keeps delivering frames at the
+  configured rate whether or not pixels changed" is false for an IDLE
+  display. Measured on 2026-09-12: a two-display desk where the user worked
+  on only one panel produced nine re-arms in about two minutes on the idle
+  panel's stale stamp alone, tearing down and rebuilding BOTH displays'
+  capture every ~10s, while the active display's viewer received a real,
+  working session throughout (3144 ZRLE events, 1547 FramebufferUpdate
+  requests, in that same window). The watchdog's per-display frame stamps
+  were sound; `oldestFrameStamp()` - the MINIMUM stamp over the layout - was
+  not: it made ANY idle display look like a dead stream, forever. Renamed to
+  `freshestFrameStamp()` and changed to the MAXIMUM: silence now means NO
+  display in the layout is producing frames, which is what the mechanism was
+  actually meant to catch (a stream that stopped, not a display with nothing
+  new to draw). This deliberately gives up "one of several displays died
+  while the rest keep working" as a DIFFERENT, narrower failure the watchdog
+  no longer detects on its own - catching that would need a separate, more
+  conservative mechanism (a much longer per-display threshold, re-arming only
+  the affected display) and is left undone on purpose, noted in
+  `.pi/plans/capture-liveness.md` rather than silently dropped.
+  `compositeCapturedFrame`'s per-frame reset of `gRearmsSinceFrame` (unchanged
+  by this fix) turned out to need no separate correction: it and silence now
+  share the exact same trigger - a frame from ANY display - so a tick that
+  resets the counter is, by construction, a tick where the very next silence
+  check already reports `Alive` before the counter is even read. `GiveUp`
+  remains reachable specifically because reaching it requires the one
+  condition (no display, ever) under which that reset never fires at all.
+  Also added, small enough to ship alongside: when silence is observed, the
+  watchdog cannot otherwise tell "stream is dead" from "Screen Recording
+  access is not granted" - SCK raises no error for the latter, it simply
+  delivers nothing, same as a genuinely dead stream. Both the re-arm and the
+  `GiveUp` log lines now name a denied/ungranted permission when
+  `captureIsAllowed()` says so at that moment - a one-word difference for an
+  operator, no prompting, no new resolver rule.
+  (`docs/TESTING.md`'s `capture_liveness_rearm_multidisplay` target is the
+  integration proof: Test A asserts zero re-arms while one display is fed
+  continuously and the other never is; Test B asserts `GiveUp` is still
+  reached, via the SUCCESS branch, when neither display is fed anything at
+  all.)
 - **MacVNCClamshellPolicy / MacVNCClamshellMarker / MacVNCClamshell** —
   closed-display mode. The policy
   half is pure C and holds every rule; the marker owns the persisted record; the
@@ -757,7 +800,7 @@ pixels rather than points.
 
 ## Tests
 
-`ctest` runs 47 targets (the number is enforced: `architecture_doc` compares
+`ctest` runs 48 targets (the number is enforced: `architecture_doc` compares
 this sentence against CMakeLists.txt's `add_test` count, so a target added or
 commented out fails the suite until this line is updated deliberately). Every
 assertion added here is checked by mutating the source and confirming the test
