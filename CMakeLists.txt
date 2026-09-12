@@ -706,6 +706,17 @@ if(BUILD_TESTING)
     add_test(NAME capture_liveness_rearm_deskshape COMMAND test_capture_liveness_rearm_deskshape)
     set_tests_properties(capture_liveness_rearm_deskshape PROPERTIES SKIP_RETURN_CODE 77)
 
+    # F1 (post-effort test-gap fix): the display-PINNING glue
+    # (applySelectionAndBuildLayout/gPinnedDisplayID), previously verified
+    # only by manual code-tracing - set once per run, survives every
+    # mid-session re-resolve trigger, refuses rather than substitutes when
+    # the pinned display vanishes, and is re-derived fresh by the next run.
+    add_executable(test_capture_liveness_rearm_pin tests/test_capture_liveness_rearm_pin.m)
+    target_include_directories(test_capture_liveness_rearm_pin PRIVATE src)
+    target_link_libraries(test_capture_liveness_rearm_pin macvnc_core_testable)
+    add_test(NAME capture_liveness_rearm_pin COMMAND test_capture_liveness_rearm_pin)
+    set_tests_properties(capture_liveness_rearm_pin PROPERTIES SKIP_RETURN_CODE 77)
+
     add_executable(test_first_frame_wait tests/test_first_frame_wait.m)
     target_include_directories(test_first_frame_wait PRIVATE src)
     target_link_libraries(test_first_frame_wait macvnc_core_testable)

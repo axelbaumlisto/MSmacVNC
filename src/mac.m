@@ -447,6 +447,21 @@ unsigned macVNCDeskShapeRebuildCountForTesting(void)
 static _Atomic unsigned gDeskShapeRebuildFailureCount = 0;
 unsigned macVNCDeskShapeRebuildFailureCountForTesting(void)
 { return atomic_load(&gDeskShapeRebuildFailureCount); }
+/* F1 (post-effort test-gap fix): the pin itself, read-only - so a test can
+   assert it is set exactly once per resolve, survives every re-arm trigger,
+   and is never silently swapped for a different display's id. */
+uint32_t macVNCPinnedDisplayIDForTesting(void)
+{ return gPinnedDisplayID; }
+/* Forces applySelectionAndBuildLayout()'s pinned-id lookup to fail as if the
+   pinned display had just been unplugged, without needing to physically
+   remove a monitor: the ONE fault a test cannot otherwise produce on demand,
+   the same reasoning as gForceDeskShapeDifferentForTesting above. Every
+   OTHER part of the refusal path this exercises - keeping the previous
+   layout, returning FALSE, never substituting another monitor - is real,
+   unmocked applySelectionAndBuildLayout/rearmCaptures code. */
+static _Atomic bool gForcePinnedDisplayGoneForTesting = false;
+void macVNCForcePinnedDisplayGoneForTesting(bool force)
+{ atomic_store(&gForcePinnedDisplayGoneForTesting, force); }
 #endif
 
 /* Per-client bookkeeping: which counters this client has been added to, so a
@@ -686,6 +701,20 @@ applySelectionAndBuildLayout(const MacVNCDisplayInput *attached, size_t attached
   size_t selectedCount = 0;
 
   if (displayNumber >= 0 && gPinnedDisplayID != 0) {
+#if defined(MACVNC_ENABLE_TEST_HOOKS)
+      /* F1: a test's only way to produce "the pinned display just vanished"
+         without physically unplugging a monitor - see
+         macVNCForcePinnedDisplayGoneForTesting's own comment. Checked before
+         the real lookup so the refusal below is taken exactly as a genuine
+         vanished display would take it. */
+      if (atomic_load(&gForcePinnedDisplayGoneForTesting)) {
+          rfbErr("Pinned display id=%u (selection %d) is no longer attached "
+                 "[forced for testing]; keeping the previous layout rather "
+                 "than silently capturing a different monitor\n",
+                 gPinnedDisplayID, displayNumber);
+          return FALSE;
+      }
+#endif
       if (macVNCSelectDisplayByID(attached, attachedCount, gPinnedDisplayID,
                                   selected, &selectedCount) != MACVNC_DISPLAY_SELECTION_OK) {
           rfbErr("Pinned display id=%u (selection %d) is no longer attached; "
@@ -2736,6 +2765,7 @@ macVNCResetCaptureStateForTesting(void)
     atomic_store(&gForceDeskShapeDifferentForTesting, false);
     atomic_store(&gDeskShapeRebuildCount, 0);
     atomic_store(&gDeskShapeRebuildFailureCount, 0);
+    atomic_store(&gForcePinnedDisplayGoneForTesting, false);
 }
 
 bool

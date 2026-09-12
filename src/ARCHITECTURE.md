@@ -897,7 +897,7 @@ pixels rather than points.
 
 ## Tests
 
-`ctest` runs 50 targets (the number is enforced: `architecture_doc` compares
+`ctest` runs 51 targets (the number is enforced: `architecture_doc` compares
 this sentence against CMakeLists.txt's `add_test` count, so a target added or
 commented out fails the suite until this line is updated deliberately). Every
 assertion added here is checked by mutating the source and confirming the test
