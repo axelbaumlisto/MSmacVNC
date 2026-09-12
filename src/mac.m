@@ -504,17 +504,10 @@ resolveDisplayLayout(void)
   return TRUE;
 }
 
-/* Re-read the desk WITHOUT waking it and run it through the SAME selection
-   and layout rules resolveDisplayLayout() trusts at startup, into a caller-
-   owned scratch layout rather than the published one - see rearmCaptures,
-   which must not publish anything until the canvas it describes exists.
-
-   `logEnumeration` passes straight through to collectDisplayInputs(): TRUE
-   for a caller that is already committed to acting on this read (rearmCaptures,
-   which only ever runs when a rebuild is actually happening), FALSE for a
-   caller that is merely comparing this read against the published layout
-   (FIX-D's debounce evaluation) and must stay silent when the two turn out
-   equal - the only outcome most notifications ever produce. */
+/* Re-read the desk WITHOUT waking it, into a caller-owned scratch layout
+   rather than the published one (rearmCaptures must not publish until the
+   canvas it describes exists). `logEnumeration` - see ARCHITECTURE.md's
+   FIX-D entry for the log-spam bug it fixes and who passes which value. */
 static rfbBool
 resolveDeskLayoutWithoutWaking(MacVNCDisplayLayout *layout, bool logEnumeration)
 {
@@ -749,16 +742,10 @@ reportCaptureFailureForSupervisor(void)
     reportCaptureFailure(false);
 }
 
-/*
- * SCK hands us BGRA in memory (ScreenCapturer.m's kCVPixelFormatType_32BGRA):
- * red is BYTE offset 2, i.e. BIT shift 16 in a little-endian 32-bit read.
- * LibVNCServer's rfbInitServerFormat() instead defaults to redShift=0 (as if
- * we were RGBA), and BOTH rfbGetScreen() (startup) and rfbNewFramebuffer()
- * (every desk-shape swap, see swapCanvas()) call it - so this must be
- * reapplied after EITHER, not just once at startup. Measured 2026-09-12: a
- * fresh start announced 16/8/0 to a connecting client; after two live
- * rebuilds a NEW client was announced 0/8/16 - a live red/blue swap.
- */
+/* rfbGetScreen() (startup) and rfbNewFramebuffer() (every swapCanvas())
+   both reset serverFormat to LibVNCServer's RGBA default, which does not
+   match SCK's BGRA memory - must run after EITHER. See ARCHITECTURE.md
+   "Pixel format survives a desk-shape swap" for the measured bug. */
 static void
 applyServerPixelFormat(rfbScreenInfoPtr screen)
 {
@@ -1005,21 +992,12 @@ rearmSameShape(const MacVNCDisplayLayout *liveLayout, uint64_t generation, bool 
     return buildAndStartCapture(liveLayout, generation, wasExcluded);
 }
 
-/*
- * rfbNewFramebuffer() snapshots rfbScreen->serverFormat, calls
- * rfbInitServerFormat() (which resets it to the wrong RGBA default - see
- * applyServerPixelFormat()), and if that snapshot differs from the result,
- * calls screen->setTranslateFunction(cl) for every ALREADY-CONNECTED client
- * right then and there - confirmed by disassembling libvncserver.0.9.15
- * (_rfbNewFramebuffer, offsets 0x3d48-0x3d60: `blr` through
- * screen->setTranslateFunction, inside the `rfbGetClientIterator` loop,
- * gated on a before/after compare of the 16 bytes at serverFormat's start).
- * Since our format IS about to change again right here (back to the correct
- * one), that library-driven refresh happens against the WRONG intermediate
- * format and is immediately stale. Anyone connected across a swap would
- * keep a translator built for redShift=0 while the canvas is really BGRA -
- * a live colour swap with no reconnect in sight. Re-running the same call
- * the library just made, now that the format is correct again, is the fix. */
+/* rfbNewFramebuffer() already called setTranslateFunction() on every
+   connected client once, against the wrong intermediate format
+   applyServerPixelFormat() just corrected - see ARCHITECTURE.md "Pixel
+   format survives a desk-shape swap" for the disassembly that confirms it.
+   This re-runs that same call now that the format is right, or a client
+   connected across the swap keeps a stale BGRA/RGBA-mismatched translator. */
 static void
 refreshConnectedClientTranslators(rfbScreenInfoPtr screen)
 {
@@ -1030,18 +1008,11 @@ refreshConnectedClientTranslators(rfbScreenInfoPtr screen)
     rfbReleaseClientIterator(iterator);
 }
 
-/*
- * The desk changed shape: swap the canvas. Order is deliberate - detach
- * (blocks out any in-flight composite) before publish, publish before the
- * pointer swap, swap before rfbNewFramebuffer, format and client
- * translators restored to correct BEFORE re-attaching (a connected client
- * must never be handed a frame under the format rfbNewFramebuffer() just
- * reset), re-attach only once the new screen is fully described, free the
- * old buffer only once nothing can still be reading or writing it. See
- * ARCHITECTURE.md § CaptureLiveness for the full step-by-step proof.
- * Returns the newly published layout, or NULL if the new canvas could not
- * be allocated (nothing here is undone in that case - same as before).
- */
+/* The desk changed shape: swap the canvas. Every step here depends on the
+   one before it - see ARCHITECTURE.md § CaptureLiveness, "swapCanvas()'s
+   order within that swap is deliberate", for the full dependency chain.
+   Returns the newly published layout, or NULL if the new canvas could not
+   be allocated (nothing here is undone in that case - same as before). */
 static const MacVNCDisplayLayout *
 swapCanvas(const MacVNCDisplayLayout *freshLayout)
 {
@@ -1541,18 +1512,9 @@ prepareAuthenticatedClient(rfbClientPtr cl)
                "show a placeholder until frames arrive\n",
                (double)(macVNCMonotonicNow() - waitStart) / 1e9);
 
-    /* COUNTED here, not at the moment the password was accepted, and this is
-       the count the curtain reads: what it may hide behind is a viewer that is
-       RECEIVING UPDATES, and between those two points the streams are still
-       warming up. Publishing it earlier would black the local screen out while
-       the remote party was still looking at a placeholder - and the reader is
-       LEVEL-triggered (it re-reads this atomic on a timer as well as on the
-       notification below), so the increment itself has to be here. Announcing
-       it late while incrementing early would have made the notification
-       decorative and the timer authoritative.
-
-       NOT gated on the wait SUCCEEDING - see mac.h: a viewer whose displays
-       are slow is still a viewer. */
+    /* COUNTED here, not at password-accept, and not gated on the wait
+       succeeding - see ARCHITECTURE.md's `macVNCAuthenticatedClientsChangedHandler`
+       seam entry for why this is the curtain's own "receiving updates" count. */
     pthread_mutex_lock(&clientLifecycleMutex);
     countClientReceivingUpdatesLocked(cl->clientData);
     pthread_mutex_unlock(&clientLifecycleMutex);
@@ -1565,18 +1527,8 @@ macVNCPasswordCheck(rfbClientPtr client,
                     const char *encryptedPassword,
                     int length)
 {
-    /*
-     * The encryption policy is enforced HERE because this is the first moment
-     * the answer is known: the security type is chosen by the client, and
-     * cl->sslctx only becomes non-NULL once the VeNCrypt handshake has actually
-     * completed. Refusing earlier would mean guessing, and refusing later would
-     * mean the screen had already been published over a plaintext socket.
-     *
-     * The refusal is deliberately indistinguishable from a wrong password on
-     * the wire - a probe learns nothing about the policy - while the log says
-     * exactly what happened, because the owner locking themselves out is the
-     * other way this can go wrong.
-     */
+    /* Enforced HERE, the first moment the answer is known - see
+       ARCHITECTURE.md's `MacVNCEncryptionPolicy` entry for why. */
     if (!macVNCEncryptionAdmits(gEncryptionPolicy, client->sslctx != NULL)) {
         rfbLog("Refused unencrypted client %s: encryption is set to 'required'. "
                "Use a viewer that supports VeNCrypt/TLS, or change the setting "
@@ -1701,22 +1653,10 @@ void macVNCTLSHandleVeNCrypt(rfbClientPtr cl)
     uint8_t vReply[2];
     if (rfbReadExact(cl, (char *)vReply, 2) < 0) { rfbCloseClient(cl); return; }
 
-    /*
-     * Wire format, per the VeNCrypt specification and both reference
-     * implementations (TigerVNC SSecurityVeNCrypt, QEMU vnc-auth-vencrypt):
-     *
-     *   U8   version ack       0 = the version we agreed on is acceptable
-     *   U8   number of subtypes
-     *   U32  subtype           x number-of-subtypes
-     *   ---- client sends U32  its choice
-     *   U8   subtype ack       1 = accepted, proceed to TLS
-     *
-     * This used to send the COUNT as a U32 and the final ack as a U32. A real
-     * viewer read those four bytes as "ack 0, zero subtypes" and gave up with
-     * "The server reported no VeNCrypt sub-types". It went unnoticed because
-     * the only client that ever tested it was a script written against this
-     * code rather than against the specification.
-     */
+    /* U8 version ack, U8 subtype count, U32 per subtype - count and the
+       later subtype ack are single bytes, never U32. See ARCHITECTURE.md,
+       "subtype greeting is fixed-width by the spec", for why that distinction
+       broke a real viewer. */
     uint8_t greeting[8];
     size_t greetingLength = macVNCTLSBuildSubtypeGreeting(greeting, sizeof(greeting));
     if (greetingLength == 0 ||
@@ -1827,21 +1767,17 @@ serverHasLifecycleResourcesLocked(void)
            macVNCInputHasResources();
 }
 
+/* Bumps serverGeneration so a stopped run's stale capture-failure
+   notifications raise no second alert, shuts down LibVNCServer's threads,
+   disarms the watchdog under captureControlMutex (span unchanged from
+   before this split), then rendezvous+Stop+Reset the session - same
+   gCaptureStopQueue requirement as vncServerDropCaptures(), see its
+   comment there for why the rendezvous cannot be skipped. */
 static void
-vncServerStopLocked(void)
+stopNetworkAndCaptures(void)
 {
     atomic_store_explicit(&publishedServerPort, -1, memory_order_release);
-    /* A stop ENDS the run's identity, exactly as a start begins one. The
-       capture-failure path stamps vncServerCurrentGeneration() into every
-       notification it raises; with N displays that is N notifications for one
-       run. Only the first must act - but if the generation only moved on
-       START, all N still compare equal to the current run after the first one
-       stopped us, and each stacks another modal alert. Bumping here makes
-       notifications from a stopped run stale on arrival. */
     atomic_fetch_add(&serverGeneration, 1);
-    /* LibVNCServer >=0.9.15 reverted detached client threads. This call stops
-       accepting clients and joins every client/listener thread before lifecycle
-       objects they can access are released. */
     if (rfbScreen && rfbServerInitialized)
         rfbShutdownServer(rfbScreen, TRUE);
     rfbServerInitialized = FALSE;
@@ -1851,15 +1787,6 @@ vncServerStopLocked(void)
     atomic_store(&gCaptureWarmDeadlineNs, 0); /* full stop beats keep-warm */
     macVNCCaptureSupervisorDisarm(); /* under the lock - see MacVNCCaptureSupervisor.h */
     pthread_mutex_unlock(&captureControlMutex);
-    /* Rendezvous with gCaptureStopQueue BEFORE touching the session directly -
-       see the identical comment in vncServerDropCaptures(). Disarming the
-       timer above only stops FUTURE fires; a re-arm already past its
-       mutex-protected snapshot runs StopAndWait/Build/Start unprotected by
-       captureControlMutex (by design - see rearmCaptures), so without this a
-       Build+Start landing after the Reset below would leave live SCStreams
-       capturing after the server declared itself stopped, with nothing left
-       to ever stop them. Called with the lock already released, so this
-       cannot deadlock against a keep-warm or watchdog block that needs it. */
     macVNCEnsureStopQueue();
     dispatch_sync(gCaptureStopQueue, ^{});
     macVNCCaptureSessionStopAndWait();
@@ -1867,34 +1794,38 @@ vncServerStopLocked(void)
     atomic_store(&vncConnectedClients, 0);
     atomic_store(&vncAuthenticatedClientsReceivingUpdates, 0);
     notifyAuthenticatedClientsChanged();
+}
+
+/* Releases everything stopNetworkAndCaptures() left standing: the screen
+   (compositor detached FIRST - SetScreen(NULL) blocks until any in-flight
+   composite finishes, so no callback can still reach rfbScreen once
+   rfbScreenCleanup runs; the old NULL-then-free order left a window where a
+   descheduled callback walked into freed memory), the power/clamshell
+   assertions (non-latching - a stop is reversible, termination latches
+   separately from applicationWillTerminate), input, the stored password,
+   and the framebuffer. */
+static void
+releaseServerResources(void)
+{
     if (rfbScreen) {
-        /* Detach the compositor FIRST: SetScreen(NULL) takes the compositor
-           lock, so it blocks until any in-flight composite has finished, and
-           after it returns no callback can reach this screen. (The old order -
-           NULL the global, then free - had a window: a callback that loaded
-           the still-non-NULL pointer and was then descheduled walked into
-           rfbGetClientIterator on freed memory. The stuck-capturer path makes
-           that window real, since its callbacks deliberately keep running.) */
         rfbScreenInfoPtr dying = rfbScreen;
         rfbScreen = NULL;
         macVNCCompositorSetScreen(NULL);
         rfbScreenCleanup(dying);
     }
-    /* Backstop: normally released when the last client leaves, but a stop
-       with captures never started (permission denied at connect) or a crash
-       path must not leak the assertions either. Idempotent. */
     dimmingShutdown();
-    /* Before the display assertion, and unlike it, this one can outlive the
-       process: the kernel does not clear the clamshell bit for us. */
-    /* The non-latching release: a server stop is reversible (the menu's Stop,
-       a failed start, a future layout-driven restart), so it must not disable
-       closed-display mode for the rest of the run. Termination latches
-       separately, from applicationWillTerminate. */
     macVNCClamshellReleaseForServerStop();
     macVNCReleaseDisplayAssertion();
     macVNCInputShutdown();
     macVNCClearStoredPassword();
     free(frameBufferOne); frameBufferOne = NULL;
+}
+
+static void
+vncServerStopLocked(void)
+{
+    stopNetworkAndCaptures();
+    releaseServerResources();
 }
 
 MacVNCServerStartResult

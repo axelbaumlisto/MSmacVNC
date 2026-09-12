@@ -185,6 +185,15 @@ Objective-C glue:
   `cl->sslctx` is non-NULL only once the VeNCrypt handshake has completed.
   The refusal is indistinguishable from a wrong password on the wire, and
   explicit in the log.
+- **`macVNCTLSHandleVeNCrypt`'s subtype greeting is fixed-width by the spec**
+  (TigerVNC `SSecurityVeNCrypt`, QEMU `vnc-auth-vencrypt`), not by our choice:
+  `U8` version ack, `U8` subtype count, then `U32` per subtype - the count and
+  the final subtype ack are both a single byte, never `U32`. This module used
+  to send the count as a `U32` and the ack as a `U32`; a real viewer read
+  those four bytes as "ack 0, zero subtypes" and gave up with "The server
+  reported no VeNCrypt sub-types". It went unnoticed because the only client
+  that ever tested it was a script written against this code rather than
+  against the specification.
 - **MacVNCImageProfile** — maps a stored setting name (`viewer`, `lossless`, or
   a level `0`-`7`) to encoder levels (`macVNCParseImageProfile`). Pure, and the
   ladder is measured rather than chosen: levels 8 and 9 are refused because both
@@ -545,7 +554,20 @@ pixels rather than points.
   shape, per `macVNCDisplayLayoutsEqual` - swap the canvas with
   `rfbNewFramebuffer` and rebuild onto the new one; no server restart either
   way), or `GiveUp` (report the failure through the path that already handles
-  a real capture error). No client, or captures not running, is always
+  a real capture error). `swapCanvas()`'s order within that swap is
+  deliberate and every step depends on the one before it: detach the
+  compositor (blocks any in-flight composite from touching a buffer about to
+  be freed) before publishing the new layout; publish before swapping
+  `frameBufferOne`'s pointer (a reader must never see the new pointer paired
+  with the old layout); swap the pointer before `rfbNewFramebuffer` (which
+  reads `frameBufferOne` to hand LibVNCServer the new buffer); restore the
+  pixel format and already-connected clients' translators to correct
+  (`applyServerPixelFormat`/`refreshConnectedClientTranslators` - see "Pixel
+  format survives a desk-shape swap" below) BEFORE re-attaching the
+  compositor, so a connected client is never handed a frame under the format
+  `rfbNewFramebuffer` just reset; re-attach only once the new screen is
+  fully described; free the old buffer only once nothing can still be
+  reading or writing it. No client, or captures not running, is always
   `Alive` - the design this replaces would have re-armed a display that idled
   itself to sleep with nobody watching.
   The published layout itself is double-buffered (`mac.m`, two fixed slots plus
@@ -899,6 +921,26 @@ pixels rather than points.
   combination lands inside the grace window - also `Alive`. No reachable
   interleaving changes the verdict; the debounce path still reads its two
   gates together under the lock, exactly as before.
+- **Pixel format survives a desk-shape swap** — SCK hands us BGRA in memory
+  (`ScreenCapturer.m`'s `kCVPixelFormatType_32BGRA`): red is byte offset 2,
+  bit shift 16 in a little-endian 32-bit read. LibVNCServer's
+  `rfbInitServerFormat()` instead defaults to `redShift=0` (as if we were
+  RGBA), and BOTH `rfbGetScreen()` (startup) and `rfbNewFramebuffer()`
+  (every desk-shape swap, `swapCanvas()`) call it internally - so `mac.m`'s
+  `applyServerPixelFormat()` must run after EITHER, not just once at
+  startup. Measured 2026-09-12: a fresh start announced `16/8/0` to a
+  connecting client; after two live desk-shape rebuilds with a client
+  connected, a NEW client was announced `0/8/16` - a live red/blue swap,
+  reproduced and then fixed. Second finding, from disassembling
+  `libvncserver.0.9.15` (`_rfbNewFramebuffer`, offsets `0x3d48-0x3d60`):
+  `rfbNewFramebuffer()` snapshots `serverFormat` before its own reset, and if
+  the reset changed it, calls `screen->setTranslateFunction(cl)` for every
+  ALREADY-CONNECTED client right then - against the wrong intermediate
+  format, immediately stale once `applyServerPixelFormat()` corrects it back.
+  `mac.m`'s `refreshConnectedClientTranslators()` re-runs that same call once
+  the format is correct again; without it, clients connected across a swap
+  would keep a translator built for `redShift=0` against a BGRA canvas, with
+  no reconnect in sight to fix it.
 - **MacVNCClamshellPolicy / MacVNCClamshellMarker / MacVNCClamshell** —
   closed-display mode. The policy
   half is pure C and holds every rule; the marker owns the persisted record; the
