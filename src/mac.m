@@ -45,6 +45,7 @@
 #import "DisplayReadiness.h"
 #import "MacVNCLayoutRegistry.h"
 #import "CaptureLiveness.h"
+#import "MacVNCCaptureSupervisor.h"
 #import "MacVNCPowerMgmt.h"
 #import "MacVNCClamshell.h"
 #import "mac.h"
@@ -199,134 +200,17 @@ static void macVNCEnsureStopQueue(void)
     });
 }
 
-/*
- * Whether a technically-running stream is delivering frames - see
- * CaptureLiveness.h for why silence, not an SCStream error, is the signal
- * this watches for.
- *
- * gLastFrameNs is indexed by the `displayIndex` a frame's MacVNCCaptureFrameOrigin
- * carries - the same position within the layout its session was Built
- * against (MacVNCCaptureSession.m mints one origin per display, in loop
- * order). A callback whose session is no longer the current one is rejected
- * by its `generation` (see MacVNCLayoutRegistry.c's session-generation counter) before
- * compositeCapturedFrame ever reaches this array, so an index here is always
- * live-session-fresh, never a stale session's position reinterpreted against
- * the current one. 0 means "no frame yet for that slot" - macVNCUptimeNow()
- * never returns 0, so it doubles as a safe sentinel with no separate bool
- * needed alongside it. This array, gCapturesStartedNs and gLastRearmNs are
- * ALL stamped with macVNCUptimeNow(), never macVNCMonotonicNow(): the
- * watchdog measures elapsed AWAKE time, so a long system sleep is never
- * mistaken for a dead stream (see macVNCUptimeNow()'s own comment for the
- * measurement that established this).
- */
-static _Atomic uint64_t gLastFrameNs[MACVNC_MAX_DISPLAYS];
-/* When the currently running captures were told to start - the watchdog's
-   grace-period anchor and, absent any frame yet, its silence anchor too. */
-static _Atomic uint64_t gCapturesStartedNs = 0;
-static _Atomic uint64_t gLastRearmNs = 0;
-static _Atomic unsigned gRearmsSinceFrame = 0;
-/* Armed and disarmed by reconcileCaptureState() and its stop paths, always
-   under captureControlMutex alongside the gCapturesRunning write they pair
-   with - a plain (non-atomic) pointer toggled from more than one call site
-   would otherwise race between one thread's disarm and another's re-arm. */
-static dispatch_source_t gCaptureLivenessTimer;
-#if defined(MACVNC_ENABLE_TEST_HOOKS)
-static _Atomic unsigned gCaptureRearmCount = 0;
-/* Counts a FAILED rearmCaptures() attempt, and a GiveUp resolution,
-   separately from the success-only counter above - see FIX-A/audit item 1
-   and B4's integration test, which is the one place these are read. */
-static _Atomic unsigned gCaptureRearmFailureCount = 0;
-static _Atomic unsigned gCaptureGiveUpCount = 0;
-/* 0 = no override, same sentinel style as gCaptureKeepWarmOverrideNs.
-   maxRearms is not overridable: a test can already reach it by advancing
-   through cooldown windows, and a zero override would be ambiguous between
-   "unset" and "give up on the first attempt". */
-static _Atomic uint64_t gCaptureLivenessGraceOverrideNs = 0;
-static _Atomic uint64_t gCaptureLivenessSilenceOverrideNs = 0;
-static _Atomic uint64_t gCaptureLivenessCooldownOverrideNs = 0;
-void macVNCSetCaptureLivenessLimitsForTesting(uint64_t graceNs, uint64_t silenceNs,
-                                              uint64_t cooldownNs)
-{
-    atomic_store(&gCaptureLivenessGraceOverrideNs, graceNs);
-    atomic_store(&gCaptureLivenessSilenceOverrideNs, silenceNs);
-    atomic_store(&gCaptureLivenessCooldownOverrideNs, cooldownNs);
-}
-#endif
-
-/*
- * FIX-D: the watchdog above only ever reacts to SILENCE, and a display that
- * is RESIZED rather than silenced never produces any - ScreenCapturer.m pins
- * SCStreamConfiguration.width/height at Build time, so a reconfigured display
- * keeps delivering frames, just rescaled to the OLD dimensions, forever.
- * Measured on the installed build (2026-09-12): changing the built-in
- * display's mode mid-session produced 753 client updates and ZERO re-arms
- * while the canvas stayed stuck at the pre-change 5552x2715 composite size -
- * see .pi/plans/capture-liveness.md. This timer is the other half of
- * liveness: react to macOS's OWN notice that something about the screens
- * changed, instead of waiting to notice its effect.
- *
- * Queue-confined like gCaptureLivenessTimer above: only ever created,
- * rescheduled or read from gCaptureStopQueue, so no lock guards it.
- * Deliberately REUSED across an entire notification burst rather than
- * cancelled-and-recreated per call (unlike the one-shot keep-warm timer,
- * which only ever arms once per stop transition): rescheduling an
- * already-armed dispatch timer source via dispatch_source_set_timer() is
- * exactly how a debounce coalesces a burst into one firing, and the source
- * lives for the rest of the process once first created rather than being
- * torn down between bursts.
- */
-static dispatch_source_t gDeskShapeDebounceTimer;
-
-/*
- * How long to wait after the LAST NSApplicationDidChangeScreenParameters
- * notification before actually re-reading the desk.
- *
- * Not the first notification: macOS fires this notification once per
- * attached display as a reconfiguration settles, sometimes more than once per
- * display while resolution/scaling negotiation is still in progress, so
- * reading immediately risks reading a HALF-settled desk and rebuilding onto
- * geometry that is itself about to change again. 500ms is long enough to
- * coalesce that burst (measured reconfiguration bursts on this machine
- * complete well under it) and short enough that a real change still resolves
- * far inside the watchdog's own ~10s recovery budget, so this path is
- * strictly faster than falling back on silence detection, never slower.
- */
-#define MACVNC_DESK_SHAPE_DEBOUNCE_NANOSECONDS (500ULL * NSEC_PER_MSEC)
+/* Liveness (gLastFrameNs, gCapturesStartedNs, gLastRearmNs,
+   gRearmsSinceFrame, gCaptureLivenessTimer), the FIX-D desk-shape debounce
+   (gDeskShapeDebounceTimer and its 500ms constant) and their test-only
+   counters/overrides all moved to MacVNCCaptureSupervisor.{h,m}
+   (.pi/plans/core-decomposition.md, step 8) - a pure move, same as step 7's
+   MacVNCLayoutRegistry: this file reaches them only through
+   macVNCCaptureSupervisor*() and the injected hooks configured in
+   ensureCaptureSupervisorConfigured() below. See MacVNCCaptureSupervisor.h
+   for the WHY comments this used to carry inline. */
 
 #if defined(MACVNC_ENABLE_TEST_HOOKS)
-/* Counts every DEBOUNCED firing (i.e. every time the notification burst
-   actually gets re-evaluated), regardless of what it decides - the one
-   number that lets a test tell "a burst of N notifications produced ONE
-   evaluation" from "produced N". */
-static _Atomic unsigned gDeskShapeRecheckCount = 0;
-unsigned macVNCDeskShapeRecheckCountForTesting(void)
-{ return atomic_load(&gDeskShapeRecheckCount); }
-/* 0 = use the shipped 500ms; matches gCaptureKeepWarmOverrideNs's sentinel
-   style. Without this a test exercising the debounce would need to either
-   wait out the real 500ms (slow but not wrong) or never observe a SECOND,
-   separate firing within a bounded test budget. */
-static _Atomic uint64_t gDeskShapeDebounceOverrideNs = 0;
-void macVNCSetDeskShapeDebounceForTesting(uint64_t ns)
-{ atomic_store(&gDeskShapeDebounceOverrideNs, ns); }
-/* Forces evaluateDeskShapeForRearm() below to treat the freshly re-read desk
-   as DIFFERENT from the published layout, without needing to fake a
-   MacVNCDisplayLayout or physically reconfigure a display: a test can prove
-   "differing layout => exactly one rebuild" against the ALREADY-tested
-   rearmCaptures() by forcing the one decision this file adds - the rest of
-   the rebuild path is real ScreenCaptureKit/LibVNCServer work, unmocked. */
-static _Atomic bool gForceDeskShapeDifferentForTesting = false;
-void macVNCForceDeskShapeDifferentForTesting(bool force)
-{ atomic_store(&gForceDeskShapeDifferentForTesting, force); }
-/* Counts evaluateDeskShapeForRearm()'s own rearmCaptures() outcome,
-   DELIBERATELY separate from gCaptureRearmCount - see that function's own
-   comment for why a shape-driven rearm must not share the silence
-   watchdog's cooldown/maxRearms bookkeeping. */
-static _Atomic unsigned gDeskShapeRebuildCount = 0;
-unsigned macVNCDeskShapeRebuildCountForTesting(void)
-{ return atomic_load(&gDeskShapeRebuildCount); }
-static _Atomic unsigned gDeskShapeRebuildFailureCount = 0;
-unsigned macVNCDeskShapeRebuildFailureCountForTesting(void)
-{ return atomic_load(&gDeskShapeRebuildFailureCount); }
 /* F1 (post-effort test-gap fix): the pin itself, read-only - so a test can
    assert it is set exactly once per resolve, survives every re-arm trigger,
    and is never silently swapped for a different display's id. */
@@ -334,13 +218,14 @@ uint32_t macVNCPinnedDisplayIDForTesting(void)
 { return macVNCLayoutRegistryPinnedDisplay(); }
 /* Forces applySelectionAndBuildLayout()'s pinned-id LOOKUP to miss, as if
    the pinned display had just been unplugged, without needing to physically
-   remove a monitor: the ONE fault a test cannot otherwise produce on demand,
-   the same reasoning as gForceDeskShapeDifferentForTesting above. Unlike an
-   early return, this substitutes an impossible id into the value
-   macVNCSelectDisplayByID() searches for (see applySelectionAndBuildLayout's
-   own comment on `lookupID`) - every part of the refusal path this exercises,
-   INCLUDING the miss itself, is real, unmocked applySelectionAndBuildLayout/
-   rearmCaptures/macVNCSelectDisplayByID code. */
+   remove a monitor: the ONE fault a test cannot otherwise produce on demand -
+   the same reasoning as MacVNCCaptureSupervisor.h's own force-different
+   desk-shape hook. Unlike an early return, this substitutes an impossible id
+   into the value macVNCSelectDisplayByID() searches for (see
+   applySelectionAndBuildLayout's own comment on `lookupID`) - every part of
+   the refusal path this exercises, INCLUDING the miss itself, is real,
+   unmocked applySelectionAndBuildLayout/rearmCaptures/macVNCSelectDisplayByID
+   code. */
 static _Atomic bool gForcePinnedDisplayGoneForTesting = false;
 void macVNCForcePinnedDisplayGoneForTesting(bool force)
 { atomic_store(&gForcePinnedDisplayGoneForTesting, force); }
@@ -704,6 +589,18 @@ resolveDeskLayoutWithoutWaking(MacVNCDisplayLayout *layout, bool logEnumeration)
   return applySelectionAndBuildLayout(attached, attachedCount, primaryIndex, layout);
 }
 
+/* MacVNCCaptureSupervisor's `readDeskLayoutWithoutWaking` hook: the ONE
+   caller inside this file that ever passed logEnumeration=false (the
+   debounce's own probe, formerly deskShapeDebounceFired) - see
+   resolveDeskLayoutWithoutWaking's own comment for why. `bool`, not
+   `rfbBool`: the hook signature is plain C so MacVNCCaptureSupervisor.h
+   never needs to know about LibVNCServer's boolean type. */
+static bool
+resolveDeskLayoutWithoutWakingQuiet(MacVNCDisplayLayout *out)
+{
+  return resolveDeskLayoutWithoutWaking(out, false) ? true : false;
+}
+
 /* Install VNC password authentication. Refuses an empty password: an
    unauthenticated listener on a remote-control server is not an option. */
 static rfbBool
@@ -859,54 +756,20 @@ compositeCapturedFrame(MacVNCCaptureFrameOrigin origin,
     if (origin.displayIndex >= layout->count)
         return true;
 
-    /* The ONE write point for "a frame arrived" - see CaptureLiveness.h. The
-       call reaching this function AND matching the current generation is the
-       liveness signal, independent of whether the size check below turns out
-       to match: a stream delivering wrong-sized frames is a different bug
-       from one that stopped delivering anything, and only the watchdog cares
-       about the latter. */
-    atomic_store(&gLastFrameNs[origin.displayIndex], macVNCUptimeNow());
-    /* A delivered frame from ANY display proves the stream that produced it
-       is alive again, so whatever re-arm count a PRIOR silence ran up no
-       longer describes the current situation - without this reset a stream
-       that recovers on its own after two re-arms would need only one more
-       silent minute to hit maxRearms and GiveUp.
-
-       This reset and silence share the EXACT same trigger, by construction:
-       silence is freshestFrameStamp(), the MAXIMUM stamp over the layout's
-       displays, and this line is the only writer of any display's stamp -
-       so on any tick where this store just ran, the NEXT watchdog read of
-       freshestFrameStamp() is already recent, and CaptureLiveness.c's own
-       silence rule reports Alive before rearmsSinceFrame is ever consulted.
-       The only way rearmsSinceFrame can climb to maxRearms and reach GiveUp
-       is a stretch where NO display delivers a frame for the whole
-       grace+silence+maxRearms*cooldown budget - and across exactly that
-       stretch this store never runs, so nothing rescues the counter.
-
-       Bounded, not absolute: captureLivenessWatchdogFired() reads
-       freshestFrameStamp() and rearmsSinceFrame as two SEPARATE lock-free
-       loads (see its `input` snapshot), not one atomic transaction, so a
-       frame that lands on the capture-callback thread between those two
-       reads pairs a now-stale timestamp (read before the frame) with a
-       just-cleared counter (reset by the frame that landed after). That
-       reads as MORE silence than is true for exactly one watchdog tick,
-       which can cost at most one spurious re-arm - the next tick reads both
-       values fresh again, so this cannot compound, and true silence (no
-       frame arriving during the ENTIRE window) is untouched by it: GiveUp
-       remains reachable within maxRearms+1 attempts, never blocked, only
-       possibly delayed by one.
-
-       Before the MIN-to-MAX fix on freshestFrameStamp(), this same
-       unconditional reset was the other half of a measured production bug:
-       silence was judged by the OLDEST (idle display's) stamp while this
-       reset fired on the NEWEST (working display's) frame, so the two
-       disagreed - the working display's frames kept clearing a counter that
-       the idle display's silence kept trying to raise, twelve re-arms in
-       two minutes, GiveUp never reached. Fixing the silence definition
-       alone already closes that: it was never a separate defect in the
-       reset, just a mismatch between what "silence" and what "reset" each
-       looked at. */
-    atomic_store(&gRearmsSinceFrame, 0);
+    /* The ONE write point for "a frame arrived", delegated to
+       MacVNCCaptureSupervisor (step 8) - see its header for the exact two
+       atomic ops this does (I7: no more, no lock, no dispatch) and
+       MacVNCCaptureSupervisor.m for the full WHY (silence is
+       freshestFrameStamp(), the MAXIMUM stamp over the layout's displays;
+       the bounded, not absolute, TOCTOU between this store and a watchdog
+       tick's separate lock-free reads; the MIN-to-MAX production bug this
+       reset's other half once caused). The call reaching this function AND
+       matching the current generation is the liveness signal, independent
+       of whether the size check below turns out to match: a stream
+       delivering wrong-sized frames is a different bug from one that
+       stopped delivering anything, and only the watchdog cares about the
+       latter. */
+    macVNCCaptureSupervisorNoteFrame(origin.displayIndex);
 
     /* Copy BY VALUE before using: a concurrent re-arm cannot publish a NEWER
        layout out from under `layout` without ALSO bumping the generation this
@@ -947,6 +810,17 @@ reportCaptureFailure(bool likelyPermissionDenial)
     /* No UI here: AppDelegate owns the single permission popup. */
     if (macVNCScreenCaptureFailureHandler)
         macVNCScreenCaptureFailureHandler(likelyPermissionDenial, generation, captureGeneration);
+}
+
+/* MacVNCCaptureSupervisor's `reportFailure` hook: both of its call sites
+   (the silence watchdog's GiveUp case, a failed desk-shape rebuild) always
+   passed `false` here, never `true` - this wrapper is that fixed argument,
+   so the hook signature stays a plain `void (*)(void)` and the supervisor
+   never needs to know a permission-denial flag exists. */
+static void
+reportCaptureFailureForSupervisor(void)
+{
+    reportCaptureFailure(false);
 }
 
 static rfbBool
@@ -1121,32 +995,13 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond,
 }
 
 
-static MacVNCCaptureLivenessLimits
-captureLivenessLimits(void)
-{
-    MacVNCCaptureLivenessLimits limits = {
-        .graceNs    = MACVNC_CAPTURE_LIVENESS_GRACE_NANOSECONDS,
-        .silenceNs  = MACVNC_CAPTURE_LIVENESS_SILENCE_NANOSECONDS,
-        .cooldownNs = MACVNC_CAPTURE_LIVENESS_COOLDOWN_NANOSECONDS,
-        .maxRearms  = MACVNC_CAPTURE_LIVENESS_MAX_REARMS,
-    };
-#if defined(MACVNC_ENABLE_TEST_HOOKS)
-    uint64_t override;
-    if ((override = atomic_load(&gCaptureLivenessGraceOverrideNs)) != 0)
-        limits.graceNs = override;
-    if ((override = atomic_load(&gCaptureLivenessSilenceOverrideNs)) != 0)
-        limits.silenceNs = override;
-    if ((override = atomic_load(&gCaptureLivenessCooldownOverrideNs)) != 0)
-        limits.cooldownNs = override;
-#endif
-    return limits;
-}
-
 /* A plain, cheap read of "is any display awake right now" - no waking, no
    display objects built, just the count collectDisplayInputs() itself checks
    first. Reused by nothing else: collectDisplayInputs() needs the full list
    to build a layout from, this needs only whether it would be empty, and a
-   shared helper for one comparison against zero is not worth the coupling. */
+   shared helper for one comparison against zero is not worth the coupling.
+   Also MacVNCCaptureSupervisor's `anyDisplayActive` hook - its signature
+   already matches exactly, so it is passed as-is, no wrapper needed. */
 static bool
 anyDisplayCurrentlyActive(void)
 {
@@ -1155,44 +1010,9 @@ anyDisplayCurrentlyActive(void)
     return reported > 0;
 }
 
-/*
- * The MOST RECENT stamp over the displays actually in the layout.
- *
- * This used to be the MINIMUM - "one dead panel of two must be caught, not
- * averaged away by a lively one" - on the assumption that ScreenCaptureKit
- * keeps delivering frames at the configured rate whether or not pixels
- * changed. Measured false in production (2026-09-12): a two-display desk
- * where the user worked on only one panel produced NINE re-arms in about two
- * minutes on the IDLE panel's stale stamp alone, tearing down and rebuilding
- * BOTH displays' capture every ~10s while the active display's session was
- * healthy and its viewer was receiving real frames the whole time
- * (end-of-session stats for that run: 3144 ZRLE events, 1547
- * FramebufferUpdate requests). A display with nothing to redraw simply does
- * not get a new sample buffer - see the corrected claim in
- * CaptureLiveness.h and .pi/plans/capture-liveness.md.
- *
- * Silence must therefore mean "NO display in the layout is producing
- * frames", which is the MAXIMUM stamp, not the minimum. This deliberately
- * gives up catching "one of several displays went dead while the rest keep
- * working" - that is a different, narrower failure this function no longer
- * detects. Adding it back would need its own, more conservative mechanism
- * (a much longer per-display threshold, re-arming only the affected display)
- * and is left undone on purpose - see .pi/plans/capture-liveness.md, which
- * this comment's production measurement was written into. */
-static uint64_t
-freshestFrameStamp(void)
-{
-    const MacVNCDisplayLayout *layout = macVNCLayoutRegistryCurrent();
-    if (layout->count == 0)
-        return 0;
-    uint64_t freshest = 0;
-    for (size_t i = 0; i < layout->count; ++i) {
-        uint64_t stamp = atomic_load(&gLastFrameNs[i]);
-        if (stamp > freshest)
-            freshest = stamp;
-    }
-    return freshest;
-}
+/* captureLivenessLimits() and freshestFrameStamp() moved to
+   MacVNCCaptureSupervisor.m with the watchdog they served - see
+   MacVNCCaptureSupervisor.h. */
 
 /* E2 (.pi/plans/capture-liveness.md): this used to be
    logIfPinnedSelectionChangedDisplay(), which only DETECTED after the fact
@@ -1237,9 +1057,7 @@ rearmCaptures(void)
     bool wasExcluded = macVNCCaptureSessionSelfExcluded();
 
     macVNCCaptureSessionStopAndWait();
-    for (size_t i = 0; i < MACVNC_MAX_DISPLAYS; ++i)
-        atomic_store(&gLastFrameNs[i], 0);
-    atomic_store(&gCapturesStartedNs, macVNCUptimeNow());
+    macVNCCaptureSupervisorNoteCapturesStarted();
 
     /* Re-read the desk WITHOUT waking it: resolveDeskLayoutWithoutWaking()
        calls collectDisplayInputs(), never readAttachedDisplays(), and a
@@ -1339,101 +1157,13 @@ rearmCaptures(void)
     return true;
 }
 
-/*
- * The decision half of FIX-D: given a FRESH re-read of the desk, rebuild
- * ONLY if it actually differs from what is currently published.
- *
- * Split out from the notification handler below so a test can drive this
- * exact decision (via macVNCForceDeskShapeDifferentForTesting) without
- * needing to physically reconfigure a display or fake a CoreGraphics read -
- * rearmCaptures() performs its OWN independent re-read when it actually
- * rebuilds, so an equal-in-practice `fresh` here still only ever leads to a
- * real, live-desk-accurate rebuild, never a fabricated one.
- *
- * An equal layout does nothing and logs nothing, exactly as a desk that never
- * changed deserves: this function runs on every settled notification burst,
- * which on a machine nobody is reconfiguring is silence the rest of the time.
- */
-static void
-evaluateDeskShapeForRearm(const MacVNCDisplayLayout *fresh)
-{
-    const MacVNCDisplayLayout *live = macVNCLayoutRegistryCurrent();
-    bool equal = live != NULL && macVNCDisplayLayoutsEqual(live, fresh);
-#if defined(MACVNC_ENABLE_TEST_HOOKS)
-    if (atomic_load(&gForceDeskShapeDifferentForTesting))
-        equal = false;
-#endif
-    if (equal)
-        return;
-
-    /* Named here, distinctly from rearmCaptures()'s own "rebuilding the
-       composite canvas" line: that line says WHAT happened (a new canvas of
-       a given size), this one says WHY a rebuild is starting at all and what
-       the comparison that triggered it looked like - the two are read
-       together, not as duplicates of each other, the same way
-       captureLivenessWatchdogFired's "No capture frames for Xs" line and
-       rearmCaptures()'s own logging already coexist for the silence path. */
-    rfbLog("Display configuration changed: canvas %dx%d -> %dx%d; re-arming display captures\n",
-          live ? live->width : 0, live ? live->height : 0,
-          fresh->width, fresh->height);
-
-    /* The return value matters here exactly as much as it does in
-       captureLivenessWatchdogFired()'s own Rearm case: a failed rebuild
-       triggered by a real reconfiguration is not silently swallowed just
-       because THIS trigger is a notification rather than measured silence -
-       reportCaptureFailure() is the same one path every other capture
-       failure already goes through (KeepServing/StopServer decided there,
-       never here). Deliberately NOT gCaptureRearmCount/gRearmsSinceFrame/
-       gLastRearmNs - those belong to the SILENCE-driven watchdog's own
-       cooldown/maxRearms budget, and folding a shape-driven rearm into that
-       counter would let an unrelated cause (a display reconfiguring several
-       times in a row) push the silence watchdog toward a GiveUp it did not
-       earn. This trigger gets its own counters - see
-       gDeskShapeRebuildCount/gDeskShapeRebuildFailureCount. */
-    bool rebuilt = rearmCaptures();
-#if defined(MACVNC_ENABLE_TEST_HOOKS)
-    atomic_fetch_add(rebuilt ? &gDeskShapeRebuildCount : &gDeskShapeRebuildFailureCount, 1);
-#endif
-    if (!rebuilt) {
-        rfbErr("Could not rebuild display captures after a display configuration change\n");
-        reportCaptureFailure(false);
-    }
-}
-
-/*
- * gCaptureStopQueue-confined: the debounce timer's event handler, so this
- * only ever runs on the one queue rearmCaptures() has always required.
- */
-static void
-deskShapeDebounceFired(void)
-{
-#if defined(MACVNC_ENABLE_TEST_HOOKS)
-    atomic_fetch_add(&gDeskShapeRecheckCount, 1);
-#endif
-    pthread_mutex_lock(&captureControlMutex);
-    bool shouldEvaluate = gCapturesRunning && atomic_load(&vncConnectedClients) > 0;
-    pthread_mutex_unlock(&captureControlMutex);
-    if (!shouldEvaluate)
-        return; /* nothing running to rebuild, or the last client left while
-                    this was in flight - the next connect reads the desk
-                    fresh regardless (startCapturesForNewClient). */
-
-    /* Re-read the desk WITHOUT waking it - the same call and the same
-       reasoning as rearmCaptures()'s own re-read: a notification implies a
-       real reconfiguration happened, not that any display needs waking.
-       logEnumeration=false: this is a PROBE, only ever used to compare
-       against the published layout below - most notifications turn out
-       equal, and rearmCaptures() below already does its own logged re-read
-       the moment this comparison finds a real difference, so logging here
-       too would print the same display list twice for one real change and
-       once for nothing on every notification that changed nothing at all. */
-    MacVNCDisplayLayout fresh;
-    if (!resolveDeskLayoutWithoutWaking(&fresh, false)) {
-        rfbErr("Could not re-read the desk after a display configuration change\n");
-        return;
-    }
-    evaluateDeskShapeForRearm(&fresh);
-}
+/* evaluateDeskShapeForRearm(), deskShapeDebounceFired(),
+   captureLivenessWatchdogFired() and the Arm/Disarm pair moved to
+   MacVNCCaptureSupervisor.m (.pi/plans/core-decomposition.md, step 8) with
+   the state they served - see MacVNCCaptureSupervisor.h for the WHY
+   comments this used to carry inline (silence is the FRESHEST stamp, a
+   failed re-arm still counts toward the cap, the desk-shape rebuild gets
+   its own counters, separate from the silence watchdog's). */
 
 /*
  * Told by AppDelegate that macOS posted NSApplicationDidChangeScreenParameters
@@ -1450,32 +1180,11 @@ vncServerNoteDeskShapeMayHaveChanged(void)
                     a later connect would not already fix - and reading now
                     would gain nothing while risking exactly the "re-resolve
                     wakes the screen at 3am" loop the original reconfiguration
-                    plan rejected. */
-    macVNCEnsureStopQueue();
-    dispatch_async(gCaptureStopQueue, ^{
-        if (!gDeskShapeDebounceTimer) {
-            gDeskShapeDebounceTimer = dispatch_source_create(
-                DISPATCH_SOURCE_TYPE_TIMER, 0, 0, gCaptureStopQueue);
-            dispatch_source_set_event_handler(gDeskShapeDebounceTimer, ^{
-                deskShapeDebounceFired();
-            });
-            dispatch_resume(gDeskShapeDebounceTimer);
-        }
-#if defined(MACVNC_ENABLE_TEST_HOOKS)
-        uint64_t debounce = atomic_load(&gDeskShapeDebounceOverrideNs);
-        if (debounce == 0)
-            debounce = MACVNC_DESK_SHAPE_DEBOUNCE_NANOSECONDS;
-#else
-        uint64_t debounce = MACVNC_DESK_SHAPE_DEBOUNCE_NANOSECONDS;
-#endif
-        /* Rescheduling an ALREADY-armed source restarts its deadline rather
-           than stacking a second firing - this is the coalescing itself: a
-           burst of N calls inside one debounce window produces exactly one
-           firing, timed from the LAST call, not the first. */
-        dispatch_source_set_timer(gDeskShapeDebounceTimer,
-            dispatch_time(DISPATCH_TIME_NOW, (int64_t)debounce),
-            DISPATCH_TIME_FOREVER, NSEC_PER_MSEC * 10);
-    });
+                    plan rejected. This gate stays here, unmoved by step 8:
+                    the supervisor's own NoteDeskShapeMayHaveChanged() runs
+                    only once a caller has already decided a re-evaluation
+                    might matter. */
+    macVNCCaptureSupervisorNoteDeskShapeMayHaveChanged();
 }
 
 /* Silence looks identical whether the stream is genuinely dead or Screen
@@ -1484,124 +1193,63 @@ vncServerNoteDeskShapeMayHaveChanged(void)
    same policy the permission owner already tracks - see macVNCCaptureAllowed).
    A one-word difference in the log line is the whole fix: no prompting, no
    branch in the resolver, just naming the more likely cause so an operator
-   is not left guessing between "broken stream" and "permission row". */
+   is not left guessing between "broken stream" and "permission row". Also
+   MacVNCCaptureSupervisor's `permissionHintSuffix` hook - kept here, not
+   moved, so the supervisor never needs to know macVNCCaptureAllowed exists;
+   captureIsAllowed() is a permission-policy read, not capture supervision. */
 static const char *
 permissionHintSuffix(void)
 {
     return captureIsAllowed() ? "" : " (Screen Recording permission is not granted)";
 }
 
+/* MacVNCCaptureSupervisor's `snapshot` hook: the only two fields a watchdog
+   tick or a desk-shape debounce ever needed from behind captureControlMutex
+   - everything else they read (gCapturesStartedNs, gLastRearmNs,
+   gRearmsSinceFrame, gLastFrameNs[], the published layout) is already
+   atomic or a pure peer module, so holding the lock across those too (as
+   the pre-step-8 code did, by reading all of them into one struct literal
+   in one locked statement) was never protecting anything beyond these two -
+   compositeCapturedFrame has never taken this lock to WRITE gLastFrameNs[],
+   so extracting the reads of it from under this lock changes no consistency
+   guarantee that existed before. */
 static void
-captureLivenessWatchdogFired(void)
+captureSupervisorSnapshot(bool *capturesRunning, bool *clientsConnected)
 {
     pthread_mutex_lock(&captureControlMutex);
-    MacVNCCaptureLivenessInput input = {
-        .capturesRunning   = gCapturesRunning,
-        .clientsConnected  = atomic_load(&vncConnectedClients) > 0,
-        .anyDisplayActive  = anyDisplayCurrentlyActive(),
-        .nowNs             = macVNCUptimeNow(),
-        .lastFrameNs       = freshestFrameStamp(),
-        .capturesStartedNs = atomic_load(&gCapturesStartedNs),
-        .lastRearmNs       = atomic_load(&gLastRearmNs),
-        .rearmsSinceFrame  = atomic_load(&gRearmsSinceFrame),
-    };
+    *capturesRunning = gCapturesRunning;
+    *clientsConnected = atomic_load(&vncConnectedClients) > 0;
     pthread_mutex_unlock(&captureControlMutex);
-
-    MacVNCCaptureLivenessLimits limits = captureLivenessLimits();
-    switch (macVNCResolveCaptureLiveness(&input, &limits)) {
-    case MacVNCCaptureAlive:
-        return;
-    case MacVNCCaptureRearm: {
-        uint64_t sinceActivity = input.nowNs -
-            (input.lastFrameNs ? input.lastFrameNs : input.capturesStartedNs);
-        rfbLog("No capture frames for %.1f s; re-arming display captures%s\n",
-               (double)sinceActivity / 1e9, permissionHintSuffix());
-        if (!rearmCaptures()) {
-            /* Bookkeeping advances on failure too, not only on success below -
-               this was the bug a whole-diff audit caught: leaving
-               gLastRearmNs/gRearmsSinceFrame untouched here meant the very
-               next 1Hz tick saw the SAME inputs it just saw, resolved to
-               Rearm again, failed again, forever - maxRearms and GiveUp were
-               unreachable on exactly the path most likely to need them (a
-               re-read or rebuild that keeps failing the same way). A failed
-               attempt is still an attempt and must count toward the cap.
-               The immediate report below is kept ON TOP of that, not instead
-               of it: same layout, same call ScreenInit already trusted at
-               startup, now failing mid-run - there is nothing left to retry
-               into THIS attempt, so telling the user now rather than after
-               more silent cooldown cycles is still right. If this report is
-               swallowed by a stale/duplicate check upstream, the advanced
-               counters here are what still gets an honest GiveUp out within
-               the budget. */
-            atomic_store(&gLastRearmNs, macVNCUptimeNow());
-            atomic_fetch_add(&gRearmsSinceFrame, 1);
-#if defined(MACVNC_ENABLE_TEST_HOOKS)
-            atomic_fetch_add(&gCaptureRearmFailureCount, 1);
-#endif
-            /* B5: LOG this attempt, do not ALERT for it. reportCaptureFailure()
-               is what turns into an NSAlert (or a KeepServing/StopServer
-               decision) in AppDelegate, and with a failed attempt now
-               individually counted (the block above), calling it here too
-               would mean up to maxRearms distinct alerts inside one ~30s
-               budget for a condition that is, until the LAST attempt, still
-               recoverable - the exact opposite of "invisible when it works".
-               The honest shape: an intermediate failed attempt is a LOG
-               event; only GiveUp below is a USER event. Bookkeeping still
-               advances above regardless, so GiveUp remains reachable within
-               the same budget whether or not anyone is watching the log. */
-            rfbErr("Re-arm attempt %u/%u failed; retrying after the cooldown\n",
-                   atomic_load(&gRearmsSinceFrame), limits.maxRearms);
-            return;
-        }
-        atomic_store(&gLastRearmNs, macVNCUptimeNow());
-        atomic_fetch_add(&gRearmsSinceFrame, 1);
-#if defined(MACVNC_ENABLE_TEST_HOOKS)
-        atomic_fetch_add(&gCaptureRearmCount, 1);
-#endif
-        return;
-    }
-    case MacVNCCaptureGiveUp:
-#if defined(MACVNC_ENABLE_TEST_HOOKS)
-        atomic_fetch_add(&gCaptureGiveUpCount, 1);
-#endif
-        rfbLog("Display captures did not recover after %u re-arm(s); "
-               "reporting a capture failure%s\n", limits.maxRearms,
-               permissionHintSuffix());
-        reportCaptureFailure(false);
-        return;
-    }
 }
 
-/* Armed only while gCapturesRunning: an idle server with no client has
-   nothing to watch (the pure resolver already answers Alive for it), but
-   arming the timer anyway would tick forever on a server nobody is using.
-   Caller must hold captureControlMutex - see gCaptureLivenessTimer. */
+/* Wires MacVNCCaptureSupervisor's injected hooks to this file's statics and
+   static functions, exactly once, the first time any caller might need
+   them. reconcileCaptureState() and vncServerStartWithResult() both call
+   this at their own top - every real path to the supervisor (a client
+   connecting or disconnecting, a direct vncServerStart(), the
+   macVNCReconcileCaptureForTesting() test hook) goes through
+   reconcileCaptureState() at least once, so configuring it there covers
+   everything; the vncServerStartWithResult() call is belt-and-braces for a
+   hypothetical future caller that reaches the supervisor before any client
+   ever has. dispatch_once-guarded, so calling this from two places is not a
+   double-configure - the second call is a no-op. */
 static void
-startCaptureLivenessWatchdog(void)
+ensureCaptureSupervisorConfigured(void)
 {
-    if (gCaptureLivenessTimer)
-        return;
-    macVNCEnsureStopQueue();
-    gCaptureLivenessTimer = dispatch_source_create(
-        DISPATCH_SOURCE_TYPE_TIMER, 0, 0, gCaptureStopQueue);
-    dispatch_source_set_timer(gCaptureLivenessTimer,
-        dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
-        NSEC_PER_SEC, NSEC_PER_SEC / 5);
-    dispatch_source_set_event_handler(gCaptureLivenessTimer, ^{
-        captureLivenessWatchdogFired();
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        macVNCEnsureStopQueue();
+        MacVNCCaptureSupervisorHooks hooks = {
+            .queue                       = gCaptureStopQueue,
+            .rearm                       = rearmCaptures,
+            .reportFailure               = reportCaptureFailureForSupervisor,
+            .readDeskLayoutWithoutWaking = resolveDeskLayoutWithoutWakingQuiet,
+            .anyDisplayActive            = anyDisplayCurrentlyActive,
+            .snapshot                    = captureSupervisorSnapshot,
+            .permissionHintSuffix        = permissionHintSuffix,
+        };
+        macVNCCaptureSupervisorConfigure(&hooks);
     });
-    dispatch_resume(gCaptureLivenessTimer);
-}
-
-/* Caller must hold captureControlMutex - see gCaptureLivenessTimer. */
-static void
-stopCaptureLivenessWatchdog(void)
-{
-    if (!gCaptureLivenessTimer)
-        return;
-    dispatch_source_cancel(gCaptureLivenessTimer);
-    dispatch_release(gCaptureLivenessTimer);
-    gCaptureLivenessTimer = NULL;
 }
 
 /*
@@ -1705,9 +1353,7 @@ startCapturesForNewClient(void)
            watchdog fire on its very first tick. rearmCaptures() already does
            this same reset for the needsRebuild branch above; done here, once,
            for the one case it does not cover. */
-        for (size_t i = 0; i < MACVNC_MAX_DISPLAYS; ++i)
-            atomic_store(&gLastFrameNs[i], 0);
-        atomic_store(&gCapturesStartedNs, macVNCUptimeNow());
+        macVNCCaptureSupervisorNoteCapturesStarted();
         ok = true;
     }
 
@@ -1721,10 +1367,8 @@ startCapturesForNewClient(void)
 #if defined(MACVNC_ENABLE_TEST_HOOKS)
     atomic_fetch_add(&gCaptureStartCount, 1);
 #endif
-    atomic_store(&gLastRearmNs, 0);
-    atomic_store(&gRearmsSinceFrame, 0);
     gCapturesRunning = true;
-    startCaptureLivenessWatchdog();
+    macVNCCaptureSupervisorArm(); /* also resets gLastRearmNs/gRearmsSinceFrame - see its header */
     rfbLog("Client connected; starting %lu display captures\n",
            (unsigned long)macVNCCaptureSessionCount());
     pthread_mutex_unlock(&captureControlMutex);
@@ -1745,6 +1389,7 @@ startCapturesForNewClient(void)
  */
 static void reconcileCaptureState(void)
 {
+    ensureCaptureSupervisorConfigured();
     pthread_mutex_lock(&captureControlMutex);
     bool wanted = atomic_load(&vncConnectedClients) > 0;
     bool shouldStartNewSession = wanted && !gCapturesRunning;
@@ -1791,7 +1436,7 @@ static void reconcileCaptureState(void)
                 /* Under the same lock as the write above: a plain pointer
                    toggled from here and from the reconnect branch with no
                    shared lock would race. */
-                stopCaptureLivenessWatchdog();
+                macVNCCaptureSupervisorDisarm();
             } else {
                 due = false; /* reconnected meanwhile: keep warm wins */
             }
@@ -1857,7 +1502,7 @@ vncServerDropCaptures(void)
     bool wasRunning = gCapturesRunning;
     gCapturesRunning = false;
     atomic_store(&gCaptureWarmDeadlineNs, 0);
-    stopCaptureLivenessWatchdog(); /* under the lock - see gCaptureLivenessTimer */
+    macVNCCaptureSupervisorDisarm(); /* under the lock - see MacVNCCaptureSupervisor.h */
     pthread_mutex_unlock(&captureControlMutex);
 
     /* Rendezvous BEFORE the wasRunning check, not after: wasRunning can read
@@ -2282,7 +1927,7 @@ vncServerStopLocked(void)
     pthread_mutex_lock(&captureControlMutex);
     gCapturesRunning = false;
     atomic_store(&gCaptureWarmDeadlineNs, 0); /* full stop beats keep-warm */
-    stopCaptureLivenessWatchdog(); /* under the lock - see gCaptureLivenessTimer */
+    macVNCCaptureSupervisorDisarm(); /* under the lock - see MacVNCCaptureSupervisor.h */
     pthread_mutex_unlock(&captureControlMutex);
     /* Rendezvous with gCaptureStopQueue BEFORE touching the session directly -
        see the identical comment in vncServerDropCaptures(). Disarming the
@@ -2333,6 +1978,7 @@ vncServerStopLocked(void)
 MacVNCServerStartResult
 vncServerStartWithResult(const MacVNCServerConfig *config)
 {
+    ensureCaptureSupervisorConfigured(); /* belt-and-braces - see its own header */
     if (!config) {
         rfbErr("vncServerStart: NULL configuration\n");
         return MacVNCServerStartFailed;
@@ -2525,23 +2171,9 @@ macVNCCaptureStopCountForTesting(void)
     return atomic_load(&gCaptureStopCount);
 }
 
-unsigned
-macVNCCaptureRearmCountForTesting(void)
-{
-    return atomic_load(&gCaptureRearmCount);
-}
-
-unsigned
-macVNCCaptureRearmFailureCountForTesting(void)
-{
-    return atomic_load(&gCaptureRearmFailureCount);
-}
-
-unsigned
-macVNCCaptureGiveUpCountForTesting(void)
-{
-    return atomic_load(&gCaptureGiveUpCount);
-}
+/* macVNCCaptureRearmCountForTesting/macVNCCaptureRearmFailureCountForTesting/
+   macVNCCaptureGiveUpCountForTesting/macVNCLastFrameTimestampForTesting moved
+   to MacVNCCaptureSupervisor.h/.m with the state they read (step 8). */
 
 /* Bypasses ScreenCaptureKit entirely - see mac.h for why a synthetic frame,
    sized off the real current layout, is the only deterministic way to prove
@@ -2569,14 +2201,6 @@ uint64_t
 macVNCCurrentCaptureGenerationForTesting(void)
 {
     return macVNCLayoutRegistryCurrentSessionGeneration();
-}
-
-uint64_t
-macVNCLastFrameTimestampForTesting(size_t displayIndex)
-{
-    if (displayIndex >= MACVNC_MAX_DISPLAYS)
-        return 0;
-    return atomic_load(&gLastFrameNs[displayIndex]);
 }
 
 /* How many displays the CURRENTLY published layout actually has - so a test
@@ -2646,13 +2270,7 @@ macVNCResetCaptureStateForTesting(void)
     reconcileCaptureState();
     atomic_store(&gCaptureStartCount, 0);
     atomic_store(&gCaptureStopCount, 0);
-    atomic_store(&gCaptureRearmCount, 0);
-    atomic_store(&gCaptureRearmFailureCount, 0);
-    atomic_store(&gCaptureGiveUpCount, 0);
-    atomic_store(&gDeskShapeRecheckCount, 0);
-    atomic_store(&gForceDeskShapeDifferentForTesting, false);
-    atomic_store(&gDeskShapeRebuildCount, 0);
-    atomic_store(&gDeskShapeRebuildFailureCount, 0);
+    macVNCCaptureSupervisorResetForTesting(); /* the 7 supervisor-owned counters/flags */
     atomic_store(&gForcePinnedDisplayGoneForTesting, false);
 }
 

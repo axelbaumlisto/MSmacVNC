@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include "mac.h"
+#include "MacVNCCaptureSupervisor.h"
 
 /*
  * FIX-C: the whole-diff audit's own manual verification found what neither

@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include "mac.h"
+#include "MacVNCCaptureSupervisor.h"
 #include "ScreenCapturer.h"
 
 /*

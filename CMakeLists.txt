@@ -62,6 +62,8 @@ set(SOURCE_FILES
     src/DisplayReadiness.c
     src/CaptureLiveness.h
     src/CaptureLiveness.c
+    src/MacVNCCaptureSupervisor.h
+    src/MacVNCCaptureSupervisor.m
     src/MacVNCClamshellPolicy.h
     src/MacVNCClamshellPolicy.c
     src/MacVNCClamshellMarker.h
@@ -604,6 +606,10 @@ if(BUILD_TESTING)
         # The liveness watchdog reconcileCaptureState() arms/disarms lives in
         # mac.m; its pure decision half must link alongside it.
         src/CaptureLiveness.c
+        # Owns the watchdog/desk-shape state mac.m used to carry as bare
+        # globals (.pi/plans/core-decomposition.md, step 8) - reconcileCaptureState()
+        # and rearmCaptures() call through it, so it links wherever mac.m does.
+        src/MacVNCCaptureSupervisor.m
         src/MacVNCClamshell.m
         src/MacVNCClamshellMarker.m
         src/MacVNCClamshellPolicy.c
