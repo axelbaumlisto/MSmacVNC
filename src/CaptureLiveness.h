@@ -9,10 +9,21 @@
  *
  * Measured, not imagined: on 2026-09-10 the desk changed shape, SCStream went
  * silent - no `didStopWithError`, no frame - and macVNC served viewers a
- * 42-hour-old canvas until someone restarted the app by hand. A still screen
- * is not the failure mode this guards against: ScreenCaptureKit keeps
- * delivering frames at the configured rate whether or not pixels changed, so
- * silence itself is the signal, not the picture.
+ * 42-hour-old canvas until someone restarted the app by hand.
+ *
+ * `lastFrameNs` must be the FRESHEST activity across every display this run
+ * is watching, never any one display's own stamp in isolation and never the
+ * oldest of several. Measured false, on 2026-09-12, one commit after this
+ * module first shipped: an idle display with nothing to redraw simply does
+ * not get a new sample buffer from ScreenCaptureKit - a still screen and a
+ * dead stream look identical FOR THAT ONE DISPLAY. On a desk with several
+ * displays, silence is only real when NONE of them are producing anything;
+ * the caller (`mac.m`'s `freshestFrameStamp()`) owns turning several
+ * per-display timestamps into the single `lastFrameNs` this module reads,
+ * exactly so this module itself never has to know how many displays that
+ * was or which one changed - it only ever asks "is the freshest of whatever
+ * I was handed too old", which is what makes the rule below correct
+ * regardless of how many displays fed it.
  *
  * Pure on purpose: this module knows nothing of ScreenCaptureKit,
  * LibVNCServer or CoreGraphics, and no wall clock - time enters as `nowNs`,

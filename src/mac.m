@@ -179,7 +179,7 @@ vncServerCopyPassword(char *buffer, size_t size)
  * slot's content, so a callback from ANY retired generation - one re-arm
  * stale or a hundred - never reaches a read of this structure in the first
  * place. What these two slots still exist for is narrower and unrelated: give
- * every reader that DOES pass that check (or never needed it - oldestFrameStamp,
+ * every reader that DOES pass that check (or never needed it - freshestFrameStamp,
  * ScreenInit) a torn-free, single-load view of the layout's own fields, so a
  * concurrent re-arm publishing a new shape can never be observed as `count`
  * from one shape and `displays[]` from another.
@@ -816,11 +816,32 @@ compositeCapturedFrame(MacVNCCaptureFrameOrigin origin,
        from one that stopped delivering anything, and only the watchdog cares
        about the latter. */
     atomic_store(&gLastFrameNs[origin.displayIndex], macVNCUptimeNow());
-    /* A delivered frame proves the stream that produced it is alive again, so
-       whatever re-arm count a PRIOR silence ran up no longer describes the
-       current situation - without this reset a stream that recovers on its
-       own after two re-arms would need only one more silent minute to hit
-       maxRearms and GiveUp. */
+    /* A delivered frame from ANY display proves the stream that produced it
+       is alive again, so whatever re-arm count a PRIOR silence ran up no
+       longer describes the current situation - without this reset a stream
+       that recovers on its own after two re-arms would need only one more
+       silent minute to hit maxRearms and GiveUp.
+
+       This cannot loop: this reset and silence itself now share the EXACT
+       same trigger, by construction. Silence is freshestFrameStamp(), the
+       MAXIMUM stamp over the layout's displays, and this line is the only
+       writer of any display's stamp - so on any tick where this store just
+       ran, the NEXT watchdog read of freshestFrameStamp() is already recent,
+       and CaptureLiveness.c's own silence rule reports Alive before
+       rearmsSinceFrame is ever consulted. The only way rearmsSinceFrame can
+       climb to maxRearms and reach GiveUp is a stretch where NO display
+       delivers a frame for the whole grace+silence+maxRearms*cooldown
+       budget - and across exactly that stretch this store never runs, so
+       nothing rescues the counter. Before the MIN-to-MAX fix on
+       freshestFrameStamp(), this same unconditional reset was the other half
+       of a measured production bug: silence was judged by the OLDEST (idle
+       display's) stamp while this reset fired on the NEWEST (working
+       display's) frame, so the two disagreed - the working display's frames
+       kept clearing a counter that the idle display's silence kept trying to
+       raise, twelve re-arms in two minutes, GiveUp never reached. Fixing the
+       silence definition alone already closes that: it was never a separate
+       defect in the reset, just a mismatch between what "silence" and what
+       "reset" each looked at. */
     atomic_store(&gRearmsSinceFrame, 0);
 
     /* Copy BY VALUE before using: a concurrent re-arm cannot publish a NEWER
@@ -1070,21 +1091,43 @@ anyDisplayCurrentlyActive(void)
     return reported > 0;
 }
 
-/* The minimum stamp over the displays actually in the layout: one dead panel
-   of two must be caught, not averaged away by a lively one. */
+/*
+ * The MOST RECENT stamp over the displays actually in the layout.
+ *
+ * This used to be the MINIMUM - "one dead panel of two must be caught, not
+ * averaged away by a lively one" - on the assumption that ScreenCaptureKit
+ * keeps delivering frames at the configured rate whether or not pixels
+ * changed. Measured false in production (2026-09-12): a two-display desk
+ * where the user worked on only one panel produced NINE re-arms in about two
+ * minutes on the IDLE panel's stale stamp alone, tearing down and rebuilding
+ * BOTH displays' capture every ~10s while the active display's session was
+ * healthy and its viewer was receiving real frames the whole time
+ * (end-of-session stats for that run: 3144 ZRLE events, 1547
+ * FramebufferUpdate requests). A display with nothing to redraw simply does
+ * not get a new sample buffer - see the corrected claim in
+ * CaptureLiveness.h and .pi/plans/capture-liveness.md.
+ *
+ * Silence must therefore mean "NO display in the layout is producing
+ * frames", which is the MAXIMUM stamp, not the minimum. This deliberately
+ * gives up catching "one of several displays went dead while the rest keep
+ * working" - that is a different, narrower failure this function no longer
+ * detects. Adding it back would need its own, more conservative mechanism
+ * (a much longer per-display threshold, re-arming only the affected display)
+ * and is left undone on purpose - see .pi/plans/capture-liveness.md, which
+ * this comment's production measurement was written into. */
 static uint64_t
-oldestFrameStamp(void)
+freshestFrameStamp(void)
 {
     MacVNCDisplayLayout *layout = currentDisplayLayout();
     if (layout->count == 0)
         return 0;
-    uint64_t oldest = UINT64_MAX;
+    uint64_t freshest = 0;
     for (size_t i = 0; i < layout->count; ++i) {
         uint64_t stamp = atomic_load(&gLastFrameNs[i]);
-        if (stamp < oldest)
-            oldest = stamp;
+        if (stamp > freshest)
+            freshest = stamp;
     }
-    return oldest;
+    return freshest;
 }
 
 /* Audit item 5: displayNumber >= 0 selects by POSITION in whatever
@@ -1249,6 +1292,19 @@ rearmCaptures(void)
     return true;
 }
 
+/* Silence looks identical whether the stream is genuinely dead or Screen
+   Recording access was revoked/never granted: SCK raises no error either
+   way, it simply delivers nothing (this file's captureIsAllowed() reads the
+   same policy the permission owner already tracks - see macVNCCaptureAllowed).
+   A one-word difference in the log line is the whole fix: no prompting, no
+   branch in the resolver, just naming the more likely cause so an operator
+   is not left guessing between "broken stream" and "permission row". */
+static const char *
+permissionHintSuffix(void)
+{
+    return captureIsAllowed() ? "" : " (Screen Recording permission is not granted)";
+}
+
 static void
 captureLivenessWatchdogFired(void)
 {
@@ -1258,7 +1314,7 @@ captureLivenessWatchdogFired(void)
         .clientsConnected  = atomic_load(&vncConnectedClients) > 0,
         .anyDisplayActive  = anyDisplayCurrentlyActive(),
         .nowNs             = macVNCUptimeNow(),
-        .lastFrameNs       = oldestFrameStamp(),
+        .lastFrameNs       = freshestFrameStamp(),
         .capturesStartedNs = atomic_load(&gCapturesStartedNs),
         .lastRearmNs       = atomic_load(&gLastRearmNs),
         .rearmsSinceFrame  = atomic_load(&gRearmsSinceFrame),
@@ -1272,8 +1328,8 @@ captureLivenessWatchdogFired(void)
     case MacVNCCaptureRearm: {
         uint64_t sinceActivity = input.nowNs -
             (input.lastFrameNs ? input.lastFrameNs : input.capturesStartedNs);
-        rfbLog("No capture frames for %.1f s; re-arming display captures\n",
-               (double)sinceActivity / 1e9);
+        rfbLog("No capture frames for %.1f s; re-arming display captures%s\n",
+               (double)sinceActivity / 1e9, permissionHintSuffix());
         if (!rearmCaptures()) {
             /* Bookkeeping advances on failure too, not only on success below -
                this was the bug a whole-diff audit caught: leaving
@@ -1323,7 +1379,8 @@ captureLivenessWatchdogFired(void)
         atomic_fetch_add(&gCaptureGiveUpCount, 1);
 #endif
         rfbLog("Display captures did not recover after %u re-arm(s); "
-               "reporting a capture failure\n", limits.maxRearms);
+               "reporting a capture failure%s\n", limits.maxRearms,
+               permissionHintSuffix());
         reportCaptureFailure(false);
         return;
     }
@@ -2333,6 +2390,18 @@ macVNCLastFrameTimestampForTesting(size_t displayIndex)
     if (displayIndex >= MACVNC_MAX_DISPLAYS)
         return 0;
     return atomic_load(&gLastFrameNs[displayIndex]);
+}
+
+/* How many displays the CURRENTLY published layout actually has - so a test
+   for "an idle second display cannot trigger a re-arm" can find out at run
+   time whether this machine even has a second display to make idle, and SKIP
+   (the same convention test_capture_liveness_rearm.m already uses for "no
+   usable display here") rather than assert something true only by accident
+   on a single-display box. */
+size_t
+macVNCCurrentDisplayLayoutCountForTesting(void)
+{
+    return currentDisplayLayout()->count;
 }
 
 /*

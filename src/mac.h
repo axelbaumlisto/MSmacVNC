@@ -310,6 +310,9 @@ uint64_t macVNCCurrentCaptureGenerationForTesting(void);
    non-observable return value implies it. 0 = never stamped, same sentinel
    convention as the production field this reads. */
 uint64_t macVNCLastFrameTimestampForTesting(size_t displayIndex);
+/* How many displays the CURRENTLY published layout has - lets a multi-display
+   test SKIP honestly on a box that only has one. */
+size_t macVNCCurrentDisplayLayoutCountForTesting(void);
 /* Shrinks the watchdog's grace/silence/cooldown windows (nanoseconds; 0 keeps
    the shipped default) so an e2e run can force a re-arm in seconds instead of
    the shipped ~35s. maxRearms is not overridable - see the definition site. */

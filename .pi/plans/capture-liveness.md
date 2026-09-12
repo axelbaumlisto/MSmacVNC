@@ -45,8 +45,27 @@ Today: *captures run if and only if a client is connected*
 > While a client is connected, captures must **deliver frames**. Silence is a
 > failure to act on, not a screen that happens to be still.
 
-Safe because a still screen is not silence: ScreenCaptureKit keeps delivering
-frames at the configured rate whether or not pixels changed.
+Safe because a still screen is not silence... except that this founding
+assumption was measured FALSE on 2026-09-12, one commit after this plan
+shipped: a two-display desk where the user worked on only one panel produced
+NINE re-arms in about two minutes on the IDLE panel's stale stamp alone,
+while the active display's viewer received a real, working session the whole
+time (session stats: 3144 ZRLE events, 1547 FramebufferUpdate requests). A
+display with nothing to redraw does NOT get a new sample buffer from
+ScreenCaptureKit - "silence" and "a still picture" are the same event for an
+IDLE display, whatever they are for a genuinely dead stream.
+
+FIX-C's correction: "silence" must be judged per LAYOUT, not per display -
+the watchdog may only act when NO display in the layout has produced a frame
+recently (the MAXIMUM per-display stamp, not the minimum - see
+`freshestFrameStamp()` in `src/mac.m`). This deliberately gives up catching
+"one of several displays died while the rest keep working"; that is a
+different, narrower failure this mechanism no longer detects, and adding it
+back would need its own, more conservative mechanism (a much longer
+per-display threshold, re-arming only the affected display) - left undone on
+purpose, not forgotten. The measured incident this plan was written for (the
+WHOLE desk going silent, `didStopWithError` never firing) is still caught:
+when every display stops, the maximum is exactly as stale as the minimum was.
 
 ## The change
 
