@@ -198,8 +198,62 @@ Each stage ships alone and is verifiable alone.
 
 ## Out of scope
 
-- Subscribing to `CGDisplayRegisterReconfigurationCallback` (the watchdog needs
-  no notification, and the old plan's reasons against it still hold).
 - Restarting the server, the listener or the auth on any of this.
 - Mirroring changes, resolution changes inside one display beyond what the
   layout comparison already covers.
+
+~~Subscribing to `CGDisplayRegisterReconfigurationCallback` (the watchdog needs
+no notification, and the old plan's reasons against it still hold).~~
+**Revisited and shipped as FIX-D below** - not because the watchdog above
+needed it, but because production found a case the watchdog cannot see BY
+CONSTRUCTION: a display that is RESIZED, not silenced, keeps delivering
+frames forever, so nothing about it ever looks like silence. See FIX-D.
+
+## FIX-D — react to macOS's own reconfiguration notice
+
+Measured on the installed build (2026-09-12): changing the built-in
+display's mode mid-session (1710x1112 -> 1470x956) while a client was
+streaming produced 753 client updates and ZERO re-arms, with the canvas
+stuck at the pre-change 5552x2715 composite size the whole time.
+`ScreenCapturer.m` pins `SCStreamConfiguration.width`/`height` at `Build`
+time, so a reconfigured display keeps delivering frames - just rescaled to
+the OLD dimensions - and the watchdog above, which only ever reacts to
+silence, has nothing to react to.
+
+`AppDelegate` now observes `NSApplicationDidChangeScreenParametersNotification`
+and calls one new, unconditional, AppKit-free core entry point,
+`vncServerNoteDeskShapeMayHaveChanged()`. A no-op while idle (the next
+connect already reads the desk fresh). Otherwise debounces 500ms on the
+EXISTING `gCaptureStopQueue` (real reconfigurations fire this notification
+several times as the desk settles) and, once settled, re-reads the desk
+WITHOUT waking it (`resolveDeskLayoutWithoutWaking()`, the same call
+`rearmCaptures()` already uses), compares against the published layout with
+the EXISTING `macVNCDisplayLayoutsEqual()`, and rebuilds - via the EXISTING
+`rearmCaptures()`, unchanged - only if they differ.
+
+This is cheap specifically because the three objections the ORIGINAL
+`display-reconfiguration.md` plan raised against reacting to reconfiguration
+are each already answered by machinery this file's own earlier follow-ups
+built for an unrelated reason - see that plan's "superseded by FIX-D" note
+for the point-by-point mapping. Nothing here restarts the server, touches
+the listener/auth, or shares the silence watchdog's own
+`gRearmsSinceFrame`/`gLastRearmNs`/`gCaptureRearmCount` bookkeeping - a
+shape-driven rearm gets its own counters
+(`macVNCDeskShapeRebuildCountForTesting`/`...FailureCountForTesting`), so a
+display reconfiguring repeatedly cannot push the silence watchdog toward a
+`GiveUp` it never earned. A failed shape-driven rebuild still reaches the
+user through the same `reportCaptureFailure()` every other trigger uses.
+
+Tests: `tests/test_capture_liveness_rearm_deskshape.m` asserts the decision
+(debounce coalescing, equal => no rebuild, different => exactly one rebuild,
+idle => no-op), driving the real core entry point directly rather than
+faking a CoreGraphics reconfiguration.
+
+Also while here: `tests/test_capture_liveness_rearm_multidisplay.m`'s Test A
+("an idle second display cannot trigger a re-arm") used to fall back to a
+bare `printf(...SKIPPED...)` with no real ctest `SKIP` on a single-display
+host, so the whole binary still exited 0 whether or not that half's
+assertions ever ran. Split into its own target,
+`test_capture_liveness_rearm_multidisplay_idle.m`, with its own
+`SKIP_RETURN_CODE 77`, so ctest can tell "proved the fix" from "never ran
+it" apart.

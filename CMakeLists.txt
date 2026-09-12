@@ -672,15 +672,39 @@ if(BUILD_TESTING)
     set_tests_properties(capture_liveness_rearm_failure PROPERTIES SKIP_RETURN_CODE 77)
 
     # FIX-C: a production regression neither of the two tests above could see -
-    # both only ever ran a single-display layout. Test A pins "an idle SECOND
-    # display cannot trigger a re-arm" (the MIN-to-MAX fix on the frame-arrival
-    # stamp); Test B pins "total silence across every display still reaches
-    # GiveUp" (the SUCCESS-branch complement of _failure's forced-failure case).
+    # both only ever ran a single-display layout. Pins "total silence across
+    # every display still reaches GiveUp" (the SUCCESS-branch complement of
+    # _failure's forced-failure case). Its sibling below pins the OTHER half.
     add_executable(test_capture_liveness_rearm_multidisplay tests/test_capture_liveness_rearm_multidisplay.m)
     target_include_directories(test_capture_liveness_rearm_multidisplay PRIVATE src)
     target_link_libraries(test_capture_liveness_rearm_multidisplay macvnc_core_testable)
     add_test(NAME capture_liveness_rearm_multidisplay COMMAND test_capture_liveness_rearm_multidisplay)
     set_tests_properties(capture_liveness_rearm_multidisplay PROPERTIES SKIP_RETURN_CODE 77)
+
+    # FIX-C's other half, in its OWN target: "an idle SECOND display cannot
+    # trigger a re-arm" (the MIN-to-MAX fix on the frame-arrival stamp) needs
+    # >= 2 displays to mean anything. Split from the target above because it
+    # used to fall back to a bare printf(...SKIPPED...) with no real SKIP
+    # return code on a single-display host, so ctest could not distinguish
+    # "proved the fix" from "never ran it" - a separate target with its own
+    # SKIP_RETURN_CODE makes that distinction visible in the ctest summary.
+    add_executable(test_capture_liveness_rearm_multidisplay_idle tests/test_capture_liveness_rearm_multidisplay_idle.m)
+    target_include_directories(test_capture_liveness_rearm_multidisplay_idle PRIVATE src)
+    target_link_libraries(test_capture_liveness_rearm_multidisplay_idle macvnc_core_testable)
+    add_test(NAME capture_liveness_rearm_multidisplay_idle COMMAND test_capture_liveness_rearm_multidisplay_idle)
+    set_tests_properties(capture_liveness_rearm_multidisplay_idle PROPERTIES SKIP_RETURN_CODE 77)
+
+    # FIX-D: react to macOS's OWN display-configuration notification instead of
+    # waiting for silence - closes the one gap the watchdog above cannot see
+    # (a RESIZED display keeps delivering frames, just rescaled, so nothing
+    # about it looks like silence). Asserts the decision (debounce coalescing,
+    # equal => no rebuild, different => exactly one rebuild, idle => no-op),
+    # not the plumbing - see the file header for the measurement this answers.
+    add_executable(test_capture_liveness_rearm_deskshape tests/test_capture_liveness_rearm_deskshape.m)
+    target_include_directories(test_capture_liveness_rearm_deskshape PRIVATE src)
+    target_link_libraries(test_capture_liveness_rearm_deskshape macvnc_core_testable)
+    add_test(NAME capture_liveness_rearm_deskshape COMMAND test_capture_liveness_rearm_deskshape)
+    set_tests_properties(capture_liveness_rearm_deskshape PROPERTIES SKIP_RETURN_CODE 77)
 
     add_executable(test_first_frame_wait tests/test_first_frame_wait.m)
     target_include_directories(test_first_frame_wait PRIVATE src)

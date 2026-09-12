@@ -14,24 +14,21 @@
 /*
  * FIX-C: the whole-diff audit's own manual verification found what neither
  * test_capture_liveness.c's six pure rules nor test_capture_liveness_rearm.m/
- * _failure.m's single-display glue tests could - both defects only show up
+ * _failure.m's single-display glue tests could - a defect that only shows up
  * with TWO OR MORE displays in the layout, one of which never redraws.
  *
- * Measured on the live installed build (2026-09-12): a two-display desk
- * where the user worked on only one panel produced NINE re-arms in about two
- * minutes on the IDLE panel's stale stamp alone, while the ACTIVE display's
- * viewer received a real, working session throughout (end-of-session stats:
- * 3144 ZRLE events, 1547 FramebufferUpdate requests). The old
- * `oldestFrameStamp()` took the MINIMUM stamp over the layout - one display
- * with nothing to redraw looked exactly like a dead stream, forever.
- *
- * Test A pins the fix directly: an idle-but-present second display must
- * never by itself cause a re-arm while another display keeps producing
- * frames. Test B pins the OTHER half - that genuine, total silence (no
- * display producing anything, the success-branch equivalent of
+ * This file pins ONE half - that genuine, total silence (no display
+ * producing anything, the success-branch equivalent of
  * test_capture_liveness_rearm_failure.m's forced-failure case) still counts
  * every rearm attempt honestly and reaches GiveUp, i.e. a working rebuild
- * with nothing to show for it cannot loop forever either.
+ * with nothing to show for it cannot loop forever either. The OTHER half -
+ * an idle-but-present second display must never by itself cause a re-arm
+ * while another display keeps producing frames - moved to its own file,
+ * test_capture_liveness_rearm_multidisplay_idle.m, because it needs >= 2
+ * displays to mean anything and used to fall back to a bare printf(...
+ * SKIPPED ...) with no actual SKIP return code on a single-display host, so
+ * ctest could not tell "proved the fix" from "never ran it" apart - see that
+ * file's header for the full measurement this was built against.
  *
  * Same real-server pattern as test_capture_liveness_rearm.m: a live
  * ScreenCaptureKit session is genuinely running throughout (this file makes
@@ -79,8 +76,11 @@ main(void)
         cfg.password = "test-password";
         cfg.captureFramesPerSecond = 5;
         cfg.viewOnly = true;
-        cfg.displayNumber = -2; /* ALL attached displays, not just the primary
-                                   - Test A needs at least two to mean anything */
+        cfg.displayNumber = -2; /* ALL attached displays, not just the primary -
+                                   this test's own assertions do not depend on
+                                   the count (unlike the idle-second-display
+                                   test), but ALL is still what the original
+                                   incident ran with, so this stays close to it */
         cfg.listenAddress = "127.0.0.1";
         cfg.allowedClients = NULL;
         cfg.clientAccessMode = MACVNC_CLIENT_ACCESS_ALLOW_ALL_CONFIRMED;
@@ -115,49 +115,13 @@ main(void)
             return 77;
         }
 
-        size_t layoutCount = macVNCCurrentDisplayLayoutCountForTesting();
-
         /*
-         * Test A - "an idle second display cannot trigger a re-arm".
+         * "Every display silent must still reach GiveUp; no reset rescues it."
          *
-         * Feed a synthetic frame to display index 0 every 20ms - faster than
-         * the 50ms shrunk silence window, so display 0 never itself goes
-         * quiet - and NEVER feed display index 1. Under the OLD
-         * oldestFrameStamp() (the minimum), display 1's permanently-zero
-         * stamp alone would have forced a re-arm within about
-         * grace+silence (~100ms) and every ~cooldown (50ms) after,
-         * regardless of display 0. Under the fix, silence is the MAXIMUM
-         * stamp over the layout, so display 0 alone keeps the watchdog
-         * satisfied; run for a comfortable multiple of the real 1Hz
-         * watchdog tick (not just the shrunk windows) to prove this holds
-         * across several real evaluations, not by luck on the first one.
-         */
-        if (layoutCount >= 2) {
-            double testADeadline = monotonicSeconds() + 3.5;
-            while (monotonicSeconds() < testADeadline) {
-                uint64_t generation = macVNCCurrentCaptureGenerationForTesting();
-                macVNCCompositeSyntheticFrameForTesting(generation, 0);
-                usleep(20000); /* 20ms */
-            }
-            unsigned rearmsDuringA = macVNCCaptureRearmCountForTesting();
-            unsigned giveUpsDuringA = macVNCCaptureGiveUpCountForTesting();
-            printf("Test A (idle second display): rearms=%u giveUps=%u over %zu display(s)\n",
-                   rearmsDuringA, giveUpsDuringA, layoutCount);
-            assert(rearmsDuringA == 0);
-            assert(giveUpsDuringA == 0);
-        } else {
-            printf("test_capture_liveness_rearm_multidisplay: Test A SKIPPED "
-                   "(only %zu display in the layout; needs >= 2 to make an "
-                   "idle SECOND display meaningful) - Test B still runs\n",
-                   layoutCount);
-        }
-
-        /*
-         * Test B - "every display silent must still reach GiveUp; no reset
-         * rescues it".
+         * (Formerly "Test B" alongside an idle-second-display "Test A" that
+         * now lives in test_capture_liveness_rearm_multidisplay_idle.m.)
          *
-         * From here on nothing feeds ANY display - Test A's synthetic feed
-         * loop above has already ended, and real ScreenCaptureKit is not
+         * Nothing feeds ANY display here, and real ScreenCaptureKit is not
          * expected to deliver anything either (see the file header). This is
          * the SUCCESS-branch complement of test_capture_liveness_rearm_
          * failure.m's forced-failure case: rearmCaptures() itself is
@@ -166,8 +130,9 @@ main(void)
          * yet with no frame ever arriving from any display, the watchdog
          * must still count every successful attempt toward maxRearms and
          * reach GiveUp - proving compositeCapturedFrame's per-frame reset
-         * (see its comment on why it "cannot loop") really does require a
-         * delivered frame, and cannot be tripped by anything else.
+         * (see its comment on the two-independent-loads race, mac.m) really
+         * does require a delivered frame, and cannot be tripped by anything
+         * else.
          */
         double giveUpDeadline = monotonicSeconds() + 45.0; /* generous: each
             attempt here is a REAL StopAndWait + desk re-read + Build +
@@ -191,13 +156,13 @@ main(void)
         vncServerStop();
 
         if (!gaveUp) {
-            printf("test_capture_liveness_rearm_multidisplay: Test B SKIP "
+            printf("test_capture_liveness_rearm_multidisplay: total-silence test SKIP "
                    "(no GiveUp observed in 45s - no usable display for a "
                    "real capture session, or frames arrived from somewhere?)\n");
             return 77;
         }
 
-        printf("Test B (total silence): rearmSuccesses=%u rearmFailures=%u giveUps=%u\n",
+        printf("Total silence: rearmSuccesses=%u rearmFailures=%u giveUps=%u\n",
                rearmSuccesses, rearmFailures, giveUps);
         assert(rearmSuccesses >= 3); /* MACVNC_CAPTURE_LIVENESS_MAX_REARMS,
                                         reached via the SUCCESS branch */

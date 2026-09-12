@@ -262,6 +262,19 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
            selector:@selector(keyboardInputSourceChanged:)
                name:(NSString *)kTISNotifySelectedKeyboardInputSourceChanged
              object:nil];
+    /* FIX-D: the capture-liveness watchdog only reacts to SILENCE, and a
+       display that is RESIZED rather than silenced keeps delivering frames
+       (ScreenCapturer.m pins SCStreamConfiguration.width/height at Build
+       time) - measured on the installed build, that produced zero re-arms
+       and a canvas stuck at the pre-change size while frames kept flowing.
+       This is macOS's own notice that something about the screens changed;
+       the core decides (debounced, and only while a client is connected)
+       whether a rebuild is actually warranted - no AppKit below this call. */
+    [[NSNotificationCenter defaultCenter]
+        addObserver:self
+           selector:@selector(deskShapeMayHaveChanged:)
+               name:NSApplicationDidChangeScreenParametersNotification
+             object:nil];
     /* After the defaults exist and before the server can accept anyone: this
        also clears a clamshell bit stranded by a previous run that crashed
        while armed, which nothing else on the machine will ever clear. */
@@ -295,6 +308,10 @@ static void macVNCScreenCaptureFailed(bool likelyPermissionDenial, uint64_t gene
     [self.updateTimer invalidate];
     self.updateTimer = nil;
     [NSDistributedNotificationCenter.defaultCenter removeObserver:self];
+    [[NSNotificationCenter defaultCenter]
+        removeObserver:self
+                  name:NSApplicationDidChangeScreenParametersNotification
+                object:nil];
     /* The kernel would reclaim these when the process dies; released here so
        the quit path says out loud what it is giving up. */
     macVNCSetKeepDisplayAwake(FALSE);
@@ -928,6 +945,15 @@ static NSMenuItem *addRow(NSMenu *menu, NSString *title, SEL action,
 {
     (void)note;
     macVNCInputRefreshKeyboardLayout();
+}
+
+/* Main thread, by contract of NSApplicationDidChangeScreenParametersNotification.
+   Immediately forwarded into the core, which debounces and decides - see
+   vncServerNoteDeskShapeMayHaveChanged() for why nothing here may block. */
+- (void)deskShapeMayHaveChanged:(NSNotification *)note
+{
+    (void)note;
+    vncServerNoteDeskShapeMayHaveChanged();
 }
 
 - (void)updateMenuStatus

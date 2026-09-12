@@ -103,3 +103,50 @@ it automatically is a bigger change than it looks.
 - In-place resize with `rfbNewFramebuffer`.
 - Pinning `displayNumber` by display ID rather than by list index (a real
   latent bug: the index designates a different monitor after a hot-unplug).
+
+## Superseded by FIX-D (`.pi/plans/capture-liveness.md`)
+
+"Reacting to reconfiguration while running" above was rejected on three
+grounds. Production later found a case none of the three cover - a display
+that is RESIZED, not silenced, keeps delivering frames forever (measured:
+753 client updates, zero re-arms, canvas stuck at the pre-change size across
+a real mode change) - and FIX-D reacts to reconfiguration while running to
+close it. Each objection below is answered, not overruled, by machinery a
+later follow-up built for an unrelated reason:
+
+- **"Its founding premise contradicted our own data" / fires twice per
+  screen-off cycle.** Still true of the ACTIVE list this document is about -
+  FIX-D does not use it. It reacts to
+  `NSApplicationDidChangeScreenParametersNotification`, a real macOS
+  reconfiguration notice, not a sleep/wake cycle; a display dimming does not
+  post it. And FIX-D is gated on a client being connected AND on
+  `macVNCDisplayLayoutsEqual()` finding an ACTUAL difference against the
+  published layout - an equal-shape re-evaluation (which is what a sleep
+  cycle would produce, if it fired this notification at all) does nothing
+  and logs nothing.
+- **"Re-resolving wakes the screen."** FIX-D's re-read
+  (`resolveDeskLayoutWithoutWaking()`) is exactly the NON-waking probe this
+  objection asked for and did not yet exist when this plan was written -
+  `capture-liveness.md`'s own `rearmCaptures()` built it first, for the
+  silence-watchdog's re-arm, and FIX-D reuses it verbatim. No
+  `macVNCWakeDisplays()` call is anywhere on this path.
+- **"Restart has no safe failure branch."** FIX-D never restarts the server.
+  It calls the EXISTING `rearmCaptures()` - stop/re-read/rebuild the capture
+  session and, only if the shape changed, swap the canvas via
+  `rfbNewFramebuffer` - and on failure falls through to the EXISTING
+  `reportCaptureFailure()` decision (`KeepServing`/`StopServer`), the same
+  path a silent stream failure already used. The listener and auth are
+  never touched by any of this.
+- **"The unplug case never reaches it anyway."** Already overturned by
+  `capture-liveness.md` itself, independent of FIX-D: `didStopWithError`
+  measurably does not fire when a desk reshapes, so `reportCaptureFailure`
+  never ran for that case either. FIX-D's own trigger is a DIFFERENT failure
+  mode again - not silence, not an SCStream error, but frames that keep
+  arriving at the wrong size - which is exactly why it needs its own
+  notification-based path rather than piggy-backing on either existing one.
+
+Pinning `displayNumber` by display ID rather than list index remains
+genuinely out of scope - FIX-D's re-read runs the SAME positional selection
+an unplug/replug could already reorder, now live rather than only at
+restart, which raises this bug's priority but does not fix it. See
+`capture-liveness.md`'s own "S4" for where it is tracked.
