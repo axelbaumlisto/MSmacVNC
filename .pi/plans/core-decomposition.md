@@ -161,3 +161,43 @@ MacVNCStatusText, MacVNCStartFailure, MacVNCRelauncher, MacVNCPermissionUI.
 остаются в `mac.m`. Они завязаны на `rfbClientPtr` и хуки LibVNCServer;
 вынос дал бы модуль, который всё равно знает про libvncserver — перенос
 строк без развязки. Разумно только вместе со сменой модели клиента.
+
+## Шаги 7–9 — долг работы capture-liveness (2026-09-12)
+
+Работа `.pi/plans/capture-liveness.md` вылечила поведение, но нарастила ровно
+ту болезнь, против которой написан этот план: `mac.m` 1527 → 2795 строк,
+глобалей 20 → 44. Из 32 `g*`-статиков 22 добавлены за один день и делятся
+на двух владельцев без остатка.
+
+### Шаг 7 — реестр раскладки `MacVNCLayoutRegistry.{h,c}`
+- владеет: `gDisplayLayoutSlots[2]`, `gPublishedLayout`, `gPinnedDisplayID`,
+  `gCaptureSessionGeneration`;
+- API: `publish(layout)`, `current()`, `nextSessionGeneration()`,
+  `currentSessionGeneration()`, `pinnedDisplay()/pin()/resetPin()`;
+- чистый C, без Foundation/SCK/rfb — тестируется как DisplayLayout;
+- **проверка:** тест на двойной буфер (публикация N+1 никогда не пишет в
+  слот, который читает N), на монотонность generation, на set-once пина;
+  мутация: сломать выбор слота — тест должен упасть.
+
+### Шаг 8 — надзор за захватом `MacVNCCaptureSupervisor.{h,m}`
+- владеет: `gLastFrameNs[]`, `gCapturesStartedNs`, `gLastRearmNs`,
+  `gRearmsSinceFrame`, `gCaptureLivenessTimer`, `gDeskShapeDebounceTimer`
+  и все их test-only счётчики/оверрайды (13 глобалей);
+- API: `noteFrame(index)`, `arm()/disarm()`, `noteDeskShapeMayHaveChanged()`;
+- зависимости инжектятся: очередь (`gCaptureStopQueue`), `rearm`-колбэк,
+  `reportFailure`-колбэк, `readDeskLayoutWithoutWaking`, `layoutsEqual`;
+  `rearmCaptures()` ОСТАЁТСЯ в mac.m — он трогает `rfbScreen`/`frameBufferOne`;
+- **проверка:** существующие тесты `capture_liveness_rearm*` и
+  `capture_liveness_rearm_deskshape` проходят без изменения ассертов —
+  это и есть доказательство I1.
+
+### Шаг 9 — хуки и документ
+- `mac.h`: из 29 `ForTesting`-хуков к своим модулям уходят все, что читают
+  состояние шагов 7–8; в `mac.h` остаются только хуки жизненного цикла;
+- `ARCHITECTURE.md`: два новых модуля в карте слоёв, порядок мьютексов
+  сверен; `check_architecture.sh` зелёный.
+
+Инварианты I1–I6 без изменений. Отдельно: **I7** — горячий путь
+`compositeCapturedFrame` после шага 7–8 делает не больше атомарных операций,
+чем до (сейчас: 1 load generation, 1 load layout, 1 store stamp, 1 store
+rearms). Мерить `updates=N` за 90 с до и после.
