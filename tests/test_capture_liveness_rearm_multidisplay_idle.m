@@ -11,6 +11,7 @@
 
 #include "mac.h"
 #include "MacVNCCaptureSupervisor.h"
+#include "MacVNCLayoutRegistry.h"
 
 /*
  * "An idle-but-present second display cannot trigger a re-arm."
@@ -142,7 +143,7 @@ main(void)
          */
         double deadline = monotonicSeconds() + 3.5;
         while (monotonicSeconds() < deadline) {
-            uint64_t generation = macVNCCurrentCaptureGenerationForTesting();
+            uint64_t generation = macVNCLayoutRegistryCurrentSessionGeneration();
             macVNCCompositeSyntheticFrameForTesting(generation, 0);
             usleep(20000); /* 20ms */
         }
