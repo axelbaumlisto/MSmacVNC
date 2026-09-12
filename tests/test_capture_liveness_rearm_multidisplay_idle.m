@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include "mac.h"
+#include "MacVNCCaptureSupervisor.h"
 
 /*
  * "An idle-but-present second display cannot trigger a re-arm."

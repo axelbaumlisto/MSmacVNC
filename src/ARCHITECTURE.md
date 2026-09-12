@@ -507,8 +507,9 @@ pixels rather than points.
   delivering frames. Measured, not imagined: the desk changed shape once while
   captures were live, `SCStream` went silent with no `didStopWithError`, and
   macVNC served viewers a 42-hour-old canvas until someone restarted the app by
-  hand. `mac.m` stamps a per-display timestamp at the one place a frame becomes
-  pixels (`compositeCapturedFrame`); a 1Hz watchdog on the existing capture-stop
+  hand. `mac.m`'s `compositeCapturedFrame` stamps a per-display timestamp at
+  the one place a frame becomes pixels, through `MacVNCCaptureSupervisor`'s
+  `NoteFrame` (step 8 below); its 1Hz watchdog on the existing capture-stop
   queue reads the freshest one (`freshestFrameStamp()` - see FIX-C below for
   why it is the maximum over the layout's displays, not the minimum this
   originally shipped as) and asks this module for a verdict: `Alive`,
@@ -820,6 +821,35 @@ pixels rather than points.
   rebuild already uses, never a server stop. `-1` (primary) and `-2` (all)
   are untouched: they never populate `gPinnedDisplayID` and keep
   re-evaluating live, which is what those settings mean.
+- **MacVNCCaptureSupervisor** — owns the watchdog/desk-shape state the
+  `CaptureLiveness` narrative above describes: `gLastFrameNs[]`,
+  `gCapturesStartedNs`, `gLastRearmNs`, `gRearmsSinceFrame`, the 1Hz
+  liveness timer and the FIX-D desk-shape debounce timer, all extracted from
+  `mac.m` (.pi/plans/core-decomposition.md, step 8) as a pure move - the same
+  pattern as step 7's `MacVNCLayoutRegistry`. What it does NOT own, on
+  purpose: `rfbScreen`/`frameBufferOne` (`rearmCaptures()` stays in `mac.m`,
+  injected here as the `rearm` hook, so this module never touches
+  LibVNCServer's screen or canvas) and `captureControlMutex` (this module is
+  not thread-safe alone; `mac.m`'s `reconcileCaptureState()` still takes that
+  lock exactly where it always has - I3 unchanged - and hands this module
+  only what it read under it, through an injected `snapshot` hook). The one
+  thing step 8 DID change, stated honestly: the pre-step-8 watchdog held
+  `captureControlMutex` across EIGHT reads in one struct literal
+  (`gCapturesRunning`, `vncConnectedClients`, and six atomic values); now
+  only the first two are read under it and the six are read lock-free. For
+  `gLastFrameNs[]` that costs nothing - `compositeCapturedFrame` never wrote
+  it under the lock. But `startCapturesForNewClient` DOES write
+  `gCapturesStartedNs`/`gLastRearmNs`/`gRearmsSinceFrame` under the lock, as
+  one group with `gCapturesRunning = true`, so the old single critical
+  section genuinely excluded a tick from seeing that group half-written, and
+  the new code does not. It is inconsequential, not by accident but by the
+  order of checks in `macVNCResolveCaptureLiveness`: its FIRST test is
+  `!clientsConnected || !capturesRunning -> Alive`, before any torn field is
+  consulted, and the only writer of the group also resets
+  `capturesStartedNs` to now in that same transition, so the other torn
+  combination lands inside the grace window - also `Alive`. No reachable
+  interleaving changes the verdict; the debounce path still reads its two
+  gates together under the lock, exactly as before.
 - **MacVNCClamshellPolicy / MacVNCClamshellMarker / MacVNCClamshell** —
   closed-display mode. The policy
   half is pure C and holds every rule; the marker owns the persisted record; the

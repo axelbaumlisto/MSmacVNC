@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "mac.h"
+#include "MacVNCCaptureSupervisor.h"
 
 /*
  * One full re-arm cycle through the mac.m GLUE, not just the pure resolver.

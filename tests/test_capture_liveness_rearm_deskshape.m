@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include "mac.h"
+#include "MacVNCCaptureSupervisor.h"
 
 /*
  * FIX-D: react to macOS's own display-configuration notification while a

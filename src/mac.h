@@ -291,25 +291,14 @@ unsigned macVNCCaptureStopCountForTesting(void);
 /* Override the keep-warm window (nanoseconds) for tests. */
 void macVNCSetCaptureKeepWarmForTesting(uint64_t ns);
 
-/* How many times the liveness watchdog re-armed a silently dead capture
-   stream - one that stopped delivering frames without an SCStream error to
-   react to. See CaptureLiveness.h for why silence itself is the signal. */
-unsigned macVNCCaptureRearmCountForTesting(void);
-
-/* How many times a re-arm ATTEMPT failed (rearmCaptures() itself returned
-   false) - as opposed to macVNCCaptureRearmCountForTesting(), which only
-   counts successes. A post-audit fix ("FIX-A"/F1) made a failed attempt count
-   toward maxRearms too, so GiveUp is reachable instead of retrying at 1Hz
-   forever; this is the witness that the FAILURE branch's bookkeeping actually
-   runs, not just the success branch's. */
-unsigned macVNCCaptureRearmFailureCountForTesting(void);
-
-/* How many times the watchdog resolved GiveUp (maxRearms failed attempts with
-   no recovering frame) and reported a capture failure because of it. Without
-   this a test can only infer GiveUp happened by an absence (no further
-   re-arms), which is indistinguishable from "the test did not wait long
-   enough". */
-unsigned macVNCCaptureGiveUpCountForTesting(void);
+/* macVNCCaptureRearmCountForTesting/macVNCCaptureRearmFailureCountForTesting/
+   macVNCCaptureGiveUpCountForTesting/macVNCLastFrameTimestampForTesting/
+   macVNCSetCaptureLivenessLimitsForTesting/macVNCSetDeskShapeDebounceForTesting/
+   macVNCDeskShapeRecheckCountForTesting/macVNCForceDeskShapeDifferentForTesting/
+   macVNCDeskShapeRebuildCountForTesting/macVNCDeskShapeRebuildFailureCountForTesting
+   moved to MacVNCCaptureSupervisor.h (.pi/plans/core-decomposition.md, step
+   8) with the watchdog/desk-shape state they read - #include that header,
+   not this one, for any of them. */
 
 /*
  * Feeds one synthetic, correctly-sized (zeroed) frame for displayIndex
@@ -329,38 +318,9 @@ void macVNCCompositeSyntheticFrameForTesting(uint64_t generation, size_t display
    generation without reaching into a private counter by name. */
 uint64_t macVNCCurrentCaptureGenerationForTesting(void);
 
-/* The per-display liveness timestamp gLastFrameNs holds, so a test can prove
-   a rejected synthetic frame left it untouched rather than merely hoping a
-   non-observable return value implies it. 0 = never stamped, same sentinel
-   convention as the production field this reads. */
-uint64_t macVNCLastFrameTimestampForTesting(size_t displayIndex);
 /* How many displays the CURRENTLY published layout has - lets a multi-display
    test SKIP honestly on a box that only has one. */
 size_t macVNCCurrentDisplayLayoutCountForTesting(void);
-/* Shrinks the watchdog's grace/silence/cooldown windows (nanoseconds; 0 keeps
-   the shipped default) so an e2e run can force a re-arm in seconds instead of
-   the shipped ~35s. maxRearms is not overridable - see the definition site. */
-void macVNCSetCaptureLivenessLimitsForTesting(uint64_t graceNs, uint64_t silenceNs,
-                                              uint64_t cooldownNs);
-
-/* FIX-D test hooks - see vncServerNoteDeskShapeMayHaveChanged() above. */
-/* Overrides the debounce window (nanoseconds; 0 keeps the shipped 500ms), so
-   a test can observe a SECOND, separate firing within a bounded budget. */
-void macVNCSetDeskShapeDebounceForTesting(uint64_t ns);
-/* How many times the debounced recheck actually ran, regardless of what it
-   decided - the number that lets a test tell "a burst of N notifications
-   produced ONE evaluation" from "produced N". */
-unsigned macVNCDeskShapeRecheckCountForTesting(void);
-/* Forces the next recheck(s) to treat the freshly re-read desk as different
-   from the published layout, without needing to fake a MacVNCDisplayLayout
-   or physically reconfigure a display - the rebuild that follows is still a
-   real, unmocked rearmCaptures() call. */
-void macVNCForceDeskShapeDifferentForTesting(bool force);
-/* How many times a shape-driven rearm SUCCEEDED / FAILED, counted separately
-   from macVNCCaptureRearmCountForTesting() - see evaluateDeskShapeForRearm's
-   comment in mac.m for why the two triggers do not share a counter. */
-unsigned macVNCDeskShapeRebuildCountForTesting(void);
-unsigned macVNCDeskShapeRebuildFailureCountForTesting(void);
 
 /* F1 test hooks - see gPinnedDisplayID's own comment in mac.m. */
 /* The CURRENTLY pinned display id (0 = not pinned yet, or displayNumber < 0

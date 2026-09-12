@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include "mac.h"
+#include "MacVNCCaptureSupervisor.h"
 
 /*
  * E2/F1: the display-PINNING glue in mac.m, driven through a real server.
