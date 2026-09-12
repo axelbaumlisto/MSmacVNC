@@ -43,6 +43,7 @@
 #import "NetworkPolicyResolver.h"
 #import "MacVNCDisplayWake.h"
 #import "DisplayReadiness.h"
+#import "MacVNCLayoutRegistry.h"
 #import "CaptureLiveness.h"
 #import "MacVNCPowerMgmt.h"
 #import "MacVNCClamshell.h"
@@ -89,26 +90,11 @@ static void *frameBufferOne;
  * by vncServerStart() from the caller's MacVNCServerConfig. */
 static rfbBool viewOnly = FALSE;
 static int displayNumber = -1;               /* -2 all, -1 primary, >=0 one. */
-/* E2: once a `displayNumber >= 0` selection has been resolved by POSITION for
-   the first time in a server run, this remembers the concrete display it
-   picked, so every LATER re-resolution (a capture-liveness re-arm, mid-
-   session) follows that identity rather than re-reading the same numeric
-   position - which a desk event can silently hand to a different physical
-   monitor. 0 (kCGNullDirectDisplay) means "not yet pinned this run": real
-   CGDirectDisplayID values are never 0. Reset to 0 at every server (re)start,
-   alongside `displayNumber` itself - see vncServerStart. -1 (primary) and -2
-   (all) never populate this; they keep re-evaluating live, which is what
-   those settings mean.
-
-   _Atomic (H2): written on the capture control path, but read cross-thread
-   by macVNCPinnedDisplayIDForTesting() from a test's own thread. A plain
-   uint32_t here was safe only by accident - every test read happened to be
-   preceded by polling a DIFFERENT atomic counter (a rearm/rebuild count)
-   whose ordering gave a transitive happens-before edge to this one, a
-   property a future refactor could silently break by moving this store
-   relative to that counter's increment. Written at most once per
-   resolution, so the atomic costs nothing that matters. */
-static _Atomic uint32_t gPinnedDisplayID;
+/* The concrete display a `displayNumber >= 0` selection has pinned to, once
+   resolved by position for the first time in a server run - owned by
+   MacVNCLayoutRegistry now (see its header for the full reasoning); reset to
+   0 at every server (re)start, alongside `displayNumber` itself, in
+   vncServerStart below. */
 static char macVNCListenAddress[MACVNC_LISTEN_ADDRESS_MAX] = {0};
 static char macVNCAllowedClients[MACVNC_ALLOWED_CLIENTS_MAX] = {0};
 static MacVNCClientAccessMode macVNCClientAccessMode = MACVNC_CLIENT_ACCESS_FAIL_CLOSED;
@@ -154,130 +140,15 @@ vncServerCopyPassword(char *buffer, size_t size)
     return length;
 }
 /*
- * The published display layout, double-buffered.
- *
- * Before this, `displayLayout` was a single static struct that a re-arm
- * overwrote IN PLACE (`displayLayout = freshLayout;`) whenever the desk
- * changed shape. compositeCapturedFrame() - the per-display capture hot path,
- * running at up to 60 fps per display - read that same struct with no lock:
- * it scans `displayLayout.count` comparing `&displayLayout.displays[i]` against
- * its `geometry` pointer, then snapshots `*geometry`. A capture callback from
- * the just-stopped OLD session can still be in flight when that copy runs -
- * MacVNCCaptureSession.h documents exactly this: StopAndWait's wait is
- * bounded, and a stream whose work never quiesced is deliberately leaked
- * rather than freed because a callback may still touch it. So the multi-field
- * copy could tear against that read: `count` from one publish compared
- * against `displays[]` from another. Bounded (displays[] is a fixed
- * MACVNC_MAX_DISPLAYS array, never out-of-bounds; worst case is a dropped
- * frame or one stale-pixel frame that heals on the next real one - see
- * .pi/plans/capture-liveness.md), but new exposure from the shape-changed
- * re-arm, not present before it.
- *
- * The fix is PUBLISH BY POINTER SWAP, never mutate what is currently
- * published: two fixed slots hold successive publications of the layout, and
- * an atomic pointer says which one is current. A reader loads that pointer
- * ONCE and reads only through it, so every field it sees belongs to the same
- * publish - no lock needed on the hot path, because nothing ever writes into
- * the slot the pointer currently designates as published.
- *
- * Two slots, not one-per-publish: a writer publishing into slot N+1 always
- * targets whichever slot is NOT currently published (the one last holding
- * publish N-1, already retired one publish ago), so it never touches the live
- * slot. A stuck callback from publish N-1 keeps a valid (never freed) pointer
- * into that slot; if TWO MORE re-arms land before that callback finally shows
- * up, the slot has since been reused for publish N+1, and the callback reads
- * WHATEVER publish N+1 put there - not a torn read (still one atomic load's
- * worth of a complete, self-consistent MacVNCDisplayLayout, never
- * out-of-bounds, never freed memory), but not that callback's own generation
- * either.
- *
- * That residual case is closed by a DIFFERENT mechanism, not by adding a
- * third slot: compositeCapturedFrame no longer identifies a frame by which
- * slot its geometry pointer happens to still address at all - see
- * MacVNCCaptureFrameOrigin and gCaptureSessionGeneration below, which reject
- * a stale frame by an explicit, never-reused counter BEFORE it ever reads a
- * slot's content, so a callback from ANY retired generation - one re-arm
- * stale or a hundred - never reaches a read of this structure in the first
- * place. What these two slots still exist for is narrower and unrelated: give
- * every reader that DOES pass that check (or never needed it - freshestFrameStamp,
- * ScreenInit) a torn-free, single-load view of the layout's own fields, so a
- * concurrent re-arm publishing a new shape can never be observed as `count`
- * from one shape and `displays[]` from another.
- *
- * Writers (resolveDisplayLayout at startup, rearmCaptures on re-arm) are
- * always serialised - startup runs once before any capture session exists,
- * and re-arm is the only thing scheduled on gCaptureStopQueue, a serial
- * queue - so no lock is needed on the write side either; the atomic pointer
- * is what makes the SWAP itself visible to readers as a single indivisible
- * step, not what serialises writers against each other.
+ * The published display layout (double-buffered) and the capture-session
+ * generation counter both moved to MacVNCLayoutRegistry.{h,c}
+ * (.pi/plans/core-decomposition.md, step 7) - see that header for the full
+ * reasoning (why two slots, why the generation is never reset, why 0 is a
+ * safe sentinel for each). This file reaches them only through
+ * macVNCLayoutRegistryCurrent()/Publish()/NextSessionGeneration()/
+ * CurrentSessionGeneration()/PinnedDisplay()/PinDisplay()/ResetPin() from
+ * here on.
  */
-static MacVNCDisplayLayout gDisplayLayoutSlots[2];
-static _Atomic(MacVNCDisplayLayout *) gPublishedLayout = NULL;
-
-/* The currently published layout. Callers that need more than one field must
-   load this ONCE into a local and read every field through that local - see
-   compositeCapturedFrame for why re-reading this accessor mid-function would
-   defeat the whole point of the pointer swap below. */
-static MacVNCDisplayLayout *
-currentDisplayLayout(void)
-{
-    return atomic_load(&gPublishedLayout);
-}
-
-/* Copy `fresh` into whichever slot is NOT currently published, then publish
-   it with one atomic store. Returns the new current pointer, so a caller that
-   just published can keep using it without a second load. */
-static MacVNCDisplayLayout *
-publishDisplayLayout(const MacVNCDisplayLayout *fresh)
-{
-    MacVNCDisplayLayout *live = atomic_load(&gPublishedLayout);
-    MacVNCDisplayLayout *target = (live == &gDisplayLayoutSlots[0])
-        ? &gDisplayLayoutSlots[1] : &gDisplayLayoutSlots[0];
-    *target = *fresh;
-    atomic_store(&gPublishedLayout, target);
-    return target;
-}
-
-/*
- * Which capture session a frame came from - orthogonal to which LAYOUT is
- * published above. A re-arm that finds the desk unchanged rebuilds its
- * session onto the SAME already-published MacVNCDisplayLayout object (see
- * rearmCaptures's same-shape branch) rather than publishing a second,
- * identical copy of it - so a layout publish and a new capture session are
- * NOT the same event, and identifying a session by "which layout publish it
- * used" would fail to tell two such sessions apart. This counter is bumped
- * once per macVNCCaptureSessionBuild() call, always, whether or not the
- * layout changed, and never reused - so a frame carrying any value other than
- * the CURRENT one came from a session that is no longer THE session,
- * regardless of how many re-arms separate the two or whether the desk's
- * shape ever changed at all. See MacVNCCaptureFrameOrigin for how a frame
- * carries this, and compositeCapturedFrame for where it is checked.
- *
- * 0 is reserved for "never Built against a real generation" and cannot
- * collide with a real one - the first claimed generation is 1 (see
- * nextCaptureSessionGeneration). No capture session is ever Built with
- * generation 0 in practice, but reserving it costs nothing and gives a
- * frame with a garbage/zeroed origin an unambiguous "never matches" answer.
- */
-static _Atomic uint64_t gCaptureSessionGeneration = 0;
-
-/* Claims the generation the NEXT macVNCCaptureSessionBuild() call will use.
-   Called exactly once per Build call site, and in rearmCaptures BEFORE
-   StopAndWait rather than right before Build - see rearmCaptures for why
-   that ordering, not proximity to Build, is what actually matters: claiming
-   it here means ANY frame the old, about-to-be-stopped session might still
-   deliver - even one delivered while StopAndWait is still draining, even one
-   from a stream that never quiesced and was deliberately leaked - already
-   finds gCaptureSessionGeneration advanced past its own value, however early
-   it arrives. */
-static uint64_t
-nextCaptureSessionGeneration(void)
-{
-    /* fetch_add returns the PRE-increment value; +1 gives the generation this
-       call just claimed, so the very first call returns 1, never the 0
-       sentinel above. */
-    return atomic_fetch_add(&gCaptureSessionGeneration, 1) + 1;
-}
 
 static rfbBool rfbServerInitialized = FALSE;
 static _Atomic int publishedServerPort = -1;
@@ -337,7 +208,7 @@ static void macVNCEnsureStopQueue(void)
  * carries - the same position within the layout its session was Built
  * against (MacVNCCaptureSession.m mints one origin per display, in loop
  * order). A callback whose session is no longer the current one is rejected
- * by its `generation` (see gCaptureSessionGeneration) before
+ * by its `generation` (see MacVNCLayoutRegistry.c's session-generation counter) before
  * compositeCapturedFrame ever reaches this array, so an index here is always
  * live-session-fresh, never a stale session's position reinterpreted against
  * the current one. 0 means "no frame yet for that slot" - macVNCUptimeNow()
@@ -460,7 +331,7 @@ unsigned macVNCDeskShapeRebuildFailureCountForTesting(void)
    assert it is set exactly once per resolve, survives every re-arm trigger,
    and is never silently swapped for a different display's id. */
 uint32_t macVNCPinnedDisplayIDForTesting(void)
-{ return atomic_load(&gPinnedDisplayID); }
+{ return macVNCLayoutRegistryPinnedDisplay(); }
 /* Forces applySelectionAndBuildLayout()'s pinned-id LOOKUP to miss, as if
    the pinned display had just been unplugged, without needing to physically
    remove a monitor: the ONE fault a test cannot otherwise produce on demand,
@@ -694,7 +565,7 @@ readAttachedDisplays(MacVNCDisplayInput *displays, size_t *count, int *primaryIn
    against the live layout is not a publish), so that stays with them.
 
    E2: a `displayNumber >= 0` selection is resolved by POSITION only the
-   FIRST time this runs in a server run (gPinnedDisplayID still 0) - every
+   FIRST time this runs in a server run (the registry's pinned display still 0) - every
    later call selects by the DISPLAY IDENTITY that first resolution picked
    (macVNCSelectDisplayByID), never by position again, so a desk event that
    reorders CoreGraphics' enumeration cannot silently hand a live capture to a
@@ -702,7 +573,7 @@ readAttachedDisplays(MacVNCDisplayInput *displays, size_t *count, int *primaryIn
    attached, this refuses rather than substituting whatever else is around -
    the caller's only recourse is the same reportCaptureFailure(false) path a
    failed rebuild already uses, never a server stop. -1 (primary) and -2
-   (all) never touch gPinnedDisplayID: re-evaluating live on every call is
+   (all) never touch the registry's pin: re-evaluating live on every call is
    what those settings mean. */
 static rfbBool
 applySelectionAndBuildLayout(const MacVNCDisplayInput *attached, size_t attachedCount,
@@ -710,7 +581,7 @@ applySelectionAndBuildLayout(const MacVNCDisplayInput *attached, size_t attached
 {
   MacVNCDisplayInput selected[MACVNC_MAX_DISPLAYS];
   size_t selectedCount = 0;
-  uint32_t pinnedID = atomic_load(&gPinnedDisplayID);
+  uint32_t pinnedID = macVNCLayoutRegistryPinnedDisplay();
 
   if (displayNumber >= 0 && pinnedID != 0) {
       uint32_t lookupID = pinnedID;
@@ -723,9 +594,9 @@ applySelectionAndBuildLayout(const MacVNCDisplayInput *attached, size_t attached
          misses, and returns MACVNC_DISPLAY_SELECTION_NO_SUCH_DISPLAY - the
          refusal that follows is the SAME unmocked path a real vanished
          display takes, not a shortcut around it. 0 (kCGNullDirectDisplay)
-         can never match a real attached display's id (see gPinnedDisplayID's
+         can never match a real attached display's id (see the registry's pin
          own comment), so this is guaranteed to miss. `pinnedID` itself -
-         used below for the log line, and left untouched in gPinnedDisplayID -
+         used below for the log line, and left untouched in the registry's pin -
          is NOT substituted: the pin does not vanish here, only what the
          enumeration can find. */
       if (atomic_load(&gForcePinnedDisplayGoneForTesting))
@@ -743,7 +614,7 @@ applySelectionAndBuildLayout(const MacVNCDisplayInput *attached, size_t attached
                                    displayNumber, selected, &selectedCount)) {
       case MACVNC_DISPLAY_SELECTION_OK:
           if (displayNumber >= 0)
-              atomic_store(&gPinnedDisplayID, selected[0].displayID);
+              macVNCLayoutRegistryPinDisplay(selected[0].displayID);
           break;
       case MACVNC_DISPLAY_SELECTION_NO_SUCH_DISPLAY:
           rfbErr("Specified display %d does not exist\n", displayNumber);
@@ -806,7 +677,7 @@ resolveDisplayLayout(void)
   MacVNCDisplayLayout freshLayout;
   if (!applySelectionAndBuildLayout(attached, attachedCount, primaryIndex, &freshLayout))
       return FALSE;
-  logCapturingLayout(publishDisplayLayout(&freshLayout));
+  logCapturingLayout(macVNCLayoutRegistryPublish(&freshLayout));
   return TRUE;
 }
 
@@ -960,21 +831,22 @@ compositeCapturedFrame(MacVNCCaptureFrameOrigin origin,
        ADDRESS against the published layout's slots, which only rejected a
        callback stuck across exactly ONE re-arm; reused two re-arms later, it
        could resurrect gLastFrameNs for a display the frame has nothing to do
-       with (see gPublishedLayout and MacVNCCaptureFrameOrigin). An explicit,
+       with (see MacVNCLayoutRegistry.c's published layout and MacVNCCaptureFrameOrigin). An explicit,
        monotonically increasing, NEVER REUSED generation has no reuse window:
        whatever this frame carries either equals the CURRENT generation or it
        does not, however many re-arms separate the two. */
-    if (origin.generation != atomic_load(&gCaptureSessionGeneration))
+    if (origin.generation != macVNCLayoutRegistryCurrentSessionGeneration())
         return true; /* stale session; not retryable, nothing to composite */
 
     /* Load the published layout EXACTLY ONCE and read every field below
-       through this local - see gPublishedLayout above for why. Before the
+       through this local - see MacVNCLayoutRegistry.c's own comment on the
+       published layout for why. Before the
        double-buffer swap this touched the `displayLayout` global directly,
        field by field, which raced a re-arm's in-place overwrite of that same
        global; loading the pointer once makes this whole function see a
        single, self-consistent publish no matter what a concurrent re-arm
        publishes in the meantime. */
-    MacVNCDisplayLayout *layout = currentDisplayLayout();
+    const MacVNCDisplayLayout *layout = macVNCLayoutRegistryCurrent();
 
     /* Defensive, not expected: the generation check above already guarantees
        `origin.displayIndex` was valid for the layout the CURRENT generation
@@ -1063,15 +935,15 @@ reportCaptureFailure(bool likelyPermissionDenial)
        (queued behind a modal, after the server was stopped and restarted) can be
        discarded by the handler. */
     uint64_t generation = atomic_load(&serverGeneration);
-    /* AND stamp which capture ATTEMPT it belongs to: gCaptureSessionGeneration
-       changes on every Build, successful or not (nextCaptureSessionGeneration()
+    /* AND stamp which capture ATTEMPT it belongs to: the registry's session generation
+       changes on every Build, successful or not (macVNCLayoutRegistryNextSessionGeneration()
        runs unconditionally at the top of rearmCaptures(), and again at every
        ScreenInit/reconcile Build) - so this is a distinct number per re-arm
        attempt within the SAME server run, which is exactly what
        macVNCShouldActOnCaptureFailure needs to stop deduplicating a failed
        re-arm, then another, then an honest GiveUp down to a single silent
        report. */
-    uint64_t captureGeneration = atomic_load(&gCaptureSessionGeneration);
+    uint64_t captureGeneration = macVNCLayoutRegistryCurrentSessionGeneration();
     /* No UI here: AppDelegate owns the single permission popup. */
     if (macVNCScreenCaptureFailureHandler)
         macVNCScreenCaptureFailureHandler(likelyPermissionDenial, generation, captureGeneration);
@@ -1111,7 +983,7 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond,
   /* Loaded once, right after publish, on this single-threaded startup path -
      no capture session or watchdog exists yet to publish a newer generation
      out from under this local, so one load is enough for the whole function. */
-  MacVNCDisplayLayout *layout = currentDisplayLayout();
+  const MacVNCDisplayLayout *layout = macVNCLayoutRegistryCurrent();
 
   rfbScreen = rfbGetScreen(&dummyArgc, dummyArgv,
                            layout->width,
@@ -1218,7 +1090,7 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond,
      older session exists yet to invalidate, so unlike rearmCaptures there is
      no ordering requirement on when this happens relative to anything else
      here. */
-  if (!macVNCCaptureSessionBuild(layout, nextCaptureSessionGeneration(),
+  if (!macVNCCaptureSessionBuild(layout, macVNCLayoutRegistryNextSessionGeneration(),
                                  captureFramesPerSecond,
                                  compositeCapturedFrame, reportCaptureFailure,
                                  false /* no client has ever raised the curtain yet */))
@@ -1310,7 +1182,7 @@ anyDisplayCurrentlyActive(void)
 static uint64_t
 freshestFrameStamp(void)
 {
-    MacVNCDisplayLayout *layout = currentDisplayLayout();
+    const MacVNCDisplayLayout *layout = macVNCLayoutRegistryCurrent();
     if (layout->count == 0)
         return 0;
     uint64_t freshest = 0;
@@ -1327,7 +1199,7 @@ freshestFrameStamp(void)
    that a pinned `displayNumber >= 0` had silently resolved to a different
    physical display and logged about it. applySelectionAndBuildLayout() now
    PINS the selection to the display identity it first resolved
-   (gPinnedDisplayID) and never substitutes another one, so that detector's
+   (the registry's pin) and never substitutes another one, so that detector's
    only case (displayNumber >= 0) can no longer fire - before/after are always
    the same identity, or the resolution fails outright and is reported
    through reportCaptureFailure(false). Removed rather than left as dead code. */
@@ -1349,11 +1221,11 @@ rearmCaptures(void)
        OLD session might still deliver (StopAndWait's drain is bounded, and a
        stream whose work never quiesced is deliberately leaked rather than
        freed while a callback may still touch it, per
-       MacVNCCaptureSession.h) must find gCaptureSessionGeneration ALREADY
+       MacVNCCaptureSession.h) must find the registry's session generation ALREADY
        advanced, however early it arrives - even mid-drain, even before the
        new session exists. Claiming it any later would leave exactly that
        window open. Used by whichever branch below actually rebuilds. */
-    uint64_t generation = nextCaptureSessionGeneration();
+    uint64_t generation = macVNCLayoutRegistryNextSessionGeneration();
 
     /* Read BEFORE StopAndWait/Build: this is the only moment that can still
        say whether curtain mode's exclusion was in effect a moment ago, and it
@@ -1387,8 +1259,8 @@ rearmCaptures(void)
        so nothing can publish a newer generation between this load and the
        swap below. Both branches below compare against and read through this
        SAME pointer rather than re-deriving it, for the same reason
-       compositeCapturedFrame loads it once - see gPublishedLayout. */
-    MacVNCDisplayLayout *liveLayout = currentDisplayLayout();
+       compositeCapturedFrame loads it once - see MacVNCLayoutRegistry.c. */
+    const MacVNCDisplayLayout *liveLayout = macVNCLayoutRegistryCurrent();
 
     if (macVNCDisplayLayoutsEqual(liveLayout, &freshLayout)) {
         /* Same shape: rebuild onto the unchanged, already-published layout.
@@ -1419,9 +1291,9 @@ rearmCaptures(void)
             until any in-flight composite finishes, so once it returns
             nothing can still be writing through the OLD width/stride - the
             publish below would otherwise race a composite mid-frame.
-         3. Publish the new layout - via publishDisplayLayout()'s atomic
+         3. Publish the new layout - via macVNCLayoutRegistryPublish()'s atomic
             pointer swap into the OTHER slot, never the in-place
-            `displayLayout = freshLayout` this replaced (see gPublishedLayout
+            `displayLayout = freshLayout` this replaced (see MacVNCLayoutRegistry.c's published layout
             for the race that had with compositeCapturedFrame's unsynchronised
             hot-path read) - and swap frameBufferOne only once the canvas they
             describe exists and no composite can touch the old one, then
@@ -1448,7 +1320,7 @@ rearmCaptures(void)
 
     macVNCCompositorSetScreen(NULL);
     void *oldBuffer = frameBufferOne;
-    MacVNCDisplayLayout *publishedLayout = publishDisplayLayout(&freshLayout);
+    const MacVNCDisplayLayout *publishedLayout = macVNCLayoutRegistryPublish(&freshLayout);
     frameBufferOne = newBuffer;
     rfbNewFramebuffer(rfbScreen, (char *)newBuffer,
                       publishedLayout->width, publishedLayout->height, 8, 3, 4);
@@ -1485,7 +1357,7 @@ rearmCaptures(void)
 static void
 evaluateDeskShapeForRearm(const MacVNCDisplayLayout *fresh)
 {
-    MacVNCDisplayLayout *live = currentDisplayLayout();
+    const MacVNCDisplayLayout *live = macVNCLayoutRegistryCurrent();
     bool equal = live != NULL && macVNCDisplayLayoutsEqual(live, fresh);
 #if defined(MACVNC_ENABLE_TEST_HOOKS)
     if (atomic_load(&gForceDeskShapeDifferentForTesting))
@@ -1777,7 +1649,7 @@ startCapturesForNewClient(void)
         rfbLog("Screen Recording is not granted; refusing to start capture\n");
         pthread_mutex_unlock(&captureControlMutex);
         /* No Build was even attempted here, so there is no fresh capture
-           attempt to identify - pass whatever gCaptureSessionGeneration
+           attempt to identify - pass whatever the registry's session generation
            already holds. Every repeated connection attempt while the
            permission stays denied therefore collapses to ONE alert per
            server run, deliberately: unlike a re-arm's distinct failed
@@ -1787,7 +1659,7 @@ startCapturesForNewClient(void)
            noisier. */
         if (macVNCScreenCaptureFailureHandler)
             macVNCScreenCaptureFailureHandler(true, vncServerCurrentGeneration(),
-                                              atomic_load(&gCaptureSessionGeneration));
+                                              macVNCLayoutRegistryCurrentSessionGeneration());
         return;
     }
     /* Consumed here, once: see gCaptureSessionFreshAtStartup for why the
@@ -1798,13 +1670,13 @@ startCapturesForNewClient(void)
        ALSO requires a published layout to rebuild against: a synthetic test
        that drives this reconciler directly (macVNCReconcileCaptureForTesting)
        without ever running a real ScreenInit has no layout published at all
-       (currentDisplayLayout() == NULL) and no capturers to rebuild in the
+       (macVNCLayoutRegistryCurrent() == NULL) and no capturers to rebuild in the
        first place - rearmCaptures() would have nothing real to compare
        against or Build onto. In production this can never be false while
        gCaptureSessionFreshAtStartup is also false: ScreenInit publishes a
        layout and sets that flag together, in that order, and nothing ever
        un-publishes it back to NULL for the life of the process. */
-    bool needsRebuild = !gCaptureSessionFreshAtStartup && currentDisplayLayout() != NULL;
+    bool needsRebuild = !gCaptureSessionFreshAtStartup && macVNCLayoutRegistryCurrent() != NULL;
     gCaptureSessionFreshAtStartup = false;
     pthread_mutex_unlock(&captureControlMutex);
 
@@ -2482,7 +2354,7 @@ vncServerStartWithResult(const MacVNCServerConfig *config)
     /* Adopt the immutable configuration into the server's private state. */
     viewOnly = config->viewOnly;
     displayNumber = config->displayNumber;
-    atomic_store(&gPinnedDisplayID, 0); /* fresh run: re-pin from position on first resolve */
+    macVNCLayoutRegistryResetPin(); /* fresh run: re-pin from position on first resolve */
     macVNCClientAccessMode = config->clientAccessMode;
     snprintf(macVNCListenAddress, sizeof(macVNCListenAddress), "%s",
              config->listenAddress ? config->listenAddress : "");
@@ -2677,10 +2549,10 @@ macVNCCaptureGiveUpCountForTesting(void)
 void
 macVNCCompositeSyntheticFrameForTesting(uint64_t generation, size_t displayIndex)
 {
-    MacVNCDisplayLayout *layout = currentDisplayLayout();
+    const MacVNCDisplayLayout *layout = macVNCLayoutRegistryCurrent();
     if (displayIndex >= layout->count)
         return;
-    MacVNCDisplayGeometry *geometry = &layout->displays[displayIndex];
+    const MacVNCDisplayGeometry *geometry = &layout->displays[displayIndex];
     int width = geometry->input.pixelWidth;
     int height = geometry->input.pixelHeight;
     size_t stride = (size_t)width * 4;
@@ -2696,7 +2568,7 @@ macVNCCompositeSyntheticFrameForTesting(uint64_t generation, size_t displayIndex
 uint64_t
 macVNCCurrentCaptureGenerationForTesting(void)
 {
-    return atomic_load(&gCaptureSessionGeneration);
+    return macVNCLayoutRegistryCurrentSessionGeneration();
 }
 
 uint64_t
@@ -2716,7 +2588,7 @@ macVNCLastFrameTimestampForTesting(size_t displayIndex)
 size_t
 macVNCCurrentDisplayLayoutCountForTesting(void)
 {
-    return currentDisplayLayout()->count;
+    return macVNCLayoutRegistryCurrent()->count;
 }
 
 /*
