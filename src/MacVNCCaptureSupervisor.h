@@ -119,8 +119,9 @@ void macVNCCaptureSupervisorNoteDeskShapeMayHaveChanged(void);
 
 unsigned macVNCCaptureRearmCountForTesting(void);
 /* Counts a FAILED rearmCaptures() attempt, and a GiveUp resolution,
-   separately from the success-only counter above - see FIX-A/audit item 1
-   and B4's integration test, which is the one place these are read. */
+   separately from the success-only counter above - see ARCHITECTURE.md
+   § CaptureLiveness (the first follow-up's item 1) and
+   `capture_liveness_rearm_failure`, the one test that reads these. */
 unsigned macVNCCaptureRearmFailureCountForTesting(void);
 unsigned macVNCCaptureGiveUpCountForTesting(void);
 

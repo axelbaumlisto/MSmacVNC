@@ -39,30 +39,12 @@ typedef struct {
 extern _Atomic int vncConnectedClients;
 
 /*
- * The narrower count: authenticated clients that are past the first-frame wait
- * and therefore RECEIVING UPDATES.
- *
- * Two counters exist because the two answers are wanted at different moments.
- * `vncConnectedClients` moves the instant a password is accepted, because that
- * is what has to start the captures that produce the first frame. This one
- * moves only after the first-frame wait has ENDED, which is the only count
- * curtain mode may act on: a curtain raised on the earlier number would hide
- * the local screen for up to the readiness timeout while the remote viewer was
- * still looking at a placeholder.
- *
- * "ENDED", NOT "SUCCEEDED", AND THAT IS A DECISION. When the wait times out
- * (INITIAL_READINESS_TIMEOUT_NANOSECONDS, currently 8 s) the client is counted
- * anyway, so a curtain can go up over a viewer that is still holding a
- * placeholder - the same failure shape as counting at password-accept time,
- * bounded to that timeout. The alternative was worse: gating on success would
- * silently disable curtain mode for every viewer whose displays are merely
- * SLOW rather than broken, and the timeout is a ceiling that a healthy warm
- * reconnect never reaches. The genuinely broken case is covered from the other
- * side - the controller re-checks that a capture stream is live on every
- * event and on its heartbeat, and lifts when it is not.
- *
- * Read it rather than the notification below when the question is "is anybody
- * watching right now": the reader is level-triggered, so the notification is
+ * The narrower count: authenticated clients past the first-frame wait,
+ * therefore RECEIVING UPDATES - the only count curtain mode may act on.
+ * Moves when the wait ENDS, not when it SUCCEEDS (a deliberate choice - see
+ * ARCHITECTURE.md § Key seams, macVNCAuthenticatedClientsChangedHandler).
+ * Read this rather than the notification below when the question is "is
+ * anybody watching right now": it is level-triggered, the notification is
  * only a prompt to look again.
  */
 extern _Atomic int vncAuthenticatedClientsReceivingUpdates;
@@ -92,50 +74,34 @@ extern void (*macVNCScreenCaptureFailureHandler)(bool likelyPermissionDenial,
 
 /*
  * Optional handler invoked whenever `vncAuthenticatedClientsReceivingUpdates`
- * may have changed: after a client's first frames are ready (not merely after
- * its password was accepted), after one disconnects, and after a stop zeroes
- * the count.
+ * may have changed. Carries no count on purpose: two notifications raised on
+ * client threads could arrive out of order and invent a connect that never
+ * happened, so the handler re-reads the atomic count itself - see
+ * ARCHITECTURE.md § Key seams for the full reasoning.
  *
- * It carries no count on purpose. Notifications are raised on client threads
- * and the handler is expected to hop to its own queue, where two of them could
- * otherwise arrive in the opposite order to the events that raised them and
- * invent a connect that never happened. `vncAuthenticatedClientsReceivingUpdates`
- * is atomic and is the authoritative answer at the moment the handler reads
- * it, so the notification says only "look again".
- *
- * THREAD: any, including with the server lifecycle lock held. The handler must
- * therefore not block and must not call back into the server core.
+ * THREAD: any, including with the server lifecycle lock held. The handler
+ * must not block and must not call back into the server core.
  */
 extern void (*macVNCAuthenticatedClientsChangedHandler)(void);
 
 /*
- * The password the RUNNING server actually authenticates against, whatever it
- * was configured from - Preferences or MACVNC_PASSWORD_FILE.
- *
- * Exists because curtain mode's way back in must be armed with THAT secret and
- * no other: a curtain raised against one password and unlockable with another
- * is a lockout, and only the core knows which one is installed right now.
- *
- * Writes the password into `buffer` NUL-terminated and returns its length. A
- * server that is not running has none (0). A password that would not fit is
- * refused with 0 rather than truncated, because a truncated secret is a
- * DIFFERENT secret and would arm an escape hatch that does not open.
+ * The password the RUNNING server authenticates against, whatever it was
+ * configured from - Preferences or MACVNC_PASSWORD_FILE. Curtain mode's way
+ * back in must be armed with THAT secret and no other. Writes it into
+ * `buffer` NUL-terminated and returns its length; 0 if not running or if it
+ * would not fit (refused, never truncated - a truncated secret is a
+ * DIFFERENT secret).
  */
 size_t vncServerCopyPassword(char *buffer, size_t size);
 
 
 /*
- * Answers "may we touch screen capture right now?".
- *
- * Injected by the owner of permission policy (AppDelegate) so the server core
- * holds no opinion about TCC: the core must never be the thing that asks macOS
- * for a permission, because touching capture without it is exactly what makes
- * the system raise its own "macVNC wants to record this screen" dialog - the
- * one dialog this app must never cause.
- *
- * Must not prompt and must be safe to call from a client thread. NULL means
- * "unrestricted", which is what unit tests and any embedder without a
- * permission model want.
+ * Answers "may we touch screen capture right now?". Injected by the owner of
+ * permission policy (AppDelegate) so the core never asks macOS for TCC
+ * itself - touching capture without it is what raises the system's own
+ * recording-permission dialog. Must not prompt; safe from a client thread.
+ * NULL means "unrestricted" (unit tests, embedders without a permission
+ * model).
  */
 extern bool (*macVNCCaptureAllowed)(void);
 
@@ -202,44 +168,25 @@ void vncServerStop(void);
 void vncServerDropCaptures(void);
 
 /*
- * Close the listening sockets without a full stop, freeing the port.
- *
- * Used immediately before relaunching: the successor inherits descriptors, and
- * a still-open listener makes its bind() fail. Both the IPv4 and IPv6 listeners
- * are closed and the published port is zeroed, so the UI stops advertising a
- * dead socket.
- *
- * Deliberately NOT vncServerStop(): that joins client threads and waits for
- * in-flight capture work, which can sit behind a system prompt and would freeze
- * the menu bar at the moment the user pressed Restart.
- *
- * Takes the lifecycle lock with a bounded retry, never a blocking wait, and
- * logs if it cannot get it — a concurrent start would otherwise reopen the
- * listener after this returns.
+ * Close the listening sockets without a full stop, freeing the port. Used
+ * immediately before relaunching: a still-open listener makes the successor's
+ * bind() fail. Deliberately NOT vncServerStop(): that joins client threads
+ * and waits for in-flight capture work, which can sit behind a system
+ * prompt and would freeze the menu bar at the moment the user pressed
+ * Restart. Takes the lifecycle lock with a bounded retry, never a blocking
+ * wait, and logs if it cannot get it.
  */
 void vncServerCloseListeners(void);
 
 /*
  * Told that macOS posted NSApplicationDidChangeScreenParametersNotification -
- * call this from AppDelegate's observer, unconditionally, on any thread
- * (main, per the notification's own delivery).
- *
- * A no-op unless a client is currently connected: a change while idle is
- * already covered by the next connect reading the desk fresh. Otherwise
- * debounces (real reconfigurations fire this several times as the desk
- * settles) and, once settled, rebuilds the composite canvas ONLY if the
- * desk actually changed shape - see rearmCaptures() in mac.m, which this
- * reuses rather than duplicating. Never wakes a display, never restarts the
- * server, never touches the listener or auth: on failure the existing
- * capture-failure path (reportCaptureFailure) is what runs, same as every
- * other re-arm trigger.
- *
- * Closes the one gap the capture-liveness watchdog cannot: a display that is
- * RESIZED rather than silenced keeps delivering frames (SCStreamConfiguration
- * pins width/height at Build time), so nothing about a mid-session
- * reconfiguration looks like silence - measured on the installed build,
- * where it produced zero re-arms and a canvas stuck at the pre-change size
- * while frames kept flowing. See .pi/plans/capture-liveness.md (FIX-D).
+ * call this from AppDelegate's observer, unconditionally, on any thread.
+ * A no-op unless a client is connected (idle is covered by the next
+ * connect). Otherwise debounces, then rebuilds ONLY if the desk actually
+ * changed shape, reusing rearmCaptures() in mac.m rather than duplicating
+ * it. Never wakes a display, never restarts the server or touches the
+ * listener/auth. Closes the one gap the capture-liveness watchdog cannot -
+ * see ARCHITECTURE.md § CaptureLiveness (FIX-D).
  */
 void vncServerNoteDeskShapeMayHaveChanged(void);
 
@@ -337,17 +284,12 @@ bool macVNCServerHasLifecycleResourcesForTesting(void);
 
 /*
  * A synthetic client, for the ONE window that has no other way of being
- * observed: between "this client authenticated" and "this client is receiving
- * updates" there is a wait of up to INITIAL_READINESS_TIMEOUT_NANOSECONDS, and
- * what the two counters do inside it is exactly what curtain mode depends on.
- *
- * `macVNCBeginClientForTesting(false)` is a client still inside that wait;
- * -ReceivedFirstFrames ends it; -End is the disconnect. All three run the same
- * bookkeeping the real client paths run, so deleting a rule there cannot leave
- * a test asserting against a private copy of it.
- *
- * The returned handle is opaque and is freed by macVNCEndClientForTesting().
- * No capture reconciliation happens, so none of this needs a display.
+ * observed: between "authenticated" and "receiving updates" there is a wait
+ * of up to INITIAL_READINESS_TIMEOUT_NANOSECONDS, and what the two counters
+ * do inside it is what curtain mode depends on. `-BeginClientForTesting(false)`
+ * is a client still inside that wait; `-ReceivedFirstFrames` ends it; `-End`
+ * is the disconnect - all three run the same bookkeeping the real client
+ * paths run. Handle is opaque, freed by `-EndClientForTesting()`.
  */
 void *macVNCBeginClientForTesting(bool receivingUpdates);
 void macVNCClientReceivedFirstFramesForTesting(void *client);

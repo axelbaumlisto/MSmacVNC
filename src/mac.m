@@ -162,20 +162,12 @@ static pthread_mutex_t clientLifecycleMutex = PTHREAD_MUTEX_INITIALIZER;
    clientLifecycleMutex, so no lock-order relation can arise between them. */
 static pthread_mutex_t captureControlMutex = PTHREAD_MUTEX_INITIALIZER;
 static bool gCapturesRunning = false;
-/* True only for the SINGLE connect that immediately follows ScreenInit's own
-   WAKING resolveDisplayLayout() - that Build is already as fresh as this
-   server run has ever been, so the very first client must not immediately
-   discard it and pay a second, non-waking rebuild for nothing. Consumed
-   (cleared) the first time startCapturesForNewClient() runs, whether or not
-   that connect succeeds - it describes ONE upcoming connect, not a mode.
-   Every LATER arrival - after keep-warm's own stop, or vncServerDropCaptures()
-   following a capture failure - finds the SAME ScreenCapturer set ScreenInit
-   or the last rearmCaptures() built, silently bound to whatever the desk
-   looked like back then (audit_integration.md items 2 and 3): a monitor added
-   or removed while nobody was connected stayed invisible to the composite
-   canvas forever, and a capture failure's KeepServing recovery kept
-   restarting streams already known dead. Both close the same way a live
-   re-arm already does: re-read the desk and rebuild before starting. */
+/* True only for the SINGLE connect immediately following ScreenInit's own
+   waking resolveDisplayLayout() - that Build is already fresh, so the very
+   first client must not pay a second, non-waking rebuild for nothing.
+   Consumed once, whether or not that connect succeeds. See ARCHITECTURE.md
+   § CaptureLiveness (FIX-B item 1) for why every LATER arrival needs the
+   rebuild this flag skips only for the first. */
 static bool gCaptureSessionFreshAtStartup = false;
 
 /* Keep-warm window: after the last viewer leaves, captures are kept alive for
@@ -249,19 +241,10 @@ static rfbBool macVNCPasswordCheck(rfbClientPtr client,
                                    int length);
 void macVNCTLSHandleVeNCrypt(rfbClientPtr cl);
 
-/*
- * How long a freshly authenticated client waits for the first frame of every
- * display before the server gives up and lets it proceed.
- *
- * This wait is why viewers historically never showed their "no data yet"
- * placeholder (the checkerboard): AUTH_OK is held back until real pixels
- * exist. The budget used to be 3s, chosen when captures were always warm.
- * Measured cold starts on this machine are 1.3-2.1s for two displays - and
- * that margin disappeared once power assertions became session-scoped, since
- * the panel may now be asleep and ScreenCaptureKit has to wake it first.
- * The budget is a CEILING, not a delay: the wait returns the moment every
- * display has delivered, so a warm reconnect still costs 0.00s.
- */
+/* How long a freshly authenticated client waits for every display's first
+   frame before the server gives up and lets it proceed - a CEILING, not a
+   delay. See ARCHITECTURE.md § FirstFrameBudget for the measured cold-start
+   numbers behind this value. */
 #define INITIAL_READINESS_TIMEOUT_NANOSECONDS (8ULL * NSEC_PER_SEC)
 
 /* Number of currently connected clients (read by AppDelegate for status display) */
@@ -272,19 +255,12 @@ _Atomic int vncAuthenticatedClientsReceivingUpdates = 0;
 
 
 
-/*
- * Which displays are ATTACHED, whether or not they happen to be awake.
- *
- * CGGetOnlineDisplayList is the only enumerator that survives display sleep -
- * measured on this desk with both panels off: the active list was empty while
- * the online list still reported both, with correct bounds. It is what gives
- * the wait below a target instead of a threshold.
- *
- * Mirrored secondaries are dropped. The ACTIVE list excludes them; the online
- * list does not, and two displays reporting identical bounds make
- * macVNCBuildDisplayLayout fail as overlapping - so passing them through would
- * turn "the user enabled mirroring" into "the server refuses to start".
- */
+/* Which displays are ATTACHED, whether or not asleep - CGGetOnlineDisplayList
+   is the only enumerator that survives display sleep, giving the wait below
+   a target instead of a threshold. Mirrored secondaries are dropped (the
+   online list, unlike the active list, reports them with identical bounds,
+   which would make macVNCBuildDisplayLayout fail as overlapping). See
+   ARCHITECTURE.md § DisplayReadiness for the measurement behind this. */
 /* The active list as plain ids. Both the wait and its log line need it, and
    writing the CGGetActiveDisplayList dance twice is how the two drift. */
 static size_t
@@ -318,28 +294,14 @@ readOnlineDisplays(uint32_t *out, size_t capacity)
   return kept;
 }
 
-/*
- * Turn the CURRENTLY ACTIVE CoreGraphics display list into MacVNCDisplayInput
- * entries. No waking, no waiting - a plain read of whatever is awake right
- * now, so it is safe to call from a context that must not light a sleeping
- * panel (see the re-arm path below).
- *
- * Split out of readAttachedDisplays() so that path (startup, which must wait
- * for a sleeping desk to wake) and the capture-liveness re-arm path (which
- * must NOT wake one - .pi/plans/display-reconfiguration.md rejected a
- * reconfiguration watcher partly because re-resolving woke the panel at 3am)
- * share this one reading, instead of a second copy that could drift from it.
- *
- * `logEnumeration` gates the one "Found ... display ..." line per display
- * below: FALSE for a probe read that only ever COMPARES against the
- * published layout (FIX-D's debounce evaluation, which runs on every settled
- * screen-parameter notification whether or not the desk actually changed) -
- * printing those lines there logged a full display enumeration on every
- * notification burst even when nothing had changed, which is not a
- * diagnostic, it is noise timed to coincide with one. TRUE for every caller
- * that is either always real (startup) or already committed to an actual
- * rebuild (rearmCaptures' own re-read) - see those call sites for why each
- * chose the value it did. */
+/* Turn the CURRENTLY ACTIVE CoreGraphics display list into MacVNCDisplayInput
+ * entries. No waking, no waiting - safe to call where lighting a sleeping
+ * panel is forbidden (the re-arm path). Shared by startup's waking read and
+ * the non-waking re-arm read, so the two cannot drift apart.
+ * `logEnumeration` gates the "Found ... display ..." log line - FALSE for a
+ * probe that only COMPARES against the published layout, so a settled
+ * notification burst does not log a full enumeration for nothing. See
+ * ARCHITECTURE.md § CaptureLiveness (FIX-E) for the bug this fixed. */
 static rfbBool
 collectDisplayInputs(MacVNCDisplayInput *displays, size_t *count, int *primaryIndex,
                      bool logEnumeration)
@@ -393,19 +355,10 @@ collectDisplayInputs(MacVNCDisplayInput *displays, size_t *count, int *primaryIn
   return TRUE;
 }
 
-/*
- * Enumerate the displays to capture, waiting for the whole desk.
- *
- * This used to break out of its retry loop at the FIRST non-zero active count.
- * On a sleeping desk that is whichever panel woke first: macVNC came up with a
- * 3840x2160 canvas for a 5550x2715 desk and the second monitor stayed invisible
- * to every viewer until the app was restarted by hand. The loop knew a slept
- * screen reports zero - its own comment said so - but had no idea how many to
- * expect, so any partial answer ended it.
- *
- * STARTUP ONLY: this wakes the desk. The re-arm path re-reads with
- * collectDisplayInputs() directly and never calls this function.
- */
+/* Enumerate the displays to capture, waiting for the WHOLE desk to wake -
+ * see ARCHITECTURE.md § DisplayReadiness for the measured bug a
+ * first-non-zero-count loop had. STARTUP ONLY: this wakes the desk; the
+ * re-arm path re-reads with collectDisplayInputs() directly. */
 static rfbBool
 readAttachedDisplays(MacVNCDisplayInput *displays, size_t *count, int *primaryIndex)
 {
@@ -440,26 +393,18 @@ readAttachedDisplays(MacVNCDisplayInput *displays, size_t *count, int *primaryIn
   return collectDisplayInputs(displays, count, primaryIndex, true);
 }
 
-/* Apply the configured selection to an already-read attached-display list and
-   build the composite layout INTO *layout. Shared by startup (fed by the
-   waking readAttachedDisplays()) and re-arm (fed by the non-waking
-   collectDisplayInputs()), so the selection rules - and macVNCBuildDisplayLayout
-   itself - exist in exactly one place regardless of how the desk was read.
-   Does not log the result: callers differ on whether "Capturing N
-   display(s)..." is the right line to emit (a probe made only to COMPARE
-   against the live layout is not a publish), so that stays with them.
+/* Apply the configured selection to an already-read attached-display list
+   and build the composite layout INTO *layout. Shared by startup (waking
+   readAttachedDisplays()) and re-arm (non-waking collectDisplayInputs()),
+   so the selection rules exist in one place regardless of how the desk was
+   read. Does not log: callers differ on whether the result is a publish or
+   only a probe to COMPARE against the live layout.
 
-   E2: a `displayNumber >= 0` selection is resolved by POSITION only the
-   FIRST time this runs in a server run (the registry's pinned display still 0) - every
-   later call selects by the DISPLAY IDENTITY that first resolution picked
-   (macVNCSelectDisplayByID), never by position again, so a desk event that
-   reorders CoreGraphics' enumeration cannot silently hand a live capture to a
-   different physical monitor mid-session. If the pinned display is no longer
-   attached, this refuses rather than substituting whatever else is around -
-   the caller's only recourse is the same reportCaptureFailure(false) path a
-   failed rebuild already uses, never a server stop. -1 (primary) and -2
-   (all) never touch the registry's pin: re-evaluating live on every call is
-   what those settings mean. */
+   E2: `displayNumber >= 0` resolves by POSITION only the first time per
+   server run, then by DISPLAY IDENTITY forever after (never by position
+   again); refuses rather than substitutes if that display vanishes. -1/-2
+   bypass the pin and keep re-evaluating live. See ARCHITECTURE.md §
+   MacVNCLayoutRegistry ("FIX-E") for the incident and proof. */
 static rfbBool
 applySelectionAndBuildLayout(const MacVNCDisplayInput *attached, size_t attachedCount,
                              int primaryIndex, MacVNCDisplayLayout *layout)
@@ -471,19 +416,12 @@ applySelectionAndBuildLayout(const MacVNCDisplayInput *attached, size_t attached
   if (displayNumber >= 0 && pinnedID != 0) {
       uint32_t lookupID = pinnedID;
 #if defined(MACVNC_ENABLE_TEST_HOOKS)
-      /* H1: a test's only way to produce "the pinned display just vanished"
-         without physically unplugging a monitor - see
-         macVNCForcePinnedDisplayGoneForTesting's own comment. Substituted
-         into the LOOKUP id only, so control still flows through the real
-         macVNCSelectDisplayByID() below: it runs its own scan, genuinely
-         misses, and returns MACVNC_DISPLAY_SELECTION_NO_SUCH_DISPLAY - the
-         refusal that follows is the SAME unmocked path a real vanished
-         display takes, not a shortcut around it. 0 (kCGNullDirectDisplay)
-         can never match a real attached display's id (see the registry's pin
-         own comment), so this is guaranteed to miss. `pinnedID` itself -
-         used below for the log line, and left untouched in the registry's pin -
-         is NOT substituted: the pin does not vanish here, only what the
-         enumeration can find. */
+      /* H1: substitutes only the LOOKUP id (never `pinnedID` itself, so the
+         pin does not vanish) with 0 (kCGNullDirectDisplay), which can never
+         match a real display - forcing the SAME unmocked refusal path a
+         real vanished display takes. See
+         macVNCForcePinnedDisplayGoneForTesting's own comment in mac.h for
+         why this beats an early return. */
       if (atomic_load(&gForcePinnedDisplayGoneForTesting))
           lookupID = 0;
 #endif
@@ -681,17 +619,11 @@ static int gCaptureFramesPerSecond;
 static MacVNCEncryptionPolicy gEncryptionPolicy = MacVNCEncryptionOptional;
 
 /*
- * Impose the configured image profile just before this client's update is
- * encoded.
- *
- * This deliberately OVERRIDES what the viewer asked for. Most viewers send
- * their own quality level, so a setting that only applied when they stayed
- * silent would do nothing on the devices people actually use. The honest way
- * to disagree is the "viewer" profile, which does not install this hook at all.
- *
- * displayHook is the only seam available: LibVNCServer has no hook after
- * SetEncodings, but it calls this one before every framebuffer update
- * (rfb.h:307), by which point the client's levels are ours to set.
+ * Imposes the configured image profile just before this client's update is
+ * encoded, deliberately OVERRIDING what the viewer asked for (the "viewer"
+ * profile is how to opt out). displayHook is the only seam LibVNCServer
+ * offers after SetEncodings. See ARCHITECTURE.md's "Image profile is
+ * imposed per frame, on purpose" for why and the live-measured proof.
  */
 static void
 applyImageProfile(rfbClientPtr cl)
@@ -757,18 +689,12 @@ compositeCapturedFrame(MacVNCCaptureFrameOrigin origin,
         return true;
 
     /* The ONE write point for "a frame arrived", delegated to
-       MacVNCCaptureSupervisor (step 8) - see its header for the exact two
-       atomic ops this does (I7: no more, no lock, no dispatch) and
-       MacVNCCaptureSupervisor.m for the full WHY (silence is
-       freshestFrameStamp(), the MAXIMUM stamp over the layout's displays;
-       the bounded, not absolute, TOCTOU between this store and a watchdog
-       tick's separate lock-free reads; the MIN-to-MAX production bug this
-       reset's other half once caused). The call reaching this function AND
-       matching the current generation is the liveness signal, independent
-       of whether the size check below turns out to match: a stream
-       delivering wrong-sized frames is a different bug from one that
-       stopped delivering anything, and only the watchdog cares about the
-       latter. */
+       MacVNCCaptureSupervisor (step 8; I7: exactly two atomic ops, no lock).
+       Reaching this call with a matching generation IS the liveness signal,
+       independent of the size check below - wrong-sized frames are a
+       different bug from no frames at all. See ARCHITECTURE.md §
+       CaptureLiveness (FIX-C) for the MIN-to-MAX incident and the TOCTOU
+       bound this relies on. */
     macVNCCaptureSupervisorNoteFrame(origin.displayIndex);
 
     /* Copy BY VALUE before using: a concurrent re-arm cannot publish a NEWER
@@ -1033,112 +959,57 @@ anyDisplayCurrentlyActive(void)
  * is what actually fixes the measured incident: a stream restart alone cannot
  * help when the geometry it was restarted onto is no longer the truth.
  */
+/*
+ * Build + Start, the tail every rearmCaptures() branch below ends with:
+ * failure leaves the compositor on whatever screen/frameBuffer it already
+ * had (never a torn-down one - the caller's only recourse on `false` is
+ * reportCaptureFailure(false), never a server stop), success starts
+ * streaming on `layout` immediately. Written once so the two branches below
+ * cannot drift on this shared ending - see ARCHITECTURE.md § CaptureLiveness.
+ */
 static bool
-rearmCaptures(void)
+buildAndStartCapture(const MacVNCDisplayLayout *layout, uint64_t generation,
+                     bool wasExcluded)
 {
-    /* Claim the NEW generation FIRST, before anything else - see
-       nextCaptureSessionGeneration for why order matters here: any frame the
-       OLD session might still deliver (StopAndWait's drain is bounded, and a
-       stream whose work never quiesced is deliberately leaked rather than
-       freed while a callback may still touch it, per
-       MacVNCCaptureSession.h) must find the registry's session generation ALREADY
-       advanced, however early it arrives - even mid-drain, even before the
-       new session exists. Claiming it any later would leave exactly that
-       window open. Used by whichever branch below actually rebuilds. */
-    uint64_t generation = macVNCLayoutRegistryNextSessionGeneration();
-
-    /* Read BEFORE StopAndWait/Build: this is the only moment that can still
-       say whether curtain mode's exclusion was in effect a moment ago, and it
-       is passed to Build below as `desiredExcluded` - which is what keeps
-       macVNCCaptureSessionSelfExcluded() reporting true for the WHOLE rebuild
-       rather than only after it, closing (not just narrowing) the window the
-       curtain's un-debounced heartbeat could otherwise observe. See
-       MacVNCCaptureSession.h's header on macVNCCaptureSessionBuild. */
-    bool wasExcluded = macVNCCaptureSessionSelfExcluded();
-
-    macVNCCaptureSessionStopAndWait();
-    macVNCCaptureSupervisorNoteCapturesStarted();
-
-    /* Re-read the desk WITHOUT waking it: resolveDeskLayoutWithoutWaking()
-       calls collectDisplayInputs(), never readAttachedDisplays(), and a
-       Rearm verdict already implies a client is connected (CaptureLiveness's
-       first rule), so there is no viewer-less desk here to needlessly light
-       up. On failure there is nothing left to retry into - same as a failed
-       rebuild below. */
-    MacVNCDisplayLayout freshLayout;
-    if (!resolveDeskLayoutWithoutWaking(&freshLayout, true)) {
-        rfbErr("Re-arm could not re-read the desk\n");
+    if (!macVNCCaptureSessionBuild(layout, generation, gCaptureFramesPerSecond,
+                                   compositeCapturedFrame, reportCaptureFailure,
+                                   wasExcluded))
         return false;
-    }
+    macVNCCaptureSessionStart();
+    return true;
+}
 
-    /* Loaded once: re-arm is the only writer that ever runs (it is the sole
-       thing scheduled on gCaptureStopQueue, a serial queue, and startup's
-       resolveDisplayLayout() cannot overlap it - the server is already up),
-       so nothing can publish a newer generation between this load and the
-       swap below. Both branches below compare against and read through this
-       SAME pointer rather than re-deriving it, for the same reason
-       compositeCapturedFrame loads it once - see MacVNCLayoutRegistry.c. */
-    const MacVNCDisplayLayout *liveLayout = macVNCLayoutRegistryCurrent();
+/* Same shape: rebuild onto the unchanged, already-published layout - see
+   ScreenInit's own `if (!macVNCCaptureSessionBuild(...)) return FALSE;` for
+   the same call on the same layout at startup. */
+static bool
+rearmSameShape(const MacVNCDisplayLayout *liveLayout, uint64_t generation, bool wasExcluded)
+{
+    return buildAndStartCapture(liveLayout, generation, wasExcluded);
+}
 
-    if (macVNCDisplayLayoutsEqual(liveLayout, &freshLayout)) {
-        /* Same shape: rebuild onto the unchanged, already-published layout.
-           Checked, not discarded: a failed rebuild leaves Count() == 0 (per
-           the session header), and starting anyway would be exactly the
-           silent nothing-happens failure this whole mechanism exists to
-           replace. Mirrors ScreenInit's own
-           `if (!macVNCCaptureSessionBuild(...)) return FALSE;` (this file,
-           above) for the same call, on the same layout. */
-        if (!macVNCCaptureSessionBuild(liveLayout, generation, gCaptureFramesPerSecond,
-                                       compositeCapturedFrame, reportCaptureFailure,
-                                       wasExcluded))
-            return false;
-        macVNCCaptureSessionStart();
-        return true;
-    }
-
-    /* The desk changed shape: swap the canvas before rebuilding capture on
-       the new layout. The order below is deliberate, and every early return
-       from here on leaves the compositor attached to a VALID screen with a
-       VALID (never freed) frameBuffer - the caller's only recourse on
-       `false` is reportCaptureFailure(false), never a server stop, so
-       nothing downstream may assume a torn-down screen.
-         1. Allocate and zero the NEW canvas FIRST, before touching anything
-            published: a failed allocation then leaves the old canvas and the
-            currently published layout completely untouched.
-         2. Detach the compositor: macVNCCompositorSetScreen(NULL) blocks
-            until any in-flight composite finishes, so once it returns
-            nothing can still be writing through the OLD width/stride - the
-            publish below would otherwise race a composite mid-frame.
-         3. Publish the new layout - via macVNCLayoutRegistryPublish()'s atomic
-            pointer swap into the OTHER slot, never the in-place
-            `displayLayout = freshLayout` this replaced (see MacVNCLayoutRegistry.c's published layout
-            for the race that had with compositeCapturedFrame's unsynchronised
-            hot-path read) - and swap frameBufferOne only once the canvas they
-            describe exists and no composite can touch the old one, then
-            rfbNewFramebuffer - LibVNCServer resizes the screen and tells
-            every connected client (NewFBSize/ExtDesktopSize, confirmed in a
-            real TigerVNC handshake), which is why no client needs to be
-            dropped for this.
-         4. macVNCInputSetContext right after: PtrAddEvent maps a client's
-            pointer through the OLD layout/screen until this call, and it is
-            reachable the instant rfbNewFramebuffer returns.
-         5. Re-attach the compositor last, only once the screen it will
-            composite onto is fully described.
-         6. Free the OLD canvas only now: no composite can still be running
-            against it (step 2) and rfbScreen->frameBuffer no longer points at
-            it (step 3), so freeing earlier would be premature and freeing
-            never would leak one canvas per re-arm. */
-    size_t bufSize = (size_t)freshLayout.width * (size_t)freshLayout.height * 4;
+/*
+ * The desk changed shape: swap the canvas, THEN rebuild capture onto it.
+ * Order is deliberate - detach (blocks out any in-flight composite) before
+ * publish, publish before the pointer swap, swap before rfbNewFramebuffer,
+ * re-attach only once the new screen is fully described, free the old
+ * buffer only once nothing can still be reading or writing it. See
+ * ARCHITECTURE.md § CaptureLiveness for the full step-by-step proof.
+ */
+static bool
+swapCanvasAndRearm(const MacVNCDisplayLayout *freshLayout, uint64_t generation, bool wasExcluded)
+{
+    size_t bufSize = (size_t)freshLayout->width * (size_t)freshLayout->height * 4;
     void *newBuffer = calloc(1, bufSize);
     if (!newBuffer) {
         rfbErr("Re-arm could not allocate a %dx%d canvas for the new desk shape\n",
-               freshLayout.width, freshLayout.height);
+               freshLayout->width, freshLayout->height);
         return false;
     }
 
     macVNCCompositorSetScreen(NULL);
     void *oldBuffer = frameBufferOne;
-    const MacVNCDisplayLayout *publishedLayout = macVNCLayoutRegistryPublish(&freshLayout);
+    const MacVNCDisplayLayout *publishedLayout = macVNCLayoutRegistryPublish(freshLayout);
     frameBufferOne = newBuffer;
     rfbNewFramebuffer(rfbScreen, (char *)newBuffer,
                       publishedLayout->width, publishedLayout->height, 8, 3, 4);
@@ -1149,12 +1020,38 @@ rearmCaptures(void)
     rfbLog("Desk shape changed since this session started; rebuilding the composite canvas\n");
     logCapturingLayout(publishedLayout);
 
-    if (!macVNCCaptureSessionBuild(publishedLayout, generation, gCaptureFramesPerSecond,
-                                   compositeCapturedFrame, reportCaptureFailure,
-                                   wasExcluded))
+    return buildAndStartCapture(publishedLayout, generation, wasExcluded);
+}
+
+/*
+ * Stop, re-read the desk, and rebuild onto whichever branch above applies.
+ * See ARCHITECTURE.md § CaptureLiveness for why the generation is claimed
+ * FIRST (before StopAndWait), why `wasExcluded` is read before StopAndWait
+ * too, and why the re-read never wakes the desk.
+ */
+static bool
+rearmCaptures(void)
+{
+    uint64_t generation = macVNCLayoutRegistryNextSessionGeneration();
+    bool wasExcluded = macVNCCaptureSessionSelfExcluded();
+    macVNCCaptureSessionStopAndWait();
+    macVNCCaptureSupervisorNoteCapturesStarted();
+
+    MacVNCDisplayLayout freshLayout;
+    if (!resolveDeskLayoutWithoutWaking(&freshLayout, true)) {
+        rfbErr("Re-arm could not re-read the desk\n");
         return false;
-    macVNCCaptureSessionStart();
-    return true;
+    }
+
+    /* Loaded once, read through this SAME pointer by both branches below:
+       re-arm is the ONLY writer (the sole thing scheduled on gCaptureStopQueue,
+       a serial queue), so nothing can publish a newer generation between
+       this load and the swap below - see ARCHITECTURE.md § CaptureLiveness
+       for why re-deriving it would defeat the pointer swap's point. */
+    const MacVNCDisplayLayout *liveLayout = macVNCLayoutRegistryCurrent();
+    if (macVNCDisplayLayoutsEqual(liveLayout, &freshLayout))
+        return rearmSameShape(liveLayout, generation, wasExcluded);
+    return swapCanvasAndRearm(&freshLayout, generation, wasExcluded);
 }
 
 /* evaluateDeskShapeForRearm(), deskShapeDebounceFired(),
@@ -1254,109 +1151,73 @@ ensureCaptureSupervisorConfigured(void)
 
 /*
  * The actual "start capturing for a newly arrived client" work, split out of
- * reconcileCaptureState() so it can run OFF captureControlMutex.
- *
- * A reconnect after captures were FULLY stopped - keep-warm's own timer
- * already fired, or vncServerDropCaptures() dropped them after a capture
- * failure - must REBUILD, not merely restart, the same ScreenCapturer set:
- * macVNCCaptureSessionStart() only re-opens a stream on whatever displayIDs
- * and composite canvas the last successful Build established, and neither a
- * full keep-warm stop nor a capture-failure drop ever calls Build again on
- * its own (only Reset, which a full SERVER stop performs, does). A desk that
- * changed shape while nobody was connected - a monitor added or removed
- * between sessions, the ordinary way the measured 42-hour incident's own
- * trigger happens - would otherwise stay invisible to the composite canvas
- * forever, and a capture failure's KeepServing recovery would keep
- * restarting streams already known dead (audit_integration.md items 2 and
- * 3). Both close the same way a live re-arm already does: re-read the desk
- * and rebuild before starting - see rearmCaptures(), reused here rather than
- * a third copy of its same-shape/different-shape logic.
- *
- * That rebuild's StopAndWait blocks for bounded but real seconds, which must
- * never happen with captureControlMutex held (see rearmCaptures()'s own
- * header note) - this is why reconcileCaptureState() calls this OFF its
- * lock, dispatched synchronously onto gCaptureStopQueue: the SAME serial
- * queue rearmCaptures() has always run on exclusively, so two clients
- * connecting together cannot rebuild the session twice at once. The re-check
- * below is what makes the SECOND arrival, queued behind the first, a no-op
- * instead of a redundant rebuild: by the time it runs, the first arrival has
- * already flipped gCapturesRunning.
+ * reconcileCaptureState() so it can run OFF captureControlMutex. A reconnect
+ * after captures were FULLY stopped must REBUILD, not merely restart -
+ * neither keep-warm's stop nor a capture-failure drop ever calls Build
+ * again on its own - so this reuses rearmCaptures()'s same-shape/
+ * different-shape logic rather than a third copy of it. See
+ * ARCHITECTURE.md § CaptureLiveness ("FIX-B") for the 42-hour incident this
+ * closed and why the rebuild is serialised on gCaptureStopQueue, off the
+ * lock, with a queued second arrival becoming a no-op.
  */
-static void
-startCapturesForNewClient(void)
+/*
+ * Locked decision for a newly arrived client: skip, refuse (Screen Recording
+ * not granted - alerts once per server run, not per attempt), or proceed
+ * with whichever rebuild `needsRebuild` calls for. Entered/left with
+ * captureControlMutex held exactly where the caller always held it. See
+ * ARCHITECTURE.md § CaptureLiveness ("FIX-B") for why
+ * gCaptureSessionFreshAtStartup is consumed here, once.
+ */
+typedef struct {
+    bool proceed;
+    bool needsRebuild;
+} MacVNCClientArmDecision;
+
+static MacVNCClientArmDecision
+lockAndDecideClientArm(void)
 {
+    MacVNCClientArmDecision decision = { .proceed = false, .needsRebuild = false };
     pthread_mutex_lock(&captureControlMutex);
     if (gCapturesRunning || atomic_load(&vncConnectedClients) == 0) {
         pthread_mutex_unlock(&captureControlMutex);
-        return;
+        return decision;
     }
     if (!captureIsAllowed()) {
-        /* Never touch capture without the permission: doing so is what makes
-           macOS raise its own dialog. The decision belongs to the permission
-           owner, injected via macVNCCaptureAllowed. */
         rfbLog("Screen Recording is not granted; refusing to start capture\n");
         pthread_mutex_unlock(&captureControlMutex);
-        /* No Build was even attempted here, so there is no fresh capture
-           attempt to identify - pass whatever the registry's session generation
-           already holds. Every repeated connection attempt while the
-           permission stays denied therefore collapses to ONE alert per
-           server run, deliberately: unlike a re-arm's distinct failed
-           attempts, a denied permission does not change from one connection
-           attempt to the next, and the fix is the user's to make -
-           re-nagging on every attempt would not be more honest, only
-           noisier. */
         if (macVNCScreenCaptureFailureHandler)
             macVNCScreenCaptureFailureHandler(true, vncServerCurrentGeneration(),
                                               macVNCLayoutRegistryCurrentSessionGeneration());
-        return;
+        return decision;
     }
-    /* Consumed here, once: see gCaptureSessionFreshAtStartup for why the
-       VERY FIRST connect after ScreenInit must not pay a second, non-waking
-       rebuild for a layout that is already as fresh as this run has ever
-       been, while every later arrival needs exactly that rebuild.
-
-       ALSO requires a published layout to rebuild against: a synthetic test
-       that drives this reconciler directly (macVNCReconcileCaptureForTesting)
-       without ever running a real ScreenInit has no layout published at all
-       (macVNCLayoutRegistryCurrent() == NULL) and no capturers to rebuild in the
-       first place - rearmCaptures() would have nothing real to compare
-       against or Build onto. In production this can never be false while
-       gCaptureSessionFreshAtStartup is also false: ScreenInit publishes a
-       layout and sets that flag together, in that order, and nothing ever
-       un-publishes it back to NULL for the life of the process. */
-    bool needsRebuild = !gCaptureSessionFreshAtStartup && macVNCLayoutRegistryCurrent() != NULL;
+    decision.proceed = true;
+    decision.needsRebuild = !gCaptureSessionFreshAtStartup && macVNCLayoutRegistryCurrent() != NULL;
     gCaptureSessionFreshAtStartup = false;
     pthread_mutex_unlock(&captureControlMutex);
+    return decision;
+}
 
-    /* Awake-while-watched: the power assertions live as long as a viewer is
-       connected, not as long as the LISTENER runs. With "Start at Login" the
-       server may run for weeks; holding the assertions that whole time would
-       be the pmset bug again with a nicer implementation. */
-    if (dimmingInit() != 0)
-        rfbLog("Power assertion failed; machine may idle-sleep during the session\n");
+/* Off captureControlMutex, exactly like the two branches this replaces: a
+   rebuild's StopAndWait blocks for bounded but real seconds and must never
+   run with the lock held - see rearmCaptures(). A fresh watch on a fresh
+   clock either way (rearmCaptures() resets it on the rebuild path; done
+   here, once, for the plain-restart path it does not cover). */
+static bool
+armCaptureSession(bool needsRebuild)
+{
+    if (needsRebuild)
+        return rearmCaptures();
+    macVNCCaptureSessionStart();
+    macVNCCaptureSupervisorNoteCapturesStarted();
+    return true;
+}
 
-    bool ok;
-    if (needsRebuild) {
-        /* rearmCaptures() claims its own generation, stops (a StopAndWait on
-           an already-stopped session is a harmless no-op), re-reads the desk
-           WITHOUT waking it - countClientForCaptureLocked() already called
-           macVNCWakeDisplays() for this very client before
-           reconcileCaptureState() ran, so there is nothing this would need to
-           wake that is not already on its way up - and rebuilds onto
-           whatever the desk turns out to be, same-shape or not. */
-        ok = rearmCaptures();
-    } else {
-        macVNCCaptureSessionStart();
-        /* A fresh watch on a fresh clock: whatever the previous run's streams
-           did or did not deliver is not this run's problem, and starting the
-           grace window from a stale gCapturesStartedNs would let the
-           watchdog fire on its very first tick. rearmCaptures() already does
-           this same reset for the needsRebuild branch above; done here, once,
-           for the one case it does not cover. */
-        macVNCCaptureSupervisorNoteCapturesStarted();
-        ok = true;
-    }
-
+/* Relocks to publish the outcome: failure reports through the same path
+   every other capture failure uses; success flips gCapturesRunning and arms
+   the watchdog under the same lock span the pre-split code always used. */
+static void
+finishClientArm(bool ok)
+{
     pthread_mutex_lock(&captureControlMutex);
     if (!ok) {
         pthread_mutex_unlock(&captureControlMutex);
@@ -1374,18 +1235,100 @@ startCapturesForNewClient(void)
     pthread_mutex_unlock(&captureControlMutex);
 }
 
+static void
+startCapturesForNewClient(void)
+{
+    MacVNCClientArmDecision decision = lockAndDecideClientArm();
+    if (!decision.proceed)
+        return;
+
+    /* Awake-while-watched: the power assertions live as long as a viewer is
+       connected, not as long as the LISTENER runs - see ARCHITECTURE.md's
+       MacVNCPowerMgmt entry for the pmset bug this replaced. */
+    if (dimmingInit() != 0)
+        rfbLog("Power assertion failed; machine may idle-sleep during the session\n");
+
+    bool ok = armCaptureSession(decision.needsRebuild);
+    finishClientArm(ok);
+}
+
+/*
+ * Drives captures to match the one invariant: they run iff at least one
+ * authenticated client is connected. Called AFTER releasing
+ * clientLifecycleMutex, re-reading the atomic count under its own lock, so
+ * whichever of a racing connect/disconnect takes the lock last applies the
+ * settled count. See ARCHITECTURE.md's Concurrency model §
+ * captureControlMutex for why the two locks are never held together.
+ */
+/*
+ * Schedules the actual stop 30s out and returns immediately - called with
+ * captureControlMutex already held, matching reconcileCaptureState()'s own
+ * span; the timer's own handler relocks separately when it fires, seconds
+ * later, exactly as this code always has. macVNCMonotonicNow(), NOT
+ * macVNCUptimeNow(): the dispatch_source timer fires in sleep-inclusive
+ * (continuous) time regardless of which clock the deadline uses, so the
+ * deadline must agree with it - see FirstFrameBudget.h's own comment on the
+ * two clocks' separate purposes.
+ */
+static void
+scheduleKeepWarmStop(void)
+{
+    macVNCEnsureStopQueue();
+#if defined(MACVNC_ENABLE_TEST_HOOKS)
+    uint64_t warm = atomic_load(&gCaptureKeepWarmOverrideNs);
+#else
+    uint64_t warm = MACVNC_CAPTURE_KEEP_WARM_NANOSECONDS;
+#endif
+    uint64_t deadline = macVNCMonotonicNow() + warm;
+    atomic_store(&gCaptureWarmDeadlineNs, deadline);
+    __block dispatch_source_t timer = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_TIMER, 0, 0, gCaptureStopQueue);
+    dispatch_source_set_timer(timer,
+        dispatch_time(DISPATCH_TIME_NOW, (int64_t)warm),
+        DISPATCH_TIME_FOREVER, 0);
+    dispatch_source_set_event_handler(timer, ^{
+        dispatch_source_cancel(timer); /* one-shot */
+        dispatch_release(timer); /* cancel stops the runtime retain */
+        pthread_mutex_lock(&captureControlMutex);
+        bool due = atomic_load(&gCaptureWarmDeadlineNs) != 0 &&
+                   macVNCMonotonicNow() >=
+                       atomic_load(&gCaptureWarmDeadlineNs);
+        bool stillRunning = gCapturesRunning;
+        bool stillWanted = atomic_load(&vncConnectedClients) > 0;
+        if (due && stillRunning && !stillWanted) {
+            gCapturesRunning = false;
+            atomic_store(&gCaptureWarmDeadlineNs, 0);
+            /* Under the same lock as the write above: a plain pointer
+               toggled from here and from the reconnect branch with no
+               shared lock would race. */
+            macVNCCaptureSupervisorDisarm();
+        } else {
+            due = false; /* reconnected meanwhile: keep warm wins */
+        }
+        pthread_mutex_unlock(&captureControlMutex);
+        if (!due)
+            return;
+#if defined(MACVNC_ENABLE_TEST_HOOKS)
+        atomic_fetch_add(&gCaptureStopCount, 1);
+#endif
+        dimmingShutdown();
+        /* Paired with the assertions, not with the server stop - see
+           ARCHITECTURE.md's MacVNCDisplayWake entry for the leaked-assertion
+           bug this replaced. */
+        macVNCReleaseDisplayAssertion();
+        macVNCCaptureSessionStopAndWait();
+        macVNCInputResetModifiers();
+        rfbLog("Capture keep-warm window elapsed; %lu display captures stopped\n",
+               (unsigned long)macVNCCaptureSessionCount());
+    });
+    dispatch_resume(timer);
+}
+
 /*
  * Drives captures to match the one invariant that matters: they run if and only
- * if at least one authenticated client is connected.
- *
- * Both the connect and disconnect paths call this AFTER updating the count and
- * AFTER releasing clientLifecycleMutex - stopping can wait seconds for
- * in-flight ScreenCaptureKit work, and holding the client lock across that
- * would stall every other client thread, including a reconnect.
- *
- * Serialised on its own lock and re-reading the atomic count, so a disconnect
- * racing a reconnect cannot leave captures stopped while a client is watching:
- * whichever call takes the lock last applies the settled count.
+ * if at least one authenticated client is connected. See ARCHITECTURE.md's
+ * CaptureLiveness/MacVNCClamshellPolicy entries for why the clamshell
+ * reconciliation below runs unconditionally and outside the lock.
  */
 static void reconcileCaptureState(void)
 {
@@ -1396,98 +1339,20 @@ static void reconcileCaptureState(void)
     if (shouldStartNewSession) {
         atomic_store(&gCaptureWarmDeadlineNs, 0); /* reconnect beats the timer */
     } else if (!wanted && gCapturesRunning) {
-        /* Keep warm: schedule the real stop 30s out. The decision here stays
-           instant and lock-consistent; the stop itself runs OFF the control
-           mutex (it waits seconds for in-flight SCK work).
-
-           Deliberately macVNCMonotonicNow(), NOT macVNCUptimeNow(): the
-           dispatch_source timer below is itself scheduled in sleep-inclusive
-           (continuous) time by the OS and will not fire until that much real
-           time, asleep or not, has passed - comparing its firing against an
-           awake-only deadline could read as "not due yet" right when this
-           ONE-SHOT timer fires, with nothing left to ever re-check. The
-           watchdog's clock and this one answer different questions on
-           purpose; see macVNCMonotonicNow()'s comment. */
-        macVNCEnsureStopQueue();
-#if defined(MACVNC_ENABLE_TEST_HOOKS)
-        uint64_t warm = atomic_load(&gCaptureKeepWarmOverrideNs);
-#else
-        uint64_t warm = MACVNC_CAPTURE_KEEP_WARM_NANOSECONDS;
-#endif
-        uint64_t deadline = macVNCMonotonicNow() + warm;
-        atomic_store(&gCaptureWarmDeadlineNs, deadline);
-        __block dispatch_source_t timer = dispatch_source_create(
-            DISPATCH_SOURCE_TYPE_TIMER, 0, 0, gCaptureStopQueue);
-        dispatch_source_set_timer(timer,
-            dispatch_time(DISPATCH_TIME_NOW, (int64_t)warm),
-            DISPATCH_TIME_FOREVER, 0);
-        dispatch_source_set_event_handler(timer, ^{
-            dispatch_source_cancel(timer); /* one-shot */
-            dispatch_release(timer); /* cancel stops the runtime retain */
-            pthread_mutex_lock(&captureControlMutex);
-            bool due = atomic_load(&gCaptureWarmDeadlineNs) != 0 &&
-                       macVNCMonotonicNow() >=
-                           atomic_load(&gCaptureWarmDeadlineNs);
-            bool stillRunning = gCapturesRunning;
-            bool stillWanted = atomic_load(&vncConnectedClients) > 0;
-            if (due && stillRunning && !stillWanted) {
-                gCapturesRunning = false;
-                atomic_store(&gCaptureWarmDeadlineNs, 0);
-                /* Under the same lock as the write above: a plain pointer
-                   toggled from here and from the reconnect branch with no
-                   shared lock would race. */
-                macVNCCaptureSupervisorDisarm();
-            } else {
-                due = false; /* reconnected meanwhile: keep warm wins */
-            }
-            pthread_mutex_unlock(&captureControlMutex);
-            if (!due)
-                return;
-#if defined(MACVNC_ENABLE_TEST_HOOKS)
-            atomic_fetch_add(&gCaptureStopCount, 1);
-#endif
-            dimmingShutdown();
-            /* Paired with the assertions, not with the server stop. This is a
-               UserIsActive assertion, and holding it with no viewer connected
-               is a caffeinate by another name - measured on a live machine as
-               "macVNC remote session" held for hours after the last client
-               left, which by itself stopped the display ever idle-sleeping. */
-            macVNCReleaseDisplayAssertion();
-            macVNCCaptureSessionStopAndWait();
-            macVNCInputResetModifiers();
-            rfbLog("Capture keep-warm window elapsed; %lu display captures stopped\n",
-                   (unsigned long)macVNCCaptureSessionCount());
-        });
-        dispatch_resume(timer);
+        scheduleKeepWarmStop();
     }
     pthread_mutex_unlock(&captureControlMutex);
 
     if (shouldStartNewSession) {
         /* Off the lock entirely: startCapturesForNewClient() may run
            rearmCaptures(), which blocks for bounded StopAndWait work and must
-           never run with captureControlMutex held - see rearmCaptures()'s own
-           header note and startCapturesForNewClient()'s. Synchronous, not
-           async: the caller (prepareAuthenticatedClient) waits for first
-           frames right after this returns, and starting that wait before the
-           rebuild has even begun would just make it time out instead. */
+           never run with captureControlMutex held. Synchronous, not async:
+           the caller (prepareAuthenticatedClient) waits for first frames
+           right after this returns. */
         macVNCEnsureStopQueue();
         dispatch_sync(gCaptureStopQueue, ^{ startCapturesForNewClient(); });
     }
 
-    /* Closed-display mode is reconciled here, unconditionally and OUTSIDE the
-       lock, and both properties were earned.
-
-       Unconditionally, because the two branches above are edge-triggered on
-       CAPTURE state, not on the client count: a viewer reconnecting inside the
-       30 s keep-warm window takes neither branch, so a re-evaluation hung off
-       them would silently skip that session. It also makes the release happen
-       when the last viewer actually leaves rather than 30 s later, which is
-       what the Preferences text promises.
-
-       Outside the lock, because this does a synchronous cfprefsd round trip and
-       three IOKit calls, and captureControlMutex serialises every connect and
-       disconnect. The stop branch already unlocks before its slow work for the
-       same reason. */
     macVNCClamshellReevaluate();
 }
 
@@ -2211,17 +2076,12 @@ macVNCCurrentDisplayLayoutCountForTesting(void)
 
 /*
  * A synthetic client, so the window between "authenticated" and "receiving
- * updates" - in production the first-frame wait, which can be seconds - can be
- * driven without a socket, a display or a viewer.
- *
- * These go through the SAME countClient*Locked/uncountClientLocked functions
- * the real client paths use, which is the whole point: a hook that
- * re-implemented the counting would let the rules it is protecting be deleted
- * while the test stayed green.
- *
- * Deliberately does NOT reconcile captures - that is the caller's job in
- * production and is a different rule - so a test of the counters needs no
- * ScreenCaptureKit at all.
+ * updates" (the first-frame wait) can be driven without a socket, display or
+ * viewer. Goes through the SAME countClient*Locked/uncountClientLocked
+ * functions the real paths use, so a hook that re-implemented the counting
+ * couldn't let the rules it tests be deleted while staying green. Does NOT
+ * reconcile captures - the caller's job in production - so no
+ * ScreenCaptureKit is needed here.
  */
 void *
 macVNCBeginClientForTesting(bool receivingUpdates)
