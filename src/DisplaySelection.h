@@ -43,3 +43,30 @@ macVNCSelectDisplays(const MacVNCDisplayInput *available,
                      int displayNumber,
                      MacVNCDisplayInput *selected,
                      size_t *selectedCount);
+
+/*
+ * Picks the single entry in `available` whose displayID equals
+ * `pinnedDisplayID`, regardless of where it sits in the list.
+ *
+ * A `displayNumber >= 0` selection is resolved by POSITION only once, the
+ * first time a run sees the desk (macVNCSelectDisplays above); every later
+ * re-resolution - a capture-liveness re-arm, mid-session - must follow the
+ * DISPLAY IDENTITY that first resolution picked, not whatever now sits at
+ * that same position, because a desk event (unplug/replug in a different
+ * order, a new display enumerated ahead of an existing one) can reorder
+ * CoreGraphics' list without the user ever touching the pinned setting.
+ * Selecting by position on every re-arm would silently move a live capture
+ * to a different physical monitor; this function is what makes "follow the
+ * display, not the slot" possible to test without CoreGraphics.
+ *
+ * Never substitutes a different display: MACVNC_DISPLAY_SELECTION_NO_SUCH_DISPLAY
+ * when `pinnedDisplayID` is not currently attached, exactly as a
+ * caller-visible "the specific thing you asked to keep watching is gone"
+ * rather than a silent switch to whatever else happens to be around.
+ */
+MacVNCDisplaySelectionResult
+macVNCSelectDisplayByID(const MacVNCDisplayInput *available,
+                        size_t availableCount,
+                        uint32_t pinnedDisplayID,
+                        MacVNCDisplayInput *selected,
+                        size_t *selectedCount);

@@ -99,6 +99,58 @@ int main(void)
     assert(macVNCSelectDisplays(available, 3, 0, MACVNC_DISPLAY_ALL, selected, NULL) ==
            MACVNC_DISPLAY_SELECTION_UNSUPPORTED_COUNT);
 
+    /* --- macVNCSelectDisplayByID: pinned-identity re-resolution --- */
+
+    /* Pinned id present: found regardless of primaryIndex, which this
+       function does not even take - identity, not "is it main", is the whole
+       point. */
+    count = 999;
+    assert(macVNCSelectDisplayByID(available, 3, 22, selected, &count) ==
+           MACVNC_DISPLAY_SELECTION_OK);
+    assert(count == 1);
+    assert(selected[0].displayID == 22);
+
+    /* Pinned id absent: refused, never silently substituting a different
+       physical display for the one that vanished. */
+    count = 999;
+    assert(macVNCSelectDisplayByID(available, 3, 44, selected, &count) ==
+           MACVNC_DISPLAY_SELECTION_NO_SUCH_DISPLAY);
+    assert(count == 0);
+
+    /* Id present but at a DIFFERENT index than before - the exact reordering
+       a hot-unplug/replug produces. Same three ids, ids 22 and 33 swapped
+       position: the pinned id 33 used to sit at index 2 and now sits at
+       index 1, and must still resolve to display 33, not to whatever now
+       occupies index 2. */
+    MacVNCDisplayInput reordered[3] = {
+        available[0],
+        available[2],
+        available[1],
+    };
+    count = 999;
+    assert(macVNCSelectDisplayByID(reordered, 3, 33, selected, &count) ==
+           MACVNC_DISPLAY_SELECTION_OK);
+    assert(count == 1);
+    assert(selected[0].displayID == 33);
+
+    /* No displays attached (count poisoned first, per the header's promise). */
+    count = 999;
+    assert(macVNCSelectDisplayByID(available, 0, 22, selected, &count) ==
+           MACVNC_DISPLAY_SELECTION_UNSUPPORTED_COUNT);
+    assert(count == 0);
+
+    /* NULL arguments must not crash. */
+    count = 999;
+    assert(macVNCSelectDisplayByID(NULL, 3, 22, selected, &count) ==
+           MACVNC_DISPLAY_SELECTION_UNSUPPORTED_COUNT);
+    assert(count == 0);
+    count = 999;
+    assert(macVNCSelectDisplayByID(available, 3, 22, NULL, &count) ==
+           MACVNC_DISPLAY_SELECTION_UNSUPPORTED_COUNT);
+    assert(count == 0);
+    assert(macVNCSelectDisplayByID(available, 3, 22, selected, NULL) ==
+           MACVNC_DISPLAY_SELECTION_UNSUPPORTED_COUNT);
+
     printf("test_display_selection: all assertions passed\n");
     return 0;
 }

@@ -89,6 +89,17 @@ static void *frameBufferOne;
  * by vncServerStart() from the caller's MacVNCServerConfig. */
 static rfbBool viewOnly = FALSE;
 static int displayNumber = -1;               /* -2 all, -1 primary, >=0 one. */
+/* E2: once a `displayNumber >= 0` selection has been resolved by POSITION for
+   the first time in a server run, this remembers the concrete display it
+   picked, so every LATER re-resolution (a capture-liveness re-arm, mid-
+   session) follows that identity rather than re-reading the same numeric
+   position - which a desk event can silently hand to a different physical
+   monitor. 0 (kCGNullDirectDisplay) means "not yet pinned this run": real
+   CGDirectDisplayID values are never 0. Reset to 0 at every server (re)start,
+   alongside `displayNumber` itself - see vncServerStart. -1 (primary) and -2
+   (all) never populate this; they keep re-evaluating live, which is what
+   those settings mean. */
+static uint32_t gPinnedDisplayID;
 static char macVNCListenAddress[MACVNC_LISTEN_ADDRESS_MAX] = {0};
 static char macVNCAllowedClients[MACVNC_ALLOWED_CLIENTS_MAX] = {0};
 static MacVNCClientAccessMode macVNCClientAccessMode = MACVNC_CLIENT_ACCESS_FAIL_CLOSED;
@@ -536,9 +547,20 @@ readOnlineDisplays(uint32_t *out, size_t capacity)
  * must NOT wake one - .pi/plans/display-reconfiguration.md rejected a
  * reconfiguration watcher partly because re-resolving woke the panel at 3am)
  * share this one reading, instead of a second copy that could drift from it.
- */
+ *
+ * `logEnumeration` gates the one "Found ... display ..." line per display
+ * below: FALSE for a probe read that only ever COMPARES against the
+ * published layout (FIX-D's debounce evaluation, which runs on every settled
+ * screen-parameter notification whether or not the desk actually changed) -
+ * printing those lines there logged a full display enumeration on every
+ * notification burst even when nothing had changed, which is not a
+ * diagnostic, it is noise timed to coincide with one. TRUE for every caller
+ * that is either always real (startup) or already committed to an actual
+ * rebuild (rearmCaptures' own re-read) - see those call sites for why each
+ * chose the value it did. */
 static rfbBool
-collectDisplayInputs(MacVNCDisplayInput *displays, size_t *count, int *primaryIndex)
+collectDisplayInputs(MacVNCDisplayInput *displays, size_t *count, int *primaryIndex,
+                     bool logEnumeration)
 {
   CGDirectDisplayID ids[MACVNC_MAX_DISPLAYS];
   CGDisplayCount reported = 0;
@@ -575,12 +597,15 @@ collectDisplayInputs(MacVNCDisplayInput *displays, size_t *count, int *primaryIn
       /* rfbLog, not printf. These lines used to go to stdout, and macVNC is
          launched with `open`, which captures only stderr - so the one piece of
          diagnostic output that says which monitors the server actually found
-         was invisible in the log exactly when a monitor was missing. */
-      rfbLog("Found %s display %zu id=%u at (%.0f,%.0f), logical %.0fx%.0f, pixels %dx%d\n",
-             ids[i] == mainID ? "primary" : "secondary", i, ids[i],
-             displays[i].logicalX, displays[i].logicalY,
-             displays[i].logicalWidth, displays[i].logicalHeight,
-             displays[i].pixelWidth, displays[i].pixelHeight);
+         was invisible in the log exactly when a monitor was missing. Gated on
+         logEnumeration: a caller that is only comparing, not acting, gets this
+         same list silently - see this function's header comment. */
+      if (logEnumeration)
+          rfbLog("Found %s display %zu id=%u at (%.0f,%.0f), logical %.0fx%.0f, pixels %dx%d\n",
+                 ids[i] == mainID ? "primary" : "secondary", i, ids[i],
+                 displays[i].logicalX, displays[i].logicalY,
+                 displays[i].logicalWidth, displays[i].logicalHeight,
+                 displays[i].pixelWidth, displays[i].pixelHeight);
   }
   *count = reported;
   return TRUE;
@@ -629,7 +654,8 @@ readAttachedDisplays(MacVNCDisplayInput *displays, size_t *count, int *primaryIn
       rfbLog("Display %u is attached but did not wake in time; it will not be "
              "part of this session\n", missing[i]);
 
-  return collectDisplayInputs(displays, count, primaryIndex);
+  /* Startup: always a real resolution, never a probe - log every display. */
+  return collectDisplayInputs(displays, count, primaryIndex, true);
 }
 
 /* Apply the configured selection to an already-read attached-display list and
@@ -639,7 +665,19 @@ readAttachedDisplays(MacVNCDisplayInput *displays, size_t *count, int *primaryIn
    itself - exist in exactly one place regardless of how the desk was read.
    Does not log the result: callers differ on whether "Capturing N
    display(s)..." is the right line to emit (a probe made only to COMPARE
-   against the live layout is not a publish), so that stays with them. */
+   against the live layout is not a publish), so that stays with them.
+
+   E2: a `displayNumber >= 0` selection is resolved by POSITION only the
+   FIRST time this runs in a server run (gPinnedDisplayID still 0) - every
+   later call selects by the DISPLAY IDENTITY that first resolution picked
+   (macVNCSelectDisplayByID), never by position again, so a desk event that
+   reorders CoreGraphics' enumeration cannot silently hand a live capture to a
+   different physical monitor mid-session. If the pinned display is no longer
+   attached, this refuses rather than substituting whatever else is around -
+   the caller's only recourse is the same reportCaptureFailure(false) path a
+   failed rebuild already uses, never a server stop. -1 (primary) and -2
+   (all) never touch gPinnedDisplayID: re-evaluating live on every call is
+   what those settings mean. */
 static rfbBool
 applySelectionAndBuildLayout(const MacVNCDisplayInput *attached, size_t attachedCount,
                              int primaryIndex, MacVNCDisplayLayout *layout)
@@ -647,17 +685,29 @@ applySelectionAndBuildLayout(const MacVNCDisplayInput *attached, size_t attached
   MacVNCDisplayInput selected[MACVNC_MAX_DISPLAYS];
   size_t selectedCount = 0;
 
-  switch (macVNCSelectDisplays(attached, attachedCount, primaryIndex,
-                               displayNumber, selected, &selectedCount)) {
-  case MACVNC_DISPLAY_SELECTION_OK:
-      break;
-  case MACVNC_DISPLAY_SELECTION_NO_SUCH_DISPLAY:
-      rfbErr("Specified display %d does not exist\n", displayNumber);
-      return FALSE;
-  case MACVNC_DISPLAY_SELECTION_UNSUPPORTED_COUNT:
-  default:
-      rfbErr("Unsupported display selection\n");
-      return FALSE;
+  if (displayNumber >= 0 && gPinnedDisplayID != 0) {
+      if (macVNCSelectDisplayByID(attached, attachedCount, gPinnedDisplayID,
+                                  selected, &selectedCount) != MACVNC_DISPLAY_SELECTION_OK) {
+          rfbErr("Pinned display id=%u (selection %d) is no longer attached; "
+                 "keeping the previous layout rather than silently capturing "
+                 "a different monitor\n", gPinnedDisplayID, displayNumber);
+          return FALSE;
+      }
+  } else {
+      switch (macVNCSelectDisplays(attached, attachedCount, primaryIndex,
+                                   displayNumber, selected, &selectedCount)) {
+      case MACVNC_DISPLAY_SELECTION_OK:
+          if (displayNumber >= 0)
+              gPinnedDisplayID = selected[0].displayID;
+          break;
+      case MACVNC_DISPLAY_SELECTION_NO_SUCH_DISPLAY:
+          rfbErr("Specified display %d does not exist\n", displayNumber);
+          return FALSE;
+      case MACVNC_DISPLAY_SELECTION_UNSUPPORTED_COUNT:
+      default:
+          rfbErr("Unsupported display selection\n");
+          return FALSE;
+      }
   }
 
   if (!macVNCBuildDisplayLayout(selected, selectedCount, layout)) {
@@ -718,15 +768,22 @@ resolveDisplayLayout(void)
 /* Re-read the desk WITHOUT waking it and run it through the SAME selection
    and layout rules resolveDisplayLayout() trusts at startup, into a caller-
    owned scratch layout rather than the published one - see rearmCaptures,
-   which must not publish anything until the canvas it describes exists. */
+   which must not publish anything until the canvas it describes exists.
+
+   `logEnumeration` passes straight through to collectDisplayInputs(): TRUE
+   for a caller that is already committed to acting on this read (rearmCaptures,
+   which only ever runs when a rebuild is actually happening), FALSE for a
+   caller that is merely comparing this read against the published layout
+   (FIX-D's debounce evaluation) and must stay silent when the two turn out
+   equal - the only outcome most notifications ever produce. */
 static rfbBool
-resolveDeskLayoutWithoutWaking(MacVNCDisplayLayout *layout)
+resolveDeskLayoutWithoutWaking(MacVNCDisplayLayout *layout, bool logEnumeration)
 {
   MacVNCDisplayInput attached[MACVNC_MAX_DISPLAYS];
   size_t attachedCount = 0;
   int primaryIndex = -1;
 
-  if (!collectDisplayInputs(attached, &attachedCount, &primaryIndex))
+  if (!collectDisplayInputs(attached, &attachedCount, &primaryIndex, logEnumeration))
       return FALSE;
   return applySelectionAndBuildLayout(attached, attachedCount, primaryIndex, layout);
 }
@@ -1220,31 +1277,15 @@ freshestFrameStamp(void)
     return freshest;
 }
 
-/* Audit item 5: displayNumber >= 0 selects by POSITION in whatever
-   CoreGraphics just enumerated (macVNCSelectDisplays), so a desk event that
-   reorders the enumeration can make a live re-arm silently redirect a PINNED
-   selection to a DIFFERENT physical monitor - mid-session, with only the
-   generic "desk shape changed" line (which macVNCDisplayLayoutsEqual's own
-   displayID comparison already produces, since a changed id is never "equal")
-   to notice by. That generic line does not say the SELECTION, not just the
-   shape, changed, which is what someone debugging "my pinned display" needs
-   to see. Named here, distinctly, rather than folded into logCapturingLayout:
-   it is a comparison between two layouts (before/after), not a description of
-   one. */
-static void
-logIfPinnedSelectionChangedDisplay(const MacVNCDisplayLayout *before,
-                                   const MacVNCDisplayLayout *after)
-{
-    if (!before || !after || displayNumber < 0 ||
-        before->count == 0 || after->count == 0)
-        return;
-    uint32_t previousID = before->displays[0].input.displayID;
-    uint32_t resolvedID = after->displays[0].input.displayID;
-    if (previousID != resolvedID)
-        rfbLog("Pinned display selection %d now resolves to a different physical "
-               "display (was id %u, now id %u) - a desk change likely reordered "
-               "CoreGraphics' enumeration\n", displayNumber, previousID, resolvedID);
-}
+/* E2 (.pi/plans/capture-liveness.md): this used to be
+   logIfPinnedSelectionChangedDisplay(), which only DETECTED after the fact
+   that a pinned `displayNumber >= 0` had silently resolved to a different
+   physical display and logged about it. applySelectionAndBuildLayout() now
+   PINS the selection to the display identity it first resolved
+   (gPinnedDisplayID) and never substitutes another one, so that detector's
+   only case (displayNumber >= 0) can no longer fire - before/after are always
+   the same identity, or the resolution fails outright and is reported
+   through reportCaptureFailure(false). Removed rather than left as dead code. */
 
 /*
  * Stop, re-read the desk, and rebuild - either the SAME layout's streams (a
@@ -1290,7 +1331,7 @@ rearmCaptures(void)
        up. On failure there is nothing left to retry into - same as a failed
        rebuild below. */
     MacVNCDisplayLayout freshLayout;
-    if (!resolveDeskLayoutWithoutWaking(&freshLayout)) {
+    if (!resolveDeskLayoutWithoutWaking(&freshLayout, true)) {
         rfbErr("Re-arm could not re-read the desk\n");
         return false;
     }
@@ -1303,7 +1344,6 @@ rearmCaptures(void)
        SAME pointer rather than re-deriving it, for the same reason
        compositeCapturedFrame loads it once - see gPublishedLayout. */
     MacVNCDisplayLayout *liveLayout = currentDisplayLayout();
-    logIfPinnedSelectionChangedDisplay(liveLayout, &freshLayout);
 
     if (macVNCDisplayLayoutsEqual(liveLayout, &freshLayout)) {
         /* Same shape: rebuild onto the unchanged, already-published layout.
@@ -1463,9 +1503,15 @@ deskShapeDebounceFired(void)
 
     /* Re-read the desk WITHOUT waking it - the same call and the same
        reasoning as rearmCaptures()'s own re-read: a notification implies a
-       real reconfiguration happened, not that any display needs waking. */
+       real reconfiguration happened, not that any display needs waking.
+       logEnumeration=false: this is a PROBE, only ever used to compare
+       against the published layout below - most notifications turn out
+       equal, and rearmCaptures() below already does its own logged re-read
+       the moment this comparison finds a real difference, so logging here
+       too would print the same display list twice for one real change and
+       once for nothing on every notification that changed nothing at all. */
     MacVNCDisplayLayout fresh;
-    if (!resolveDeskLayoutWithoutWaking(&fresh)) {
+    if (!resolveDeskLayoutWithoutWaking(&fresh, false)) {
         rfbErr("Could not re-read the desk after a display configuration change\n");
         return;
     }
@@ -2391,6 +2437,7 @@ vncServerStartWithResult(const MacVNCServerConfig *config)
     /* Adopt the immutable configuration into the server's private state. */
     viewOnly = config->viewOnly;
     displayNumber = config->displayNumber;
+    gPinnedDisplayID = 0; /* fresh run: re-pin from position on first resolve */
     macVNCClientAccessMode = config->clientAccessMode;
     snprintf(macVNCListenAddress, sizeof(macVNCListenAddress), "%s",
              config->listenAddress ? config->listenAddress : "");

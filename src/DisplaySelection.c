@@ -43,3 +43,31 @@ macVNCSelectDisplays(const MacVNCDisplayInput *available,
     *selectedCount = 1;
     return MACVNC_DISPLAY_SELECTION_OK;
 }
+
+MacVNCDisplaySelectionResult
+macVNCSelectDisplayByID(const MacVNCDisplayInput *available,
+                        size_t availableCount,
+                        uint32_t pinnedDisplayID,
+                        MacVNCDisplayInput *selected,
+                        size_t *selectedCount)
+{
+    if (selectedCount)
+        *selectedCount = 0;
+    if (!available || !selected || !selectedCount)
+        return MACVNC_DISPLAY_SELECTION_UNSUPPORTED_COUNT;
+
+    if (availableCount == 0 || availableCount > MACVNC_MAX_DISPLAYS)
+        return MACVNC_DISPLAY_SELECTION_UNSUPPORTED_COUNT;
+
+    for (size_t i = 0; i < availableCount; ++i) {
+        if (available[i].displayID == pinnedDisplayID) {
+            selected[0] = available[i];
+            *selectedCount = 1;
+            return MACVNC_DISPLAY_SELECTION_OK;
+        }
+    }
+    /* Found is never at a different index by substitution - the caller asked
+       for exactly this identity, and the loop above already checked every
+       position, so "not found" is the only honest answer left. */
+    return MACVNC_DISPLAY_SELECTION_NO_SUCH_DISPLAY;
+}

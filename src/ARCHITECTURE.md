@@ -633,11 +633,11 @@ pixels rather than points.
      enumerated, so a desk event that reorders the enumeration can make a live
      re-arm silently redirect a PINNED selection to a DIFFERENT physical
      monitor - a bug the original display-reconfiguration plan named and
-     deferred as startup-only, now reachable live and unattended.
-     `logIfPinnedSelectionChangedDisplay()` names it distinctly in the log
-     (previous id vs. resolved id) rather than leaving it inside the generic
-     "desk shape changed" line; pinning by display ID instead of position
-     remains its own, larger, still-deferred change.
+     deferred as startup-only, now reachable live and unattended. Detected
+     only after the fact at this point (`logIfPinnedSelectionChangedDisplay()`,
+     logging previous id vs. resolved id rather than leaving it inside the
+     generic "desk shape changed" line); fixed at the source, and this
+     detector removed as no longer reachable, by FIX-E below.
   4. With repeated failures now individually counted (item 1 above plus the
      first follow-up's occurrence-based dedup), calling
      `reportCaptureFailure()` - the one function that can turn into an
@@ -730,7 +730,8 @@ pixels rather than points.
   `readAttachedDisplays()`'s waking variant), compare against the published
   layout with the EXISTING `macVNCDisplayLayoutsEqual()`, and rebuild - via
   the EXISTING `rearmCaptures()`, unchanged - only if they differ. An
-  unchanged desk does nothing and logs nothing.
+  unchanged desk rebuilds nothing (see FIX-E below for a correction to what
+  this comparison used to log even then).
 
   This is why FIX-D is cheap where the ORIGINAL `display-reconfiguration.md`
   plan's proposal to react to reconfiguration was rejected: every objection
@@ -750,6 +751,50 @@ pixels rather than points.
   an unchanged desk rebuilds nothing; a desk forced to look different
   rebuilds exactly once, through the real `rearmCaptures()`; idle is a
   no-op.)
+
+  A fifth follow-up ("FIX-E") closed two loose ends a whole-diff review found
+  in FIX-D itself.
+
+  First, a doc/behaviour mismatch: this file and the plan both said an
+  unchanged desk "does nothing and logs nothing" - true for captures, false
+  for the log. FIX-D's debounce evaluation reads the desk through
+  `resolveDeskLayoutWithoutWaking()` PURELY TO COMPARE against the published
+  layout, but that function calls the same `collectDisplayInputs()` startup
+  uses, which unconditionally logs one "Found ... display ..." line per
+  attached display - so a burst of screen-parameter notifications on a
+  connected session printed a full display enumeration on every evaluation,
+  changed or not. Verified live: the log showed the "Found primary/secondary
+  display" pair on every debounce tick regardless of outcome. Fixed at the
+  source: `collectDisplayInputs()` and `resolveDeskLayoutWithoutWaking()` both
+  take a `logEnumeration` flag now. TRUE for every caller already committed to
+  ACTING on the read - startup's `readAttachedDisplays()`, and
+  `rearmCaptures()`'s own re-read, which only ever runs when a rebuild is
+  actually happening. FALSE for FIX-D's debounce probe, the one caller that
+  might discard the read entirely. The existing `Display configuration
+  changed: canvas AxB -> CxD; re-arming display captures` line - which only
+  ever prints when a rebuild is really about to happen - is unchanged and
+  still the one honest signal of a real change.
+
+  Second, S4 (long deferred by `.pi/plans/display-reconfiguration.md`, and by
+  FIX-B's item 3 above, as "its own, larger, still-deferred change"):
+  `displayNumber >= 0` selected by POSITION in whatever CoreGraphics
+  enumerated, which only mattered at startup before FIX-D made re-selection
+  live and unattended - a desk event reordering the enumeration mid-session
+  could silently move a pinned capture to a different physical monitor, with
+  only a log line noticing after the fact
+  (`logIfPinnedSelectionChangedDisplay()`, now removed). Fixed by resolving
+  `displayNumber >= 0` to a concrete `CGDirectDisplayID` the FIRST time a
+  server run selects it (`gPinnedDisplayID`, reset to 0 - never a real id -
+  at every server start alongside `displayNumber` itself) and selecting by
+  that IDENTITY on every later call (`macVNCSelectDisplayByID()`, new in
+  `DisplaySelection.c`, pure and tested in `test_display_selection.c`
+  alongside the existing position-based `macVNCSelectDisplays()`), never by
+  position again. If the pinned display is no longer attached,
+  `applySelectionAndBuildLayout()` refuses outright rather than substituting
+  another monitor - the same `reportCaptureFailure(false)` path a failed
+  rebuild already uses, never a server stop. `-1` (primary) and `-2` (all)
+  are untouched: they never populate `gPinnedDisplayID` and keep
+  re-evaluating live, which is what those settings mean.
 - **MacVNCClamshellPolicy / MacVNCClamshellMarker / MacVNCClamshell** —
   closed-display mode. The policy
   half is pure C and holds every rule; the marker owns the persisted record; the
