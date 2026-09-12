@@ -10,6 +10,7 @@
 
 #include "mac.h"
 #include "MacVNCCaptureSupervisor.h"
+#include "MacVNCLayoutRegistry.h"
 
 /*
  * One full re-arm cycle through the mac.m GLUE, not just the pure resolver.
@@ -133,7 +134,7 @@ main(void)
          * re-arm this run already observed.
          */
         if (rearmed) {
-            uint64_t current = macVNCCurrentCaptureGenerationForTesting();
+            uint64_t current = macVNCLayoutRegistryCurrentSessionGeneration();
             assert(current >= 2); /* the initial Build plus at least one re-arm */
             uint64_t retired = current - (uint64_t)finalCount;
             /* A retired generation must still be a real, already-superseded

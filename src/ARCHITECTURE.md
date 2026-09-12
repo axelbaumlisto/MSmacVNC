@@ -28,6 +28,7 @@ modules**, and keep the Objective-C layer as thin glue to macOS frameworks
    (C / Obj-C)   │        start/stop, listener teardown          │
                  │   MacVNCCaptureSession (owns ScreenCaptureKit) │
                  │   MacVNCCompositor (pixels → canvas, locking) │
+                 │   MacVNCCaptureSupervisor (watchdog/rearm)   │
                  │   MacVNCInput (kbd/ptr)  MacVNCPowerMgmt      │
                  │   MacVNCDisplayWake      ScreenCapturer (SCK) │
                  │   MacVNCCurtainWindow (black locally only)    │
@@ -37,6 +38,7 @@ modules**, and keep the Objective-C layer as thin glue to macOS frameworks
                                  │ function-pointer / block seams
                  ┌───────────────▼──────────────────────────────┐
    Pure logic    │ DisplayLayout · DisplaySelection              │
+                 │ MacVNCLayoutRegistry                         │
    (C, tested)   │ CompositeFramebuffer · MacVNCStatusText       │
                  │ MacVNCPermissionUI · MacVNCStartFailure       │
                  │ MacVNCAllowlistPlan                           │

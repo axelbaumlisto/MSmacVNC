@@ -169,7 +169,7 @@ MacVNCStatusText, MacVNCStartFailure, MacVNCRelauncher, MacVNCPermissionUI.
 глобалей 20 → 44. Из 32 `g*`-статиков 22 добавлены за один день и делятся
 на двух владельцев без остатка.
 
-### Шаг 7 — реестр раскладки `MacVNCLayoutRegistry.{h,c}`
+### Шаг 7 — реестр раскладки `MacVNCLayoutRegistry.{h,c}` (СДЕЛАНО, a45f16e)
 - владеет: `gDisplayLayoutSlots[2]`, `gPublishedLayout`, `gPinnedDisplayID`,
   `gCaptureSessionGeneration`;
 - API: `publish(layout)`, `current()`, `nextSessionGeneration()`,
@@ -179,7 +179,7 @@ MacVNCStatusText, MacVNCStartFailure, MacVNCRelauncher, MacVNCPermissionUI.
   слот, который читает N), на монотонность generation, на set-once пина;
   мутация: сломать выбор слота — тест должен упасть.
 
-### Шаг 8 — надзор за захватом `MacVNCCaptureSupervisor.{h,m}`
+### Шаг 8 — надзор за захватом `MacVNCCaptureSupervisor.{h,m}` (СДЕЛАНО, 5e988a9)
 - владеет: `gLastFrameNs[]`, `gCapturesStartedNs`, `gLastRearmNs`,
   `gRearmsSinceFrame`, `gCaptureLivenessTimer`, `gDeskShapeDebounceTimer`
   и все их test-only счётчики/оверрайды (13 глобалей);
@@ -191,7 +191,7 @@ MacVNCStatusText, MacVNCStartFailure, MacVNCRelauncher, MacVNCPermissionUI.
   `capture_liveness_rearm_deskshape` проходят без изменения ассертов —
   это и есть доказательство I1.
 
-### Шаг 9 — хуки и документ
+### Шаг 9 — хуки и документ (СДЕЛАНО, этим коммитом)
 - `mac.h`: из 29 `ForTesting`-хуков к своим модулям уходят все, что читают
   состояние шагов 7–8; в `mac.h` остаются только хуки жизненного цикла;
 - `ARCHITECTURE.md`: два новых модуля в карте слоёв, порядок мьютексов
@@ -201,3 +201,19 @@ MacVNCStatusText, MacVNCStartFailure, MacVNCRelauncher, MacVNCPermissionUI.
 `compositeCapturedFrame` после шага 7–8 делает не больше атомарных операций,
 чем до (сейчас: 1 load generation, 1 load layout, 1 store stamp, 1 store
 rearms). Мерить `updates=N` за 90 с до и после.
+
+### Итог шагов 7–9
+
+```text
+mac.m       2795 → 2279     globals(static g*) 44 → 12
+тестов      51   → 52       коммиты a45f16e 5e988a9 (шаг 9 — этот)
+```
+
+Шаг 9 удалил один чистый форвардер (`macVNCCurrentCaptureGenerationForTesting`,
+2 вызывающих места → инлайнены в `macVNCLayoutRegistryCurrentSessionGeneration()`)
+и оставил два других форвардера в `mac.h` НЕ по правилу «только
+жизненный цикл», а по правилу шага 9 «больше 3 вызывающих мест — не
+дёргать тесты»: `macVNCCurrentDisplayLayoutCountForTesting` (5 мест) и
+`macVNCPinnedDisplayIDForTesting` (6 мест) читают состояние
+`MacVNCLayoutRegistry`, а не жизненный цикл сервера. Осознанное исключение,
+не забытая уборка.

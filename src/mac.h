@@ -314,10 +314,6 @@ void macVNCSetCaptureKeepWarmForTesting(uint64_t ns);
  */
 void macVNCCompositeSyntheticFrameForTesting(uint64_t generation, size_t displayIndex);
 
-/* The CURRENT capture-session generation, so a test can compute the prior
-   generation without reaching into a private counter by name. */
-uint64_t macVNCCurrentCaptureGenerationForTesting(void);
-
 /* How many displays the CURRENTLY published layout has - lets a multi-display
    test SKIP honestly on a box that only has one. */
 size_t macVNCCurrentDisplayLayoutCountForTesting(void);

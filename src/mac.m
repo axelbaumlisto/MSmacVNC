@@ -2197,12 +2197,6 @@ macVNCCompositeSyntheticFrameForTesting(uint64_t generation, size_t displayIndex
     free(pixels);
 }
 
-uint64_t
-macVNCCurrentCaptureGenerationForTesting(void)
-{
-    return macVNCLayoutRegistryCurrentSessionGeneration();
-}
-
 /* How many displays the CURRENTLY published layout actually has - so a test
    for "an idle second display cannot trigger a re-arm" can find out at run
    time whether this machine even has a second display to make idle, and SKIP
