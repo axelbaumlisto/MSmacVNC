@@ -66,6 +66,18 @@ Pure logic, each with a unit test wired into `ctest` (`.c` for C modules,
   "no change" would misattribute their per-index state across displays.
 - **DisplaySelection** — which attached displays a run captures (all / primary /
   one index); order is preserved because the composite layout depends on it.
+- **MacVNCLayoutRegistry** — owns the published desk layout (double-buffered,
+  swap-by-pointer so the capture hot path never locks), the capture-session
+  generation counter (monotonic for the process, never reset, so a stale
+  frame from a retired session can never collide with the current one), and
+  the pinned-display identity a `displayNumber >= 0` selection resolves to
+  once per server run. Extracted from mac.m
+  (.pi/plans/core-decomposition.md, step 7) as a pure move: the four globals
+  it owns used to live directly in the server core with the same semantics.
+  Set-once enforcement for the pin is deliberately NOT here - the registry's
+  own `PinDisplay` is last-write-wins, and mac.m's `applySelectionAndBuildLayout`
+  is what refuses to call it a second time in a run - see the header for why
+  that split stays where it is.
 - **CompositeFramebuffer** — tile-diff copy of one BGRA display into the shared
   canvas; reports dirty rects through an injected callback.
 - **NetworkAccess / NetworkCIDR / NetworkInventory** — IPv4/CIDR parsing,
@@ -910,7 +922,7 @@ pixels rather than points.
 
 ## Tests
 
-`ctest` runs 51 targets (the number is enforced: `architecture_doc` compares
+`ctest` runs 52 targets (the number is enforced: `architecture_doc` compares
 this sentence against CMakeLists.txt's `add_test` count, so a target added or
 commented out fails the suite until this line is updated deliberately). Every
 assertion added here is checked by mutating the source and confirming the test

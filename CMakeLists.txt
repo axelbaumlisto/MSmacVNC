@@ -45,6 +45,8 @@ set(SOURCE_FILES
     src/RFBKeySym.c
     src/DisplayLayout.h
     src/DisplayLayout.c
+    src/MacVNCLayoutRegistry.h
+    src/MacVNCLayoutRegistry.c
     src/DisplaySelection.h
     src/DisplaySelection.c
     src/CompositeFramebuffer.h
@@ -217,6 +219,11 @@ if(BUILD_TESTING)
     add_executable(test_display_layout tests/test_display_layout.c src/DisplayLayout.c)
     target_include_directories(test_display_layout PRIVATE src)
     add_test(NAME display_layout COMMAND test_display_layout)
+
+    add_executable(test_layout_registry tests/test_layout_registry.c
+                   src/MacVNCLayoutRegistry.c src/DisplayLayout.c)
+    target_include_directories(test_layout_registry PRIVATE src)
+    add_test(NAME layout_registry COMMAND test_layout_registry)
 
     # Measuring instruments, not tests: they need a running server, so they are
     # built on request and never added to ctest.
@@ -571,6 +578,7 @@ if(BUILD_TESTING)
         src/mac.m
         src/RFBKeySym.c
         src/DisplayLayout.c
+        src/MacVNCLayoutRegistry.c
         src/DisplaySelection.c
         src/CompositeFramebuffer.c
         src/MacVNCCompositor.m
