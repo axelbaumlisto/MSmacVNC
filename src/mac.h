@@ -367,8 +367,10 @@ unsigned macVNCDeskShapeRebuildFailureCountForTesting(void);
    never pins one), so a test can assert it is set exactly once per resolve
    and never silently replaced by a different physical display. */
 uint32_t macVNCPinnedDisplayIDForTesting(void);
-/* Forces the pinned-id lookup to fail as if the pinned display had just been
-   unplugged, without physically removing a monitor. */
+/* Forces the pinned-id lookup to genuinely MISS, as if the pinned display had
+   just been unplugged, without physically removing a monitor - by
+   substituting an impossible id into the value macVNCSelectDisplayByID()
+   searches for, not by short-circuiting the search itself. */
 void macVNCForcePinnedDisplayGoneForTesting(bool force);
 
 void macVNCResetCaptureStateForTesting(void);
