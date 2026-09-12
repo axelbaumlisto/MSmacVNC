@@ -55,13 +55,20 @@ static const void * const kMacVNCStateQueueKey = &kMacVNCStateQueueKey;
 
 
 #if defined(MACVNC_ENABLE_TEST_HOOKS)
-static NSInteger captureInitializationsBeforeFailure = -1;
+/* _Atomic: written by a test on its own thread (macVNCFailCaptureInitializationAfter,
+   typically called before the server starts) and read inside -init, which a
+   capture rebuild can run on gCaptureStopQueue rather than the caller's thread.
+   A plain NSInteger here raced under ThreadSanitizer - not a production bug
+   (this whole seam is test-hooks-only and never ships), but noise here is
+   exactly how a REAL race elsewhere would get lost in a tsan run of the
+   suite. */
+static _Atomic NSInteger captureInitializationsBeforeFailure = -1;
 static _Atomic bool captureInitializationFaultConsumed = false;
 
 void
 macVNCFailCaptureInitializationAfter(NSInteger successfulInitializations)
 {
-    captureInitializationsBeforeFailure = successfulInitializations;
+    atomic_store(&captureInitializationsBeforeFailure, successfulInitializations);
     atomic_store(&captureInitializationFaultConsumed, false);
 }
 
@@ -258,13 +265,13 @@ static void endMailboxActivity(void *context)
         _captureFailed = NO;
         _readinessGeneration = 0;
 #if defined(MACVNC_ENABLE_TEST_HOOKS)
-        if (captureInitializationsBeforeFailure == 0) {
+        if (atomic_load(&captureInitializationsBeforeFailure) == 0) {
             atomic_store(&captureInitializationFaultConsumed, true);
             [self release];
             return nil;
         }
-        if (captureInitializationsBeforeFailure > 0)
-            --captureInitializationsBeforeFailure;
+        if (atomic_load(&captureInitializationsBeforeFailure) > 0)
+            atomic_fetch_sub(&captureInitializationsBeforeFailure, 1);
 #endif
         _frameMailboxInitialized = macVNCFrameMailboxInit(
             &_frameMailbox, releaseMailboxFrame, beginMailboxActivity,

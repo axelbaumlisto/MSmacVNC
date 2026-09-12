@@ -526,6 +526,19 @@ pixels rather than points.
   against the CURRENT value before `compositeCapturedFrame` reads anything else
   - so a frame from any retired session is rejected the same way whether it is
   one re-arm stale or a hundred, and the address scan it replaced is gone.
+  Why the layout publish is its own lock-free mechanism rather than a second
+  use of `compositorMutex`, which `macVNCCompositorSubmitFrame` already takes
+  once per frame: that mutex is held only for the duration of one pixel copy.
+  A shape-changed re-arm's `StopAndWait` is bounded but genuinely
+  multi-second - it waits on ScreenCaptureKit tearing down a live stream. Layout
+  publish sharing `compositorMutex` would mean every composite, on every
+  display, for every connected client, blocks behind that wait - turning a
+  watchdog built to stop one stalled stream from freezing a viewer into a
+  mechanism that freezes every viewer for the re-arm's duration instead. The
+  generation+index origin above is orthogonal to this and would be needed
+  either way: it answers "which SESSION produced this frame", not "which COPY
+  of the layout struct is current" - a lock around the struct does not tell a
+  retired callback that it is retired.
   A whole-diff integration audit of the above then caught four more seams,
   fixed together as one follow-up:
   1. A failed `rearmCaptures()` used to leave `gLastRearmNs`/`gRearmsSinceFrame`
