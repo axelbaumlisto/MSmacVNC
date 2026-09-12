@@ -193,6 +193,19 @@ main(void)
          *    left exactly as it was, the pin itself left exactly as it was
          *    (never cleared, never replaced by another monitor's id), and
          *    the server never stopped (this test keeps talking to it below).
+         *
+         *    H1: the hook this drives no longer short-circuits before the
+         *    real lookup - it substitutes an impossible id into the value
+         *    macVNCSelectDisplayByID() searches for (see its own comment in
+         *    mac.m), so control genuinely reaches that function's scan, its
+         *    genuine miss, its MACVNC_DISPLAY_SELECTION_NO_SUCH_DISPLAY
+         *    return, and applySelectionAndBuildLayout's refusal on THAT
+         *    return value - not a hand-written stand-in for it. The
+         *    assertions below are what only that real path can show: no
+         *    substitute display was chosen (the layout below is identical,
+         *    not merely non-empty), the pin survives untouched, and the
+         *    failure reached the existing rearm-failure route rather than
+         *    stopping the server.
          */
         layoutCount = macVNCCurrentDisplayLayoutCountForTesting();
         unsigned rearmFailuresBefore = macVNCCaptureRearmFailureCountForTesting();

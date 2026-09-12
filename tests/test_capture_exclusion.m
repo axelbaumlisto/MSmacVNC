@@ -301,16 +301,37 @@ static void testDesiredExclusionEventuallyLapsesIfNeverConfirmed(void)
 }
 
 /*
- * F2 (post-effort test-gap fix): the curtain's own heartbeat, for real -
- * a DEDICATED BACKGROUND THREAD sampling macVNCCaptureSessionSelfExcluded()
- * on its own schedule, racing the real Build(desiredExcluded=true)/Start()/
- * bounded-retry machinery on the main thread, rather than the single
+ * F2 (post-effort test-gap fix), STRENGTHENED after an independent review
+ * (H3): the poller now starts BEFORE Build() is even called, so it spans
+ * the ENTIRE window this fix is about - Build's optimistic write, the gap
+ * before Start(), and Start()'s own early retries - not just the tail of
+ * it. The PREVIOUS version of this test started its background poller
+ * AFTER macVNCCaptureSessionStart() had already run, so it could not have
+ * caught a bug living in the Build()-to-Start() gap even if one still
+ * existed there; this version can.
+ *
+ * A DEDICATED BACKGROUND THREAD samples macVNCCaptureSessionSelfExcluded()
+ * on its own schedule, racing the real Reset()/Build(desiredExcluded=true)/
+ * Start()/bounded-retry machinery on the main thread, rather than the single
  * thread that interleaves pumping the run loop with checking the flag (as
  * testDesiredExclusionEventuallyLapsesIfNeverConfirmed above already does).
  * That existing test cannot miss a transient bad value only because nothing
  * else runs between its own pump and its own check; an INDEPENDENT poller
  * that never yields to those steps is what actually stands in for a heartbeat
- * that has no idea when a retry's completion is about to run.
+ * that has no idea when Build, Start, or a retry's completion is about to
+ * run.
+ *
+ * Samples split at one boundary, `buildReturned`, flipped by the main thread
+ * the instant Build() returns:
+ *   - BEFORE the boundary: Reset() has already forced the flag false (there
+ *     is no session yet), so an unexcluded reading here is correct, not a
+ *     bug, and is only counted, never asserted on.
+ *   - AT AND AFTER the boundary: Build's optimistic write has already run
+ *     under the same lock the poller reads through, so every sample from
+ *     here on must read true until the bounded retry genuinely exhausts -
+ *     covering exactly the gap (Build returned, Start() not yet called, or
+ *     Start() called but its first retries not yet due) that the pre-fix
+ *     design left exposed to a real 1Hz curtain heartbeat.
  *
  * What this does NOT and cannot prove, and says so rather than pretending:
  * this is the SAME bare-test-binary session testDesiredExclusionEventuallyLapsesIfNeverConfirmed
@@ -332,17 +353,13 @@ static void testExclusionSurvivesUnderConcurrentHeartbeatStylePolling(void)
 {
     macVNCCaptureSessionReset();
 
-    MacVNCDisplayLayout layout;
-    fillLayout(&layout, 1);
-    assert(macVNCCaptureSessionBuild(&layout, 1, 30, acceptFrame, noteFailure, true));
-    assert(macVNCCaptureSessionSelfExcluded());
-
-    macVNCCaptureSessionStart();
-
     __block _Atomic bool pollerShouldStop = false;
-    __block _Atomic int samplesTaken = 0;
-    __block _Atomic int samplesTrue = 0;
-    __block _Atomic int firstFalseSampleIndex = -1; /* -1 = never observed false */
+    __block _Atomic bool buildReturned = false;
+    __block _Atomic int samplesBeforeBuild = 0;
+    __block _Atomic int samplesAfterBuild = 0;
+    __block _Atomic int samplesTrueAfterBuild = 0;
+    __block _Atomic int firstFalseSampleIndex = -1; /* index within the
+        AFTER-boundary stream only; -1 = never observed false there */
     __block _Atomic int trueSamplesAfterLapse = 0; /* must stay 0: once lapsed,
         a real curtain must never be told "excluded" again for this session -
         the retry chain is one-shot (MacVNCCaptureSession.h), so a true
@@ -353,20 +370,31 @@ static void testExclusionSurvivesUnderConcurrentHeartbeatStylePolling(void)
         dispatch_queue_create("test.capture-exclusion.heartbeat-poller", DISPATCH_QUEUE_SERIAL);
     dispatch_semaphore_t pollerDone = dispatch_semaphore_create(0);
 
-    /* Genuinely concurrent with the main thread's run-loop pumping below -
-       this queue does not wait its turn on the main queue for anything. */
+    /* Started BEFORE Build() is even called (H3): genuinely concurrent with
+       Reset, Build and Start, not merely with the retries that follow
+       Start(). This queue does not wait its turn on the main queue for
+       anything. */
     dispatch_async(pollerQueue, ^{
         while (!atomic_load(&pollerShouldStop)) {
             bool excluded = macVNCCaptureSessionSelfExcluded();
-            int index = atomic_fetch_add(&samplesTaken, 1);
-            if (excluded) {
-                atomic_fetch_add(&samplesTrue, 1);
-                if (atomic_load(&firstFalseSampleIndex) != -1)
-                    atomic_fetch_add(&trueSamplesAfterLapse, 1);
+            if (!atomic_load(&buildReturned)) {
+                atomic_fetch_add(&samplesBeforeBuild, 1);
+                /* Legitimately false here (no session yet), or - if this
+                   sample raced past the boundary before observing the flip -
+                   true; either is fine. Nothing about the fix is being
+                   tested by this phase, only that the poller is genuinely
+                   alive through it. */
             } else {
-                int prevFirst = atomic_load(&firstFalseSampleIndex);
-                if (prevFirst == -1)
-                    atomic_store(&firstFalseSampleIndex, index);
+                int index = atomic_fetch_add(&samplesAfterBuild, 1);
+                if (excluded) {
+                    atomic_fetch_add(&samplesTrueAfterBuild, 1);
+                    if (atomic_load(&firstFalseSampleIndex) != -1)
+                        atomic_fetch_add(&trueSamplesAfterLapse, 1);
+                } else {
+                    int prevFirst = atomic_load(&firstFalseSampleIndex);
+                    if (prevFirst == -1)
+                        atomic_store(&firstFalseSampleIndex, index);
+                }
             }
             usleep(1000); /* 1ms - far tighter than the curtain's real 1Hz
                              heartbeat, so this is a stress in the SAME sense
@@ -376,6 +404,17 @@ static void testExclusionSurvivesUnderConcurrentHeartbeatStylePolling(void)
         }
         dispatch_semaphore_signal(pollerDone);
     });
+
+    MacVNCDisplayLayout layout;
+    fillLayout(&layout, 1);
+    assert(macVNCCaptureSessionBuild(&layout, 1, 30, acceptFrame, noteFailure, true));
+    /* The boundary: from this instant, Build's optimistic write has already
+       happened under the same lock the poller reads through - every sample
+       the poller takes from here on must be true until the real lapse. */
+    atomic_store(&buildReturned, true);
+    assert(macVNCCaptureSessionSelfExcluded());
+
+    macVNCCaptureSessionStart();
 
     /* The retries run on the main queue (reestablishExclusion's own
        dispatch_after target, per MacVNCCaptureSession.m); pump it for
@@ -403,20 +442,25 @@ static void testExclusionSurvivesUnderConcurrentHeartbeatStylePolling(void)
     dispatch_release(pollerDone);
     dispatch_release(pollerQueue);
 
-    int taken = atomic_load(&samplesTaken);
-    int wereTrue = atomic_load(&samplesTrue);
+    int before = atomic_load(&samplesBeforeBuild);
+    int after = atomic_load(&samplesAfterBuild);
+    int wereTrue = atomic_load(&samplesTrueAfterBuild);
     int firstFalse = atomic_load(&firstFalseSampleIndex);
-    printf("heartbeat-style poller: %d samples, %d true, first false at sample #%d\n",
-           taken, wereTrue, firstFalse);
+    printf("heartbeat-style poller: %d before Build, %d after Build (%d true), "
+           "first false at post-Build sample #%d\n",
+           before, after, wereTrue, firstFalse);
 
-    /* The poller genuinely ran concurrently with the retry machinery. */
-    assert(taken > 0);
+    /* The poller genuinely sampled the window this test exists to cover: at
+       least one sample taken AFTER Build returned and before the retries
+       exhausted - the exact Build-to-Start gap the OLD version's late
+       poller start could never have observed. */
+    assert(after > 0);
     /* It DID observe the lapse - the bounded retry really exhausted. */
     assert(firstFalse != -1);
-    /* Every sample BEFORE the lapse read true - the optimistic flag never
-       went false early, mid-retry, only to flip true again: exactly the
-       reader-visible flicker a real heartbeat sampling at 1Hz could still
-       have caught and wrongly lifted a curtain over. */
+    /* Every AFTER-BOUNDARY sample before the lapse read true - the
+       optimistic flag never went false early, mid-retry, only to flip true
+       again: exactly the reader-visible flicker a real heartbeat sampling at
+       1Hz could still have caught and wrongly lifted a curtain over. */
     assert(wereTrue == firstFalse);
     /* And nothing sampled AFTER the lapse ever read true again. */
     assert(atomic_load(&trueSamplesAfterLapse) == 0);

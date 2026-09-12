@@ -98,8 +98,17 @@ static int displayNumber = -1;               /* -2 all, -1 primary, >=0 one. */
    CGDirectDisplayID values are never 0. Reset to 0 at every server (re)start,
    alongside `displayNumber` itself - see vncServerStart. -1 (primary) and -2
    (all) never populate this; they keep re-evaluating live, which is what
-   those settings mean. */
-static uint32_t gPinnedDisplayID;
+   those settings mean.
+
+   _Atomic (H2): written on the capture control path, but read cross-thread
+   by macVNCPinnedDisplayIDForTesting() from a test's own thread. A plain
+   uint32_t here was safe only by accident - every test read happened to be
+   preceded by polling a DIFFERENT atomic counter (a rearm/rebuild count)
+   whose ordering gave a transitive happens-before edge to this one, a
+   property a future refactor could silently break by moving this store
+   relative to that counter's increment. Written at most once per
+   resolution, so the atomic costs nothing that matters. */
+static _Atomic uint32_t gPinnedDisplayID;
 static char macVNCListenAddress[MACVNC_LISTEN_ADDRESS_MAX] = {0};
 static char macVNCAllowedClients[MACVNC_ALLOWED_CLIENTS_MAX] = {0};
 static MacVNCClientAccessMode macVNCClientAccessMode = MACVNC_CLIENT_ACCESS_FAIL_CLOSED;
@@ -451,14 +460,16 @@ unsigned macVNCDeskShapeRebuildFailureCountForTesting(void)
    assert it is set exactly once per resolve, survives every re-arm trigger,
    and is never silently swapped for a different display's id. */
 uint32_t macVNCPinnedDisplayIDForTesting(void)
-{ return gPinnedDisplayID; }
-/* Forces applySelectionAndBuildLayout()'s pinned-id lookup to fail as if the
-   pinned display had just been unplugged, without needing to physically
+{ return atomic_load(&gPinnedDisplayID); }
+/* Forces applySelectionAndBuildLayout()'s pinned-id LOOKUP to miss, as if
+   the pinned display had just been unplugged, without needing to physically
    remove a monitor: the ONE fault a test cannot otherwise produce on demand,
-   the same reasoning as gForceDeskShapeDifferentForTesting above. Every
-   OTHER part of the refusal path this exercises - keeping the previous
-   layout, returning FALSE, never substituting another monitor - is real,
-   unmocked applySelectionAndBuildLayout/rearmCaptures code. */
+   the same reasoning as gForceDeskShapeDifferentForTesting above. Unlike an
+   early return, this substitutes an impossible id into the value
+   macVNCSelectDisplayByID() searches for (see applySelectionAndBuildLayout's
+   own comment on `lookupID`) - every part of the refusal path this exercises,
+   INCLUDING the miss itself, is real, unmocked applySelectionAndBuildLayout/
+   rearmCaptures/macVNCSelectDisplayByID code. */
 static _Atomic bool gForcePinnedDisplayGoneForTesting = false;
 void macVNCForcePinnedDisplayGoneForTesting(bool force)
 { atomic_store(&gForcePinnedDisplayGoneForTesting, force); }
@@ -699,27 +710,32 @@ applySelectionAndBuildLayout(const MacVNCDisplayInput *attached, size_t attached
 {
   MacVNCDisplayInput selected[MACVNC_MAX_DISPLAYS];
   size_t selectedCount = 0;
+  uint32_t pinnedID = atomic_load(&gPinnedDisplayID);
 
-  if (displayNumber >= 0 && gPinnedDisplayID != 0) {
+  if (displayNumber >= 0 && pinnedID != 0) {
+      uint32_t lookupID = pinnedID;
 #if defined(MACVNC_ENABLE_TEST_HOOKS)
-      /* F1: a test's only way to produce "the pinned display just vanished"
+      /* H1: a test's only way to produce "the pinned display just vanished"
          without physically unplugging a monitor - see
-         macVNCForcePinnedDisplayGoneForTesting's own comment. Checked before
-         the real lookup so the refusal below is taken exactly as a genuine
-         vanished display would take it. */
-      if (atomic_load(&gForcePinnedDisplayGoneForTesting)) {
-          rfbErr("Pinned display id=%u (selection %d) is no longer attached "
-                 "[forced for testing]; keeping the previous layout rather "
-                 "than silently capturing a different monitor\n",
-                 gPinnedDisplayID, displayNumber);
-          return FALSE;
-      }
+         macVNCForcePinnedDisplayGoneForTesting's own comment. Substituted
+         into the LOOKUP id only, so control still flows through the real
+         macVNCSelectDisplayByID() below: it runs its own scan, genuinely
+         misses, and returns MACVNC_DISPLAY_SELECTION_NO_SUCH_DISPLAY - the
+         refusal that follows is the SAME unmocked path a real vanished
+         display takes, not a shortcut around it. 0 (kCGNullDirectDisplay)
+         can never match a real attached display's id (see gPinnedDisplayID's
+         own comment), so this is guaranteed to miss. `pinnedID` itself -
+         used below for the log line, and left untouched in gPinnedDisplayID -
+         is NOT substituted: the pin does not vanish here, only what the
+         enumeration can find. */
+      if (atomic_load(&gForcePinnedDisplayGoneForTesting))
+          lookupID = 0;
 #endif
-      if (macVNCSelectDisplayByID(attached, attachedCount, gPinnedDisplayID,
+      if (macVNCSelectDisplayByID(attached, attachedCount, lookupID,
                                   selected, &selectedCount) != MACVNC_DISPLAY_SELECTION_OK) {
           rfbErr("Pinned display id=%u (selection %d) is no longer attached; "
                  "keeping the previous layout rather than silently capturing "
-                 "a different monitor\n", gPinnedDisplayID, displayNumber);
+                 "a different monitor\n", pinnedID, displayNumber);
           return FALSE;
       }
   } else {
@@ -727,7 +743,7 @@ applySelectionAndBuildLayout(const MacVNCDisplayInput *attached, size_t attached
                                    displayNumber, selected, &selectedCount)) {
       case MACVNC_DISPLAY_SELECTION_OK:
           if (displayNumber >= 0)
-              gPinnedDisplayID = selected[0].displayID;
+              atomic_store(&gPinnedDisplayID, selected[0].displayID);
           break;
       case MACVNC_DISPLAY_SELECTION_NO_SUCH_DISPLAY:
           rfbErr("Specified display %d does not exist\n", displayNumber);
@@ -2466,7 +2482,7 @@ vncServerStartWithResult(const MacVNCServerConfig *config)
     /* Adopt the immutable configuration into the server's private state. */
     viewOnly = config->viewOnly;
     displayNumber = config->displayNumber;
-    gPinnedDisplayID = 0; /* fresh run: re-pin from position on first resolve */
+    atomic_store(&gPinnedDisplayID, 0); /* fresh run: re-pin from position on first resolve */
     macVNCClientAccessMode = config->clientAccessMode;
     snprintf(macVNCListenAddress, sizeof(macVNCListenAddress), "%s",
              config->listenAddress ? config->listenAddress : "");
