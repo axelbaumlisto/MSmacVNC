@@ -44,6 +44,18 @@
  * ATTEMPTED is asserted (macVNCDeskShapeRebuildCountForTesting /
  * macVNCDeskShapeRebuildFailureCountForTesting, both of which advance
  * whether or not real frames ever arrive), never whether frames arrived.
+ *
+ * A separate bug, found while reading this rebuild path (2026-09-12): the
+ * "forced different" trigger above still calls the REAL rearmCaptures(),
+ * which independently re-reads the REAL (unchanged) desk and always takes
+ * the SAME-SHAPE branch on this machine - so nothing above, on ANY box,
+ * ever actually calls rfbNewFramebuffer(). That call resets
+ * rfbScreen->serverFormat to a wrong default (see applyServerPixelFormat()
+ * in mac.m); a test that never reaches it cannot catch a regression there.
+ * The block below drives the swap MECHANISM directly
+ * (macVNCRebuildFramebufferForTesting(), a same-shape self-swap through the
+ * real swapCanvas()), independent of the shape-changed DECISION this file
+ * otherwise tests, and asserts the announced pixel format survives it.
  */
 
 static int
@@ -120,6 +132,29 @@ main(void)
             vncServerStop();
             return 77;
         }
+
+        /*
+         * 0) The pixel format survives a REAL canvas swap (rfbNewFramebuffer),
+         *    not just the decision to attempt one. BGRA in memory
+         *    (ScreenCapturer.m) must announce redShift=16/greenShift=8/
+         *    blueShift=0 - both before any swap and after one, with a client
+         *    connected throughout (so refreshConnectedClientTranslators()'s
+         *    client-iteration path also runs, not just the format write).
+         */
+        uint8_t redShift, greenShift, blueShift;
+        macVNCServerPixelFormatForTesting(&redShift, &greenShift, &blueShift);
+        printf("Pixel format before any canvas swap: shift r/g/b = %u/%u/%u\n",
+               redShift, greenShift, blueShift);
+        assert(redShift == 16 && greenShift == 8 && blueShift == 0);
+
+        bool swapped = macVNCRebuildFramebufferForTesting();
+        assert(swapped);
+        macVNCServerPixelFormatForTesting(&redShift, &greenShift, &blueShift);
+        printf("Pixel format after a real canvas swap: shift r/g/b = %u/%u/%u\n",
+               redShift, greenShift, blueShift);
+        assert(redShift == 16 && greenShift == 8 && blueShift == 0); /* fails
+            before the fix: rfbNewFramebuffer() resets these to 0/8/16 and
+            nothing re-applies BGRA's real shifts. */
 
         double settle = (double)debounceNs / 1e9 + 0.5; /* generous slack over
             the debounce window itself, so a slow CI machine still observes
