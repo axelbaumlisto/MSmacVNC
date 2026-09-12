@@ -694,10 +694,62 @@ pixels rather than points.
   `captureIsAllowed()` says so at that moment - a one-word difference for an
   operator, no prompting, no new resolver rule.
   (`docs/TESTING.md`'s `capture_liveness_rearm_multidisplay` target is the
-  integration proof: Test A asserts zero re-arms while one display is fed
-  continuously and the other never is; Test B asserts `GiveUp` is still
-  reached, via the SUCCESS branch, when neither display is fed anything at
-  all.)
+  integration proof that `GiveUp` is still reached, via the SUCCESS branch,
+  when neither display is fed anything at all; its sibling
+  `capture_liveness_rearm_multidisplay_idle` asserts the OTHER half - zero
+  re-arms while one display is fed continuously and the other never is - in
+  its own target with its own real ctest `SKIP` on a single-display host,
+  after the original combined test's soft `printf`-only skip left that case
+  silently unproven on such a host.)
+
+  A fourth follow-up ("FIX-D") closed the one gap the silence-based watchdog
+  above cannot see BY CONSTRUCTION: a display that is RESIZED, not silenced.
+  `ScreenCapturer.m` pins `SCStreamConfiguration.width`/`height` at `Build`
+  time from `CGDisplayPixelsWide`/`High`, so once a display's mode changes,
+  ScreenCaptureKit keeps delivering frames at the OLD dimensions - just
+  rescaled - forever. Measured on the installed build (2026-09-12): changing
+  the built-in display's mode mid-session (1710x1112 -> 1470x956) produced
+  753 client updates and ZERO re-arms while the canvas stayed stuck at the
+  pre-change 5552x2715 composite size the whole time. Frames never stopped,
+  so nothing about it looked like silence.
+
+  The fix reacts to macOS's OWN notice instead of waiting to notice the
+  effect: `AppDelegate` observes `NSApplicationDidChangeScreenParametersNotification`
+  and calls `vncServerNoteDeskShapeMayHaveChanged()` - the one
+  new core entry point, unconditional and AppKit-free like every other core
+  function. A no-op while idle (`vncConnectedClients == 0`): a change with
+  nobody watching is already covered by the next connect reading the desk
+  fresh. Otherwise it debounces on the EXISTING `gCaptureStopQueue` (no new
+  queue) - a real reconfiguration fires this notification several times as
+  the desk settles, sometimes mid-negotiation, so reading immediately risks
+  rebuilding onto geometry that is itself about to change again; 500ms
+  coalesces a burst into one evaluation, timed from the LAST notification,
+  by rescheduling one persistent, reused timer rather than creating a new
+  one per call. Once settled: re-read the desk WITHOUT waking it (the same
+  `resolveDeskLayoutWithoutWaking()` re-arm already used, never
+  `readAttachedDisplays()`'s waking variant), compare against the published
+  layout with the EXISTING `macVNCDisplayLayoutsEqual()`, and rebuild - via
+  the EXISTING `rearmCaptures()`, unchanged - only if they differ. An
+  unchanged desk does nothing and logs nothing.
+
+  This is why FIX-D is cheap where the ORIGINAL `display-reconfiguration.md`
+  plan's proposal to react to reconfiguration was rejected: every objection
+  that plan raised against it is answered by machinery this file's earlier
+  follow-ups already built for an unrelated reason. See that plan's own
+  "superseded by FIX-D" note for the point-by-point answer. Deliberately
+  NOT sharing `gRearmsSinceFrame`/`gLastRearmNs`/`gCaptureRearmCount` with
+  the silence watchdog: those bound the SILENCE-driven cooldown/`maxRearms`
+  budget, and a shape-driven rearm folded into the same counters would let
+  a display that reconfigures several times in a row push the silence
+  watchdog toward a `GiveUp` it never earned. A failed shape-driven rebuild
+  still reaches the user: it calls the same `reportCaptureFailure()` every
+  other trigger uses, just counted separately
+  (`macVNCDeskShapeRebuildCountForTesting`/`...FailureCountForTesting`).
+  (`docs/TESTING.md`'s `capture_liveness_rearm_deskshape` target is the
+  integration proof: a burst of notifications collapses to one evaluation;
+  an unchanged desk rebuilds nothing; a desk forced to look different
+  rebuilds exactly once, through the real `rearmCaptures()`; idle is a
+  no-op.)
 - **MacVNCClamshellPolicy / MacVNCClamshellMarker / MacVNCClamshell** —
   closed-display mode. The policy
   half is pure C and holds every rule; the marker owns the persisted record; the
@@ -800,7 +852,7 @@ pixels rather than points.
 
 ## Tests
 
-`ctest` runs 48 targets (the number is enforced: `architecture_doc` compares
+`ctest` runs 50 targets (the number is enforced: `architecture_doc` compares
 this sentence against CMakeLists.txt's `add_test` count, so a target added or
 commented out fails the suite until this line is updated deliberately). Every
 assertion added here is checked by mutating the source and confirming the test

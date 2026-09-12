@@ -220,6 +220,30 @@ void vncServerDropCaptures(void);
 void vncServerCloseListeners(void);
 
 /*
+ * Told that macOS posted NSApplicationDidChangeScreenParametersNotification -
+ * call this from AppDelegate's observer, unconditionally, on any thread
+ * (main, per the notification's own delivery).
+ *
+ * A no-op unless a client is currently connected: a change while idle is
+ * already covered by the next connect reading the desk fresh. Otherwise
+ * debounces (real reconfigurations fire this several times as the desk
+ * settles) and, once settled, rebuilds the composite canvas ONLY if the
+ * desk actually changed shape - see rearmCaptures() in mac.m, which this
+ * reuses rather than duplicating. Never wakes a display, never restarts the
+ * server, never touches the listener or auth: on failure the existing
+ * capture-failure path (reportCaptureFailure) is what runs, same as every
+ * other re-arm trigger.
+ *
+ * Closes the one gap the capture-liveness watchdog cannot: a display that is
+ * RESIZED rather than silenced keeps delivering frames (SCStreamConfiguration
+ * pins width/height at Build time), so nothing about a mid-session
+ * reconfiguration looks like silence - measured on the installed build,
+ * where it produced zero re-arms and a canvas stuck at the pre-change size
+ * while frames kept flowing. See .pi/plans/capture-liveness.md (FIX-D).
+ */
+void vncServerNoteDeskShapeMayHaveChanged(void);
+
+/*
  * Return the TCP port the server is listening on.
  *
  * <= 0 means "not serving": -1 before a run has ever started or after a stop,
@@ -318,6 +342,26 @@ size_t macVNCCurrentDisplayLayoutCountForTesting(void);
    the shipped ~35s. maxRearms is not overridable - see the definition site. */
 void macVNCSetCaptureLivenessLimitsForTesting(uint64_t graceNs, uint64_t silenceNs,
                                               uint64_t cooldownNs);
+
+/* FIX-D test hooks - see vncServerNoteDeskShapeMayHaveChanged() above. */
+/* Overrides the debounce window (nanoseconds; 0 keeps the shipped 500ms), so
+   a test can observe a SECOND, separate firing within a bounded budget. */
+void macVNCSetDeskShapeDebounceForTesting(uint64_t ns);
+/* How many times the debounced recheck actually ran, regardless of what it
+   decided - the number that lets a test tell "a burst of N notifications
+   produced ONE evaluation" from "produced N". */
+unsigned macVNCDeskShapeRecheckCountForTesting(void);
+/* Forces the next recheck(s) to treat the freshly re-read desk as different
+   from the published layout, without needing to fake a MacVNCDisplayLayout
+   or physically reconfigure a display - the rebuild that follows is still a
+   real, unmocked rearmCaptures() call. */
+void macVNCForceDeskShapeDifferentForTesting(bool force);
+/* How many times a shape-driven rearm SUCCEEDED / FAILED, counted separately
+   from macVNCCaptureRearmCountForTesting() - see evaluateDeskShapeForRearm's
+   comment in mac.m for why the two triggers do not share a counter. */
+unsigned macVNCDeskShapeRebuildCountForTesting(void);
+unsigned macVNCDeskShapeRebuildFailureCountForTesting(void);
+
 void macVNCResetCaptureStateForTesting(void);
 /* Runs the real start/stop reconciler for the current client count. */
 void macVNCReconcileCaptureForTesting(void);
