@@ -301,6 +301,170 @@ static void testDesiredExclusionEventuallyLapsesIfNeverConfirmed(void)
 }
 
 /*
+ * F2 (post-effort test-gap fix): the curtain's own heartbeat, for real -
+ * a DEDICATED BACKGROUND THREAD sampling macVNCCaptureSessionSelfExcluded()
+ * on its own schedule, racing the real Build(desiredExcluded=true)/Start()/
+ * bounded-retry machinery on the main thread, rather than the single
+ * thread that interleaves pumping the run loop with checking the flag (as
+ * testDesiredExclusionEventuallyLapsesIfNeverConfirmed above already does).
+ * That existing test cannot miss a transient bad value only because nothing
+ * else runs between its own pump and its own check; an INDEPENDENT poller
+ * that never yields to those steps is what actually stands in for a heartbeat
+ * that has no idea when a retry's completion is about to run.
+ *
+ * What this does NOT and cannot prove, and says so rather than pretending:
+ * this is the SAME bare-test-binary session testDesiredExclusionEventuallyLapsesIfNeverConfirmed
+ * already exercises (Build's OPTIMISTIC desiredExcluded=true, no on-screen
+ * curtain window, no Screen Recording grant for this ad-hoc executable) -
+ * connecting this all the way through mac.m's rearmCaptures(), which reads
+ * macVNCCaptureSessionSelfExcluded() itself and threads it into its OWN
+ * Build calls as `wasExcluded`, needs the CURRENT session to already read
+ * true before a real re-arm - which in production only happens via a real
+ * curtain raise (genuine ScreenCaptureKit discovery of an on-screen curtain
+ * window). That is not reproducible from this bare binary any more than
+ * testDiscoveryWithoutThisProcessFailsClosed's own real-discovery case is;
+ * mac.m's one-line contribution (reading the flag before StopAndWait,
+ * passing it to both of rearmCaptures()'s Build call sites) stays verified
+ * by direct inspection - quoted, not re-derived, in the report this test
+ * was written for.
+ */
+static void testExclusionSurvivesUnderConcurrentHeartbeatStylePolling(void)
+{
+    macVNCCaptureSessionReset();
+
+    MacVNCDisplayLayout layout;
+    fillLayout(&layout, 1);
+    assert(macVNCCaptureSessionBuild(&layout, 1, 30, acceptFrame, noteFailure, true));
+    assert(macVNCCaptureSessionSelfExcluded());
+
+    macVNCCaptureSessionStart();
+
+    __block _Atomic bool pollerShouldStop = false;
+    __block _Atomic int samplesTaken = 0;
+    __block _Atomic int samplesTrue = 0;
+    __block _Atomic int firstFalseSampleIndex = -1; /* -1 = never observed false */
+    __block _Atomic int trueSamplesAfterLapse = 0; /* must stay 0: once lapsed,
+        a real curtain must never be told "excluded" again for this session -
+        the retry chain is one-shot (MacVNCCaptureSession.h), so a true
+        sampled after the lapse would mean either a second, unwanted retry
+        chain or a stale read racing the reset below */
+
+    dispatch_queue_t pollerQueue =
+        dispatch_queue_create("test.capture-exclusion.heartbeat-poller", DISPATCH_QUEUE_SERIAL);
+    dispatch_semaphore_t pollerDone = dispatch_semaphore_create(0);
+
+    /* Genuinely concurrent with the main thread's run-loop pumping below -
+       this queue does not wait its turn on the main queue for anything. */
+    dispatch_async(pollerQueue, ^{
+        while (!atomic_load(&pollerShouldStop)) {
+            bool excluded = macVNCCaptureSessionSelfExcluded();
+            int index = atomic_fetch_add(&samplesTaken, 1);
+            if (excluded) {
+                atomic_fetch_add(&samplesTrue, 1);
+                if (atomic_load(&firstFalseSampleIndex) != -1)
+                    atomic_fetch_add(&trueSamplesAfterLapse, 1);
+            } else {
+                int prevFirst = atomic_load(&firstFalseSampleIndex);
+                if (prevFirst == -1)
+                    atomic_store(&firstFalseSampleIndex, index);
+            }
+            usleep(1000); /* 1ms - far tighter than the curtain's real 1Hz
+                             heartbeat, so this is a stress in the SAME sense
+                             testRequestsSurviveConcurrentRebuild above is:
+                             meaningful under a race detector, not a promise
+                             about production's own poll rate. */
+        }
+        dispatch_semaphore_signal(pollerDone);
+    });
+
+    /* The retries run on the main queue (reestablishExclusion's own
+       dispatch_after target, per MacVNCCaptureSession.m); pump it for
+       comfortably longer than the shipped 5*200ms budget so this file does
+       not race its own bound on a loaded CI box. */
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:10.0];
+    while (macVNCCaptureSessionSelfExcluded() && deadline.timeIntervalSinceNow > 0) {
+        @autoreleasepool {
+            [[NSRunLoop mainRunLoop] runMode:NSDefaultRunLoopMode
+                                  beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+        }
+    }
+    assert(!macVNCCaptureSessionSelfExcluded());
+
+    /* Let the poller take a few more samples against the now-lapsed flag,
+       proving it does not flip back true on its own once exhausted. */
+    usleep(50000); /* 50ms - several more poll iterations */
+    for (int i = 0; i < 20 && atomic_load(&firstFalseSampleIndex) == -1; ++i)
+        usleep(5000); /* the poller's own thread may not have taken its next
+                          sample yet; give it a little more room rather than
+                          asserting on a race against its own cadence */
+
+    atomic_store(&pollerShouldStop, true);
+    dispatch_semaphore_wait(pollerDone, DISPATCH_TIME_FOREVER);
+    dispatch_release(pollerDone);
+    dispatch_release(pollerQueue);
+
+    int taken = atomic_load(&samplesTaken);
+    int wereTrue = atomic_load(&samplesTrue);
+    int firstFalse = atomic_load(&firstFalseSampleIndex);
+    printf("heartbeat-style poller: %d samples, %d true, first false at sample #%d\n",
+           taken, wereTrue, firstFalse);
+
+    /* The poller genuinely ran concurrently with the retry machinery. */
+    assert(taken > 0);
+    /* It DID observe the lapse - the bounded retry really exhausted. */
+    assert(firstFalse != -1);
+    /* Every sample BEFORE the lapse read true - the optimistic flag never
+       went false early, mid-retry, only to flip true again: exactly the
+       reader-visible flicker a real heartbeat sampling at 1Hz could still
+       have caught and wrongly lifted a curtain over. */
+    assert(wereTrue == firstFalse);
+    /* And nothing sampled AFTER the lapse ever read true again. */
+    assert(atomic_load(&trueSamplesAfterLapse) == 0);
+
+    macVNCCaptureSessionStopAndWait();
+    macVNCCaptureSessionReset();
+    assert(!macVNCCaptureSessionSelfExcluded());
+}
+
+/*
+ * F2's other half: the failure direction. A rebuild that FAILS outright
+ * (Build() itself returns false - here, the same way an empty/invalid
+ * layout already makes it fail per macVNCBuildDisplayLayout's own contract,
+ * rather than a ScreenCaptureKit-level failure this environment cannot
+ * produce on demand) must not leave exclusion reading true over a session
+ * whose count-based contract already says is dead
+ * (macVNCCaptureSessionCount() == 0). A curtain that read `true` here would
+ * stay up over a stream that no longer exists - the local user hidden from
+ * their own screen for a session serving nobody. The curtain's own
+ * captureIsLive check (driven by macVNCCaptureSessionCount()/liveness
+ * elsewhere) is what has to take over once this flag cannot be trusted to.
+ */
+static void testFailedRebuildDoesNotLeaveExclusionOnWithADeadSession(void)
+{
+    macVNCCaptureSessionReset();
+    assert(!macVNCCaptureSessionSelfExcluded());
+
+    MacVNCDisplayLayout empty;
+    fillLayout(&empty, 0); /* zero displays: Build must refuse, matching
+        DisplayLayout.c's own rejection of an empty selection - the same
+        precondition rearmCaptures() itself never actually violates (it only
+        ever calls Build with a layout that already passed
+        macVNCBuildDisplayLayout), isolated here at this layer alone since a
+        genuine ScreenCaptureKit-level Build failure cannot be produced on
+        demand in this environment. */
+    bool built = macVNCCaptureSessionBuild(&empty, 1, 30, acceptFrame, noteFailure, true);
+    printf("Build with an empty layout and desiredExcluded=true: built=%d count=%zu excluded=%d\n",
+           built, macVNCCaptureSessionCount(), macVNCCaptureSessionSelfExcluded());
+    assert(!built);
+    assert(macVNCCaptureSessionCount() == 0);
+    /* The dead-session case this test exists for: not left "on". */
+    assert(!macVNCCaptureSessionSelfExcluded());
+
+    macVNCCaptureSessionReset();
+    assert(!macVNCCaptureSessionSelfExcluded());
+}
+
+/*
  * The OTHER unjoined caller, and the reason every reader now snapshots under
  * the lock: mac.m's capture keep-warm timer runs on gCaptureStopQueue, which
  * nothing joins, and calls StopAndWait() and Count() after dropping
@@ -644,6 +808,8 @@ int main(void)
         testExclusionDoesNotSurviveARebuild();
         testDesiredExclusionSurvivesARebuildImmediately();
         testDesiredExclusionEventuallyLapsesIfNeverConfirmed();
+        testExclusionSurvivesUnderConcurrentHeartbeatStylePolling();
+        testFailedRebuildDoesNotLeaveExclusionOnWithADeadSession();
         testStopQueueReadersSurviveAConcurrentStop();
         printf("capture exclusion: all assertions passed (%d answers)\n",
                atomic_load(&gAnswers));

@@ -362,6 +362,15 @@ void macVNCForceDeskShapeDifferentForTesting(bool force);
 unsigned macVNCDeskShapeRebuildCountForTesting(void);
 unsigned macVNCDeskShapeRebuildFailureCountForTesting(void);
 
+/* F1 test hooks - see gPinnedDisplayID's own comment in mac.m. */
+/* The CURRENTLY pinned display id (0 = not pinned yet, or displayNumber < 0
+   never pins one), so a test can assert it is set exactly once per resolve
+   and never silently replaced by a different physical display. */
+uint32_t macVNCPinnedDisplayIDForTesting(void);
+/* Forces the pinned-id lookup to fail as if the pinned display had just been
+   unplugged, without physically removing a monitor. */
+void macVNCForcePinnedDisplayGoneForTesting(bool force);
+
 void macVNCResetCaptureStateForTesting(void);
 /* Runs the real start/stop reconciler for the current client count. */
 void macVNCReconcileCaptureForTesting(void);
