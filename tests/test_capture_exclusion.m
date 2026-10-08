@@ -740,6 +740,8 @@ static ScreenCapturer *makeCapturer(void)
     /* Never started: nothing here talks to ScreenCaptureKit. */
     return [[ScreenCapturer alloc]
         initWithDisplay:CGMainDisplayID()
+        pixelWidth:(int)CGDisplayPixelsWide(CGMainDisplayID())
+        pixelHeight:(int)CGDisplayPixelsHigh(CGMainDisplayID())
         captureFramesPerSecond:30
         frameHandler:^BOOL(CMSampleBufferRef sampleBuffer) { (void)sampleBuffer; return YES; }
         errorHandler:^(NSError *error) { (void)error; }];

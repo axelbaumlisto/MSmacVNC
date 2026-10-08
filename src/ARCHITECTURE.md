@@ -62,6 +62,13 @@ Pure logic, each with a unit test wired into `ctest` (`.c` for C modules,
 `MacVNCStartFailure`, which are Foundation-only and free of AppKit):
 - **DisplayLayout** — build a non-overlapping composite layout; map a
   framebuffer point back to a global display coordinate; compare two layouts
+  The canvas is the desk IN PIXELS at the highest scale present: origins are
+  scaled by that factor, each display keeps its own native size. A mixed-DPI
+  desk therefore leaves black gaps around its coarser displays - the price of
+  an arrangement that still matches the system's, and of capturing a Retina
+  panel at the resolution it actually has (it used to be described, and so
+  streamed, at its POINT size - three quarters of its pixels never left the
+  machine). A uniform desk has no gap and lays out exactly as before.
   POSITIONALLY (`macVNCDisplayLayoutsEqual`) so a re-arm can tell "the same
   desk" from "the desk changed shape" - a reorder counts as a change, because
   two real callers read a layout by array index and a reorder that looked like

@@ -272,6 +272,8 @@ bool macVNCCaptureSessionBuild(const MacVNCDisplayLayout *layout,
         macVNCSweepScheduleInit(&sweepSchedule, MACVNC_FULL_SWEEP_INTERVAL_NS);
         ScreenCapturer *capturer = [[ScreenCapturer alloc]
             initWithDisplay:geometry->input.displayID
+            pixelWidth:geometry->input.pixelWidth
+            pixelHeight:geometry->input.pixelHeight
             captureFramesPerSecond:captureFramesPerSecond
             frameHandler:^BOOL(CMSampleBufferRef sampleBuffer) {
                 /* Unwrap ScreenCaptureKit here so the consumer sees only

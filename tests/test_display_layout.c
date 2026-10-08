@@ -44,12 +44,90 @@ int main(void)
     };
     assert(!macVNCBuildDisplayLayout(overlapping, 2, &layout));
 
-    /* Native-pixel rectangles overlap after logical normalization: reject safely. */
+    /* MIXED DPI. A Retina panel delivers twice as many pixels as it occupies
+       points, so the canvas cannot be a point grid: it is the desk in pixels
+       at the HIGHEST scale present. Origins scale by that factor, sizes stay
+       native - so a 1x display sits in a 2x-sized slot and the remainder is
+       black, which is the only arrangement-preserving way to hold both. */
     MacVNCDisplayInput mixedScale[] = {
-        {1, 0, 0, 100, 100, 200, 200},
-        {2, 100, 0, 100, 100, 100, 100},
+        {1, 0, 0, 100, 100, 200, 200},   /* 2x */
+        {2, 100, 0, 100, 100, 100, 100}, /* 1x, to its right */
     };
-    assert(!macVNCBuildDisplayLayout(mixedScale, 2, &layout));
+    MacVNCDisplayLayout mixedLayout;
+    assert(macVNCBuildDisplayLayout(mixedScale, 2, &mixedLayout));
+    assert(mixedLayout.displays[0].framebufferX == 0);
+    assert(mixedLayout.displays[0].framebufferY == 0);
+    assert(mixedLayout.displays[1].framebufferX == 200); /* 100 points x 2 */
+    assert(mixedLayout.displays[1].framebufferY == 0);
+    assert(mixedLayout.width == 300); /* 200 + its own 100 native pixels */
+    assert(mixedLayout.height == 200);
+
+    /* The real desk this was found on: a 1x 4K external at the origin and a 2x
+       built-in Retina panel below-left. Before the fix the built-in was
+       described - and therefore captured - at its POINT size, so half of its
+       real pixels never reached the wire. */
+    MacVNCDisplayInput retinaDesk[] = {
+        {1, 0, 0, 3840, 2160, 3840, 2160},
+        {2, -1710, 1603, 1710, 1112, 3420, 2224},
+    };
+    MacVNCDisplayLayout retinaLayout;
+    assert(macVNCBuildDisplayLayout(retinaDesk, 2, &retinaLayout));
+    assert(retinaLayout.displays[0].framebufferX == 3420); /* 1710 points x 2 */
+    assert(retinaLayout.displays[0].framebufferY == 0);
+    assert(retinaLayout.displays[1].framebufferX == 0);
+    /* 1603 points x 2 = 3206, minus the 1046 empty rows between the external's
+       bottom edge (2160, unscaled because it is a 1x panel) and that origin. */
+    assert(retinaLayout.displays[1].framebufferY == 2160);
+    assert(retinaLayout.width == 7260);
+    assert(retinaLayout.height == 4384);
+
+    /* Pointer mapping is per-rectangle, so it keeps working across the scale
+       change: a canvas pixel on the 2x panel still lands on the right POINT. */
+    assert(macVNCMapFramebufferPoint(&retinaLayout, 3520, 100, &gx, &gy, &id));
+    assert(id == 1 && near(gx, 100) && near(gy, 100));
+    assert(macVNCMapFramebufferPoint(&retinaLayout, 200, 2360, &gx, &gy, &id));
+    assert(id == 2 && near(gx, -1610) && near(gy, 1703));
+
+    /* Empty bands are squeezed out on BOTH axes, and only bands nobody
+       occupies: the desk below has a 2x panel at the origin and a 1x panel
+       diagonally beyond it, so both a column band and a row band disappear and
+       the two end up corner to corner. */
+    MacVNCDisplayInput diagonal[] = {
+        {1, 0, 0, 100, 100, 200, 200},     /* 2x: 200x200 px at (0,0) */
+        {2, 200, 200, 100, 100, 100, 100}, /* 1x: scaled origin (400,400) */
+    };
+    MacVNCDisplayLayout diagonalLayout;
+    assert(macVNCBuildDisplayLayout(diagonal, 2, &diagonalLayout));
+    assert(diagonalLayout.displays[1].framebufferX == 200);
+    assert(diagonalLayout.displays[1].framebufferY == 200);
+    assert(diagonalLayout.width == 300);
+    assert(diagonalLayout.height == 300);
+
+    /* A band a THIRD display spans is not empty, so it must survive: the 1x
+       panel below stays where its scaled origin put it, because the tall 2x
+       panel covers those columns. */
+    MacVNCDisplayInput spanned[] = {
+        {1, 0, 0, 100, 100, 200, 200},     /* 2x at (0,0), 200x200 */
+        {2, 100, 0, 50, 50, 50, 50},       /* 1x at (200,0), 50x50 */
+        {3, 100, 50, 100, 100, 100, 100},  /* 1x at (200,100), spans to x=300 */
+    };
+    MacVNCDisplayLayout spannedLayout;
+    assert(macVNCBuildDisplayLayout(spanned, 3, &spannedLayout));
+    assert(spannedLayout.displays[1].framebufferX == 200);
+    assert(spannedLayout.displays[1].framebufferY == 0);
+    assert(spannedLayout.displays[2].framebufferX == 200);
+    assert(spannedLayout.displays[2].framebufferY == 100);
+    assert(spannedLayout.width == 300);
+    assert(spannedLayout.height == 200);
+
+    /* Scaling origins cannot rescue a desk whose POINT rectangles already
+       overlap - CoreGraphics never reports one, and a silent accept here
+       would composite two displays onto the same canvas pixels. */
+    MacVNCDisplayInput mixedOverlapping[] = {
+        {1, 0, 0, 100, 100, 200, 200},
+        {2, 50, 0, 100, 100, 100, 100},
+    };
+    assert(!macVNCBuildDisplayLayout(mixedOverlapping, 2, &layout));
 
     MacVNCDisplayInput tooLarge[] = {{1, 0, 0, 70000, 100, 70000, 100}};
     assert(!macVNCBuildDisplayLayout(tooLarge, 1, &layout));
