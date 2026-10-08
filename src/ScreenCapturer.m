@@ -29,6 +29,10 @@ static const void * const kMacVNCStateQueueKey = &kMacVNCStateQueueKey;
 }
 
 @property (nonatomic, assign) CGDirectDisplayID displayID;
+/* The frame size this stream is configured for, in backing pixels - see the
+   initialiser's comment in ScreenCapturer.h for why it is given, not read. */
+@property (nonatomic, assign) int pixelWidth;
+@property (nonatomic, assign) int pixelHeight;
 @property (nonatomic, strong) SCStream *stream;
 /* Captured from the discovery this stream already does at start, so a later
    content-filter swap needs no SCShareableContent round trip of its own.
@@ -230,11 +234,15 @@ static void endMailboxActivity(void *context)
 }
 
 - (instancetype)initWithDisplay:(CGDirectDisplayID)displayID
+                     pixelWidth:(int)pixelWidth
+                    pixelHeight:(int)pixelHeight
         captureFramesPerSecond:(NSInteger)captureFramesPerSecond
                    frameHandler:(BOOL (^)(CMSampleBufferRef))frameHandler
                    errorHandler:(void (^)(NSError *))errorHandler {
     if (self = [super init]) {
         _displayID = displayID;
+        _pixelWidth = pixelWidth;
+        _pixelHeight = pixelHeight;
         _frameHandler = [frameHandler copy];
         _errorHandler = [errorHandler copy];
         _stateQueue = dispatch_queue_create("net.christianbeier.macVNC.capture-state", DISPATCH_QUEUE_SERIAL);
@@ -298,8 +306,8 @@ static void endMailboxActivity(void *context)
 - (void)beginStreamingWithDisplay:(SCDisplay *)display generation:(NSUInteger)generation
 {
     SCStreamConfiguration *config = [[SCStreamConfiguration alloc] init];
-    config.width = (int)CGDisplayPixelsWide(self.displayID);
-    config.height = (int)CGDisplayPixelsHigh(self.displayID);
+    config.width = self.pixelWidth;
+    config.height = self.pixelHeight;
     if (@available(macOS 13.0, *))
         config.showsCursor = YES;
     config.minimumFrameInterval = CMTimeMake(1, (int32_t)self.captureFramesPerSecond);

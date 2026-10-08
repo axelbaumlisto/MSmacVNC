@@ -327,14 +327,34 @@ collectDisplayInputs(MacVNCDisplayInput *displays, size_t *count, int *primaryIn
   *primaryIndex = -1;
   for (size_t i = 0; i < reported; ++i) {
       CGRect bounds = CGDisplayBounds(ids[i]);
+      /* BACKING pixels, not CGDisplayPixelsWide(). That function answers in
+         POINTS for a HiDPI mode, so a Retina panel used to be described -
+         and, because the capture stream is configured from this very number,
+         CAPTURED - at half its real resolution, while a 1:1 external monitor
+         was unaffected. Only the current mode knows the difference. */
+      int pixelWidth = (int)CGDisplayPixelsWide(ids[i]);
+      int pixelHeight = (int)CGDisplayPixelsHigh(ids[i]);
+      CGDisplayModeRef mode = CGDisplayCopyDisplayMode(ids[i]);
+      if (mode) {
+          size_t modePixelWidth = CGDisplayModeGetPixelWidth(mode);
+          size_t modePixelHeight = CGDisplayModeGetPixelHeight(mode);
+          /* Fall back to the point size rather than trust a zero: a display
+             described as 0 wide fails macVNCBuildDisplayLayout, which would
+             take the whole server down over a mode read nobody can retry. */
+          if (modePixelWidth > 0 && modePixelHeight > 0) {
+              pixelWidth = (int)modePixelWidth;
+              pixelHeight = (int)modePixelHeight;
+          }
+          CGDisplayModeRelease(mode);
+      }
       displays[i] = (MacVNCDisplayInput){
           .displayID     = ids[i],
           .logicalX      = bounds.origin.x,
           .logicalY      = bounds.origin.y,
           .logicalWidth  = bounds.size.width,
           .logicalHeight = bounds.size.height,
-          .pixelWidth    = (int)CGDisplayPixelsWide(ids[i]),
-          .pixelHeight   = (int)CGDisplayPixelsHigh(ids[i]),
+          .pixelWidth    = pixelWidth,
+          .pixelHeight   = pixelHeight,
       };
       if (ids[i] == mainID)
           *primaryIndex = (int)i;

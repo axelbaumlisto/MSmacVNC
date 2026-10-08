@@ -121,7 +121,18 @@ bool macVNCCaptureExclusionMayProceed(bool haveStream,
 
 @interface ScreenCapturer : NSObject <SCStreamDelegate, SCStreamOutput>
 
+/*
+ * `pixelWidth`/`pixelHeight` are the frame size this stream must deliver, in
+ * BACKING pixels, and they are PASSED IN rather than read back from the
+ * display here on purpose: the composite layout already decided that number,
+ * and the consumer rejects any frame that disagrees with it. Deriving it twice
+ * is how the two came to disagree - this file asked CGDisplayPixelsWide(),
+ * which answers in points, so a Retina panel streamed at half the size its
+ * geometry promised.
+ */
 - (instancetype)initWithDisplay:(CGDirectDisplayID)displayID
+                     pixelWidth:(int)pixelWidth
+                    pixelHeight:(int)pixelHeight
         captureFramesPerSecond:(NSInteger)captureFramesPerSecond
                    frameHandler:(nonnull BOOL (^)(CMSampleBufferRef sampleBuffer))frameHandler
                    errorHandler:(nonnull void (^)(NSError *error))errorHandler;
