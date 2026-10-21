@@ -1,18 +1,20 @@
 #import "MacVNCPassword.h"
 #import "MacVNCDefaultsKeys.h"
 
-#import <Security/Security.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* Reuse the single-source-of-truth defaults key + bundle id (no re-hardcoding).
- * The legacy Keychain account name matches the defaults key by historical design. */
+/* Reuse the single-source-of-truth defaults key (no re-hardcoding).
+ *
+ * The password has exactly ONE owner: NSUserDefaults. Older builds kept a copy
+ * in the Keychain; that store is gone, and so is the migration that read it —
+ * a second copy would mean two places to keep in sync and an ACL prompt from a
+ * re-signed binary. Anyone upgrading from such a build keeps the defaults value
+ * written by their last Preferences save. */
 #define kKeyPassword               MacVNCKeyPassword
-#define kKeychainService           MacVNCBundleID
-#define kKeychainPasswordAccount   MacVNCKeyPassword
 
 static NSString *macVNCTrim(NSString *value)
 {
@@ -20,59 +22,13 @@ static NSString *macVNCTrim(NSString *value)
         NSCharacterSet.whitespaceAndNewlineCharacterSet] ?: @"";
 }
 
-static NSMutableDictionary *macVNCKeychainQuery(void)
-{
-    return [@{
-        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService: kKeychainService,
-        (__bridge id)kSecAttrAccount: kKeychainPasswordAccount,
-    } mutableCopy];
-}
-
-static NSString *macVNCReadKeychainPassword(void)
-{
-    NSMutableDictionary *query = macVNCKeychainQuery();
-    query[(__bridge id)kSecReturnData] = @YES;
-    query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
-
-    CFTypeRef result = NULL;
-    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
-    [query release];
-    if (status != errSecSuccess || !result)
-        return nil;
-
-    NSData *data = [(NSData *)result autorelease];
-    NSString *password = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
-    return password.length > 0 ? password : nil;
-}
-
-static BOOL macVNCDeleteKeychainPassword(void)
-{
-    NSMutableDictionary *query = macVNCKeychainQuery();
-    OSStatus status = SecItemDelete((__bridge CFDictionaryRef)query);
-    [query release];
-    return status == errSecSuccess || status == errSecItemNotFound;
-}
-
 NSString *macVNCLoadPassword(NSUserDefaults *defaults)
 {
-    NSString *plain = macVNCTrim([defaults stringForKey:kKeyPassword]);
-    if (plain.length > 0)
-        return plain;
-
-    NSString *legacy = macVNCTrim(macVNCReadKeychainPassword());
-    if (legacy.length > 0) {
-        [defaults setObject:legacy forKey:kKeyPassword];
-        [defaults synchronize];
-        macVNCDeleteKeychainPassword();
-        return legacy;
-    }
-    return @"";
+    return macVNCTrim([defaults stringForKey:kKeyPassword]);
 }
 
 void macVNCStorePassword(NSUserDefaults *defaults, NSString *rawPassword)
 {
-    macVNCDeleteKeychainPassword();
     [defaults setObject:macVNCTrim(rawPassword) forKey:kKeyPassword];
 }
 

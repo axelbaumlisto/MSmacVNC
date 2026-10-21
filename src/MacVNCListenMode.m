@@ -15,8 +15,7 @@ NSString *macVNCBindHostForMode(NSString *mode, NSString *address)
 {
     if ([mode isEqualToString:MacVNCListenModeLocalhost])
         return MACVNC_NSSTR(MACVNC_LOOPBACK_IPV4);
-    if ([mode isEqualToString:MacVNCListenModeCustom] ||
-        [mode isEqualToString:MacVNCListenModeSelected])
+    if (macVNCListenModeBindsToAddress(mode.UTF8String))
         return address.length > 0 ? address : nil;
     return nil; /* "all" or unknown -> no single host */
 }

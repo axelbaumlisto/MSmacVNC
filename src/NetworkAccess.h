@@ -27,3 +27,9 @@ bool macVNCNetworkAccessAllows(const MacVNCNetworkAccessList *list,
                                const char *clientHost);
 
 bool macVNCNetworkAccessContainsAllowAll(const MacVNCNetworkAccessList *list);
+
+/* Is this IPv4 address currently assigned to one of our interfaces?
+ * The single implementation of that question: a syntactically valid address
+ * whose network is gone (Wi-Fi off, VPN down, DHCP change) would otherwise
+ * surface later as a generic bind failure phrased like a port collision. */
+bool macVNCIPv4IsAssignedToInterface(uint32_t hostOrderAddress);

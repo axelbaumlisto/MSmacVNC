@@ -2,6 +2,8 @@
 
 #include <arpa/inet.h>
 #include <ctype.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -156,4 +158,25 @@ macVNCNetworkAccessContainsAllowAll(const MacVNCNetworkAccessList *list)
             return true;
     }
     return false;
+}
+
+bool
+macVNCIPv4IsAssignedToInterface(uint32_t hostOrderAddress)
+{
+    struct ifaddrs *interfaces = NULL;
+    if (getifaddrs(&interfaces) != 0)
+        return false;
+
+    bool assigned = false;
+    for (struct ifaddrs *ifa = interfaces; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET)
+            continue;
+        uint32_t address = ntohl(((struct sockaddr_in *)ifa->ifa_addr)->sin_addr.s_addr);
+        if (address == hostOrderAddress) {
+            assigned = true;
+            break;
+        }
+    }
+    freeifaddrs(interfaces);
+    return assigned;
 }

@@ -828,35 +828,25 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond,
   rfbScreen->port = port;
   const char *listenAddress = macVNCListenAddress;
   if (listenAddress && *listenAddress) {
-      struct in_addr parsedAddress;
-      if (inet_pton(AF_INET, listenAddress, &parsedAddress) != 1) {
+      uint32_t parsedAddress = 0;
+      if (!macVNCParseIPv4(listenAddress, &parsedAddress)) {
           rfbErr("Invalid listen address: %s\n", listenAddress);
           return FALSE;
       }
       /* Pre-flight: a syntactically valid address that no longer belongs to
          any interface (Wi-Fi off, VPN down, DHCP change) would only surface
          as a generic bind failure AFTER rfbInitServer, phrased like a port
-         collision. Tell the user what actually happened, before we bind. */
-      bool addressIsLocal = false;
-      struct ifaddrs *interfaces = NULL;
-      if (getifaddrs(&interfaces) == 0) {
-          for (struct ifaddrs *ifa = interfaces; ifa; ifa = ifa->ifa_next) {
-              if (ifa->ifa_addr && ifa->ifa_addr->sa_family == AF_INET &&
-                  ((struct sockaddr_in *)ifa->ifa_addr)->sin_addr.s_addr ==
-                      parsedAddress.s_addr) {
-                  addressIsLocal = true;
-                  break;
-              }
-          }
-          freeifaddrs(interfaces);
-      }
-      if (!addressIsLocal) {
+         collision. Tell the user what actually happened, before we bind.
+         The question itself lives in NetworkAccess, once. */
+      if (!macVNCIPv4IsAssignedToInterface(parsedAddress)) {
           rfbErr("Listen address %s is not assigned to any active interface; "
                  "the selected network may be gone (Wi-Fi off, VPN down). "
                  "Re-select the interface in Preferences.\n", listenAddress);
           return FALSE;
       }
-      rfbScreen->listenInterface = parsedAddress.s_addr;
+      struct in_addr bindAddress;
+      bindAddress.s_addr = htonl(parsedAddress);
+      rfbScreen->listenInterface = bindAddress.s_addr;
   }
   /* v1 network policy is IPv4-only; do not expose an IPv6 listener. */
   rfbScreen->ipv6port = 0;

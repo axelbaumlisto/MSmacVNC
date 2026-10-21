@@ -14,15 +14,16 @@ NS_ASSUME_NONNULL_BEGIN
  * By request the password is stored as plaintext in NSUserDefaults (not the
  * Keychain). All values are trimmed of surrounding whitespace/newlines so a
  * pasted value with a hidden trailing newline cannot break VNC DES auth.
- * A legacy Keychain-stored password is migrated into defaults on first load.
+ * NSUserDefaults is the ONLY store: there is no Keychain copy to migrate,
+ * delete or keep in sync.
  */
 
-/* Load the effective password (trimmed). Migrates a legacy Keychain value into
- * defaults and removes it from the Keychain. Returns @"" when none is set. */
+/* Load the effective password (trimmed) from defaults. Returns @"" when none
+ * is set. */
 NSString *macVNCLoadPassword(NSUserDefaults *defaults);
 
-/* Persist a password in plaintext defaults (trimmed) and remove any Keychain
- * copy. Pass the raw text field value; trimming is applied here. */
+/* Persist a password in plaintext defaults (trimmed). Pass the raw text field
+ * value; trimming is applied here. */
 void macVNCStorePassword(NSUserDefaults *defaults, NSString *rawPassword);
 
 /* Read a password from a secure file referenced by MACVNC_PASSWORD_FILE.
