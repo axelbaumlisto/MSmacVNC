@@ -13,3 +13,6 @@ __pycache__/
 # clang --analyze drops a report .plist next to the cwd; these were
 # committed by accident in v0.3.12 and are build output, not sources.
 /*.plist
+
+# Local assistant settings are per-machine, not project sources.
+/.claude/settings.local.json
