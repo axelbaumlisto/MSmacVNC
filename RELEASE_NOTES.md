@@ -1,3 +1,51 @@
+# macVNC 0.4.8
+
+## The password lived in two places, and the second one asked for itself
+
+The password was stored as plaintext in `NSUserDefaults` by request, but the
+Keychain code from 0.2.5 was never removed: every save also deleted a Keychain
+copy, and every load first looked for one. Two owners of one fact, and a store
+nobody asked for. It is gone — `macVNCLoadPassword` reads defaults,
+`macVNCStorePassword` writes defaults, and nothing reads or writes a Keychain
+item any more.
+
+An installation that ran the 0.2.5–0.3.x builds and never saved Preferences
+afterwards had its password only in that Keychain copy. Nothing in the current
+build reads it, so such an installation needs the password typed once.
+
+## AmneziaWG and WireGuard tunnels were treated as a single host
+
+The allowlist preset recognised one tunnel shape: a point-to-point `utunN` with
+a CGNAT address, which is Tailscale. A WireGuard-family tunnel hands the client a
+**private** `/32` — AmneziaWG gives `10.13.13.3` for its `10.13.13.0/24` — and
+that row fell through to "its own address": the preset allowed this Mac and
+nobody else, and the row was hidden from the presets entirely.
+
+A private `/32` on a `utunN` now yields the enclosing `/24` and is labelled
+`WireGuard-like (utunN)`, so the Amnezia tunnel offers `10.13.13.0/24` like the
+tailnet offers `100.64.0.0/10`. A private `/32` on a normal interface and a
+public `/32` tunnel keep the old single-address preset — only the tunnel shape
+implies shared peers.
+
+## One registered bundle, or half a dozen
+
+Every build directory and every backup carries the same `CFBundleIdentifier`.
+LaunchServices registers each copy it sees, so Privacy & Security listed the app
+several times and a Screen Recording grant could attach to a bundle that is
+never launched — the installed app then came up unable to capture, and resetting
+the grant looked like the fix. `packaging/install_local.sh` now unregisters every
+other macVNC bundle after installing, and `docs/INSTALL.md` records the rule.
+
+## Two facts, one answer each
+
+`custom`/`selected` were compared against string literals in the C resolver and
+again in the Objective-C helper; the "is this address on an interface?" question
+was answered inline in `mac.m`; the tailnet preset was recognised in the UI by
+comparing the CIDR to a hard-coded `"100.64.0.0/10"`. Each now has exactly one
+implementation: `macVNCListenModeBindsToAddress()`,
+`macVNCIPv4IsAssignedToInterface()`, and a `tailnetLike` flag on the row that
+says which preset was applied rather than letting the UI re-derive it.
+
 # macVNC 0.4.7
 
 ## Typing on a viewer crashed the whole server
