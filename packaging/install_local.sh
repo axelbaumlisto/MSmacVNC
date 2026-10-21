@@ -36,5 +36,15 @@ ditto "$STAGE/macVNC.app" "$DEST"
 rm -rf "$STAGE"
 
 codesign -dv --verbose=2 "$DEST" 2>&1 | grep -E 'Identifier|TeamIdentifier|Signature'
+
+# One identity, one bundle. Every macVNC.app in a build directory or a backup
+# carries the same CFBundleIdentifier, and LaunchServices happily registers all
+# of them: the permission panes then list the app several times and a grant can
+# land on a copy that is never launched. Unregister everything except $DEST.
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+for stale in "$ROOT"/build*/macVNC.app "$HOME"/macVNC.app.bak-*/ "$HOME"/.macvnc-backups/macVNC.app*; do
+    [ -e "$stale" ] && "$LSREGISTER" -u "$stale" >/dev/null 2>&1 || true
+done
+
 open -a "$DEST"
 echo "installed and launched: $DEST"
