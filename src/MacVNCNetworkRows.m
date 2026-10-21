@@ -1,5 +1,6 @@
 #import "MacVNCNetworkRows.h"
 #import "NetworkInventory.h"
+#import "NetworkRowText.h"
 
 #include <arpa/inet.h>
 #include <ifaddrs.h>

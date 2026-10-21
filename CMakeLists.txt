@@ -101,6 +101,8 @@ set(SOURCE_FILES
     src/NetworkCIDR.c
     src/NetworkInventory.h
     src/NetworkInventory.c
+    src/NetworkRowText.h
+    src/NetworkRowText.c
     src/NetworkPolicyResolver.h
     src/NetworkPolicyResolver.c
     src/MacVNCDisplayWake.h
@@ -437,7 +439,7 @@ if(BUILD_TESTING)
     target_include_directories(test_network_cidr PRIVATE src)
     add_test(NAME network_cidr COMMAND test_network_cidr)
 
-    add_executable(test_network_inventory tests/test_network_inventory.c src/NetworkInventory.c src/NetworkCIDR.c src/NetworkAccess.c)
+    add_executable(test_network_inventory tests/test_network_inventory.c src/NetworkInventory.c src/NetworkRowText.c src/NetworkCIDR.c src/NetworkAccess.c)
     target_include_directories(test_network_inventory PRIVATE src)
     add_test(NAME network_inventory COMMAND test_network_inventory)
 

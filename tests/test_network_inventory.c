@@ -1,5 +1,6 @@
 #include "NetworkInventory.h"
 #include "NetworkCIDR.h"
+#include "NetworkRowText.h"
 
 #include <stdio.h>
 #include <stdlib.h>
