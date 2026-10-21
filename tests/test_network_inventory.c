@@ -18,8 +18,8 @@ int main(void)
     CHECK(!row.cgnatLike);
     CHECK_STR(row.name, "en0");
     CHECK_STR(row.address, "192.168.1.87");
-    CHECK_STR(row.cidr, "192.168.100.0/24");
-    CHECK_STR(row.suggestedAllowCIDR, "192.168.100.0/24");
+    CHECK_STR(row.cidr, "192.168.1.0/24");
+    CHECK_STR(row.suggestedAllowCIDR, "192.168.1.0/24");
     CHECK_STR(row.displayName, "en0");
 
     CHECK(macVNCBuildNetworkInterfaceRow(&(MacVNCNetworkInterfaceSnapshot){"utun4", true, "100.101.102.103", "255.255.255.255"}, &row));

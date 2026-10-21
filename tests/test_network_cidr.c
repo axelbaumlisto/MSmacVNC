@@ -11,7 +11,7 @@ int main(void)
 {
     char out[64];
     CHECK(macVNCNetworkCIDRFromAddressAndMask("192.168.1.87", "255.255.255.0", out, sizeof(out)));
-    CHECK_STR(out, "192.168.100.0/24");
+    CHECK_STR(out, "192.168.1.0/24");
     CHECK(macVNCNetworkCIDRFromAddressAndMask("10.0.5.9", "255.255.0.0", out, sizeof(out)));
     CHECK_STR(out, "10.0.0.0/16");
     CHECK(macVNCNetworkCIDRFromAddressAndMask("100.101.102.103", "255.255.255.255", out, sizeof(out)));
