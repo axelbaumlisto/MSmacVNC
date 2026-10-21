@@ -99,3 +99,39 @@ macVNCBuildNetworkInterfaceRow(const MacVNCNetworkInterfaceSnapshot *snapshot,
                               (row->cgnatLike || row->vpnLike || row->prefixLength < 32);
     return true;
 }
+
+bool
+macVNCNetworkRowAllowText(const MacVNCNetworkInterfaceRow *row,
+                          char *title, size_t titleSize,
+                          char *summary, size_t summarySize)
+{
+    if (!row || !title || !summary || titleSize == 0 || summarySize == 0)
+        return false;
+
+    int written;
+    if (row->tailnetLike) {
+        written = snprintf(title, titleSize,
+                           "Tailscale tailnet / CGNAT range — %s "
+                           "(broad; use Tailscale ACLs)", row->suggestedAllowCIDR);
+        if (written < 0 || (size_t)written >= titleSize)
+            return false;
+        written = snprintf(summary, summarySize, "Auto: Tailscale clients — %s",
+                           row->suggestedAllowCIDR);
+    } else if (row->vpnLike) {
+        written = snprintf(title, titleSize,
+                           "VPN peers of %s — %s (this tunnel only)",
+                           row->displayName, row->suggestedAllowCIDR);
+        if (written < 0 || (size_t)written >= titleSize)
+            return false;
+        written = snprintf(summary, summarySize, "Auto: VPN clients — %s",
+                           row->suggestedAllowCIDR);
+    } else {
+        written = snprintf(title, titleSize, "Same network as %s — %s",
+                           row->displayName, row->suggestedAllowCIDR);
+        if (written < 0 || (size_t)written >= titleSize)
+            return false;
+        written = snprintf(summary, summarySize, "Auto: same network — %s",
+                           row->suggestedAllowCIDR);
+    }
+    return written >= 0 && (size_t)written < summarySize;
+}

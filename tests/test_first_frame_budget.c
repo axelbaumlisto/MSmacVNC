@@ -2,6 +2,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <time.h>
 
 static void test_total_deadline_budget(void)
 {
@@ -27,25 +28,41 @@ static void test_total_deadline_budget(void)
     assert(split.tv_sec == 3 && split.tv_nsec == 1);
 }
 
-/* Cannot literally sleep the machine in a unit test, but the defining
-   relationship between the two clocks is checkable without doing that:
-   CLOCK_MONOTONIC counts everything CLOCK_UPTIME_RAW counts PLUS however long
-   the machine has slept since boot, so it can never read behind it - equal
-   only on a machine that has never slept since boot, strictly ahead on any
-   real one. This is the same fact measured directly (2354.2s of accumulated
-   sleep across 20 events) that justified adding macVNCUptimeNow() at all. */
+/* The epoch question and the rate question are different questions.
+
+   CLOCK_MONOTONIC's epoch on Darwin is documented as "an arbitrary point", and
+   measured here it can sit several seconds BEHIND CLOCK_UPTIME_RAW (11314.6 s
+   vs 11320.8 s on this Mac), so comparing the two readings is not a property
+   of anything - an earlier version of this test asserted monotonic >= uptime
+   and failed after the machine had slept. What IS a property: both clocks tick
+   at the same rate while the machine is awake, which is what lets the budget
+   code treat a nanosecond of one as a nanosecond of the other.
+
+   The sleep semantics themselves cannot be observed without sleeping, so they
+   stay documented in FirstFrameBudget.h rather than asserted here. */
 static void test_uptime_excludes_sleep_monotonic_does_not(void)
 {
     uint64_t uptimeBefore = macVNCUptimeNow();
     uint64_t monotonicBefore = macVNCMonotonicNow();
     assert(uptimeBefore > 0);
-    assert(monotonicBefore >= uptimeBefore);
+    assert(monotonicBefore > 0);
+
+    struct timespec pause = {0, 20 * 1000 * 1000};   /* 20 ms of real work */
+    nanosleep(&pause, NULL);
 
     uint64_t uptimeAfter = macVNCUptimeNow();
     uint64_t monotonicAfter = macVNCMonotonicNow();
-    assert(uptimeAfter >= uptimeBefore);
-    assert(monotonicAfter >= monotonicBefore);
-    assert(monotonicAfter >= uptimeAfter);
+    assert(uptimeAfter > uptimeBefore);
+    assert(monotonicAfter > monotonicBefore);
+
+    uint64_t uptimeDelta = uptimeAfter - uptimeBefore;
+    uint64_t monotonicDelta = monotonicAfter - monotonicBefore;
+    uint64_t slower = uptimeDelta < monotonicDelta ? uptimeDelta : monotonicDelta;
+    uint64_t faster = uptimeDelta < monotonicDelta ? monotonicDelta : uptimeDelta;
+    /* Same rate: the two deltas differ only by how much the reads themselves
+       jitter, never by a multiple. A clock that paused or counted sleep would
+       break this by the sleep length. */
+    assert(faster - slower < 20 * 1000 * 1000);
 }
 
 int main(void)

@@ -14,7 +14,6 @@ NSString * const MacVNCRowKeyListenTitle        = @"listenTitle";
 NSString * const MacVNCRowKeyAllowTitle         = @"allowTitle";
 NSString * const MacVNCRowKeyAllowSummary       = @"allowSummary";
 NSString * const MacVNCRowKeyAllowPresetVisible = @"allowPresetVisible";
-NSString * const MacVNCRowKeyCGNATLike          = @"cgnatLike";
 
 NSArray<NSDictionary<NSString *, id> *> *macVNCActiveNetworkRows(void)
 {
@@ -55,27 +54,16 @@ NSArray<NSDictionary<NSString *, id> *> *macVNCActiveNetworkRows(void)
         NSString *cidr = [NSString stringWithUTF8String:row.cidr];
         NSString *allowCIDR = [NSString stringWithUTF8String:row.suggestedAllowCIDR];
         NSString *listenTitle = [NSString stringWithFormat:@"%@ — %@", displayName, ip];
-        /* Label it a tailnet only when the broad preset was actually applied
-           (point-to-point utun): a CGNAT address on a normal LAN keeps its own
-           subnet and must not be presented as "Tailscale clients". The row says
-           so itself, so this side never re-derives it from the CIDR text. */
-        BOOL usesTailnetPreset = row.tailnetLike;
-        /* A private point-to-point tunnel (AmneziaWG, WireGuard) is recognised by
-           the row itself, not by its CIDR: two different VPNs can share a /24 and
-           a LAN can own one too, so only the interface shape tells them apart. */
-        BOOL usesVPNPreset = row.vpnLike;
-        NSString *allowTitle;
-        NSString *allowSummary;
-        if (usesTailnetPreset) {
-            allowTitle = [NSString stringWithFormat:@"Tailscale tailnet / CGNAT range — %@ (broad; use Tailscale ACLs)", allowCIDR];
-            allowSummary = [NSString stringWithFormat:@"Auto: Tailscale clients — %@", allowCIDR];
-        } else if (usesVPNPreset) {
-            allowTitle = [NSString stringWithFormat:@"VPN peers of %@ — %@ (this tunnel only)", displayName, allowCIDR];
-            allowSummary = [NSString stringWithFormat:@"Auto: VPN clients — %@", allowCIDR];
-        } else {
-            allowTitle = [NSString stringWithFormat:@"Same network as %@ — %@", displayName, allowCIDR];
-            allowSummary = [NSString stringWithFormat:@"Auto: same network — %@", allowCIDR];
-        }
+        /* The wording lives in the inventory, where a test can read it: which
+           preset a row got is the row's own fact, not something this side
+           re-derives from the CIDR text. */
+        char allowTitleText[MACVNC_NETWORK_ROW_LABEL_MAX] = {0};
+        char allowSummaryText[MACVNC_NETWORK_ROW_LABEL_MAX] = {0};
+        if (!macVNCNetworkRowAllowText(&row, allowTitleText, sizeof(allowTitleText),
+                                       allowSummaryText, sizeof(allowSummaryText)))
+            continue;
+        NSString *allowTitle = @(allowTitleText);
+        NSString *allowSummary = @(allowSummaryText);
         [rows addObject:@{
             MacVNCRowKeyName: name,
             MacVNCRowKeyDisplayName: displayName,
@@ -86,7 +74,6 @@ NSArray<NSDictionary<NSString *, id> *> *macVNCActiveNetworkRows(void)
             MacVNCRowKeyAllowTitle: allowTitle,
             MacVNCRowKeyAllowSummary: allowSummary,
             MacVNCRowKeyAllowPresetVisible: @(row.allowPresetVisible),
-            MacVNCRowKeyCGNATLike: @(row.cgnatLike),
         }];
     }
     freeifaddrs(interfaces);

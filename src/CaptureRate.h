@@ -14,6 +14,16 @@
 #define MACVNC_CAPTURE_FPS_MIN 1
 #define MACVNC_CAPTURE_FPS_MAX 60
 
+/* The supported range, asked one way. The Preferences popup, the persisted
+   value it writes and the server's final check all used to spell out the same
+   pair of comparisons, so the three could disagree about what "valid" meant. */
+#include <stdbool.h>
+static inline bool macVNCCaptureFPSIsSupported(int framesPerSecond)
+{
+    return framesPerSecond >= MACVNC_CAPTURE_FPS_MIN &&
+           framesPerSecond <= MACVNC_CAPTURE_FPS_MAX;
+}
+
 typedef enum {
     MACVNC_CAPTURE_RATE_DEFAULTED = 0,
     MACVNC_CAPTURE_RATE_VALID = 1,

@@ -784,8 +784,7 @@ ScreenInit(int port, const char *password, int captureFramesPerSecond,
 {
   int bitsPerSample = 8;
 
-  if (captureFramesPerSecond < MACVNC_CAPTURE_FPS_MIN ||
-      captureFramesPerSecond > MACVNC_CAPTURE_FPS_MAX) {
+  if (!macVNCCaptureFPSIsSupported(captureFramesPerSecond)) {
       rfbErr("Invalid capture rate: %d FPS\n", captureFramesPerSecond);
       return FALSE;
   }

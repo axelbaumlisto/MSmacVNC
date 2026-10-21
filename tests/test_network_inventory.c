@@ -96,6 +96,30 @@ int main(void)
     CHECK(!row.allowPresetVisible);
     CHECK_STR(row.cidr, "");
 
+    /* The sentences the user actually reads, per preset kind. */
+    char title[MACVNC_NETWORK_ROW_LABEL_MAX] = {0};
+    char summary[MACVNC_NETWORK_ROW_LABEL_MAX] = {0};
+
+    CHECK(macVNCBuildNetworkInterfaceRow(&(MacVNCNetworkInterfaceSnapshot){"utun4", true, "100.101.102.103", "255.255.255.255"}, &row));
+    CHECK(macVNCNetworkRowAllowText(&row, title, sizeof(title), summary, sizeof(summary)));
+    CHECK_STR(title, "Tailscale tailnet / CGNAT range — 100.64.0.0/10 (broad; use Tailscale ACLs)");
+    CHECK_STR(summary, "Auto: Tailscale clients — 100.64.0.0/10");
+
+    CHECK(macVNCBuildNetworkInterfaceRow(&(MacVNCNetworkInterfaceSnapshot){"utun6", true, "10.13.13.3", "255.255.255.255"}, &row));
+    CHECK(macVNCNetworkRowAllowText(&row, title, sizeof(title), summary, sizeof(summary)));
+    CHECK_STR(title, "VPN peers of WireGuard-like (utun6) — 10.13.13.0/24 (this tunnel only)");
+    CHECK_STR(summary, "Auto: VPN clients — 10.13.13.0/24");
+
+    CHECK(macVNCBuildNetworkInterfaceRow(&(MacVNCNetworkInterfaceSnapshot){"en0", true, "192.168.1.53", "255.255.255.0"}, &row));
+    CHECK(macVNCNetworkRowAllowText(&row, title, sizeof(title), summary, sizeof(summary)));
+    CHECK_STR(title, "Same network as en0 — 192.168.1.0/24");
+    CHECK_STR(summary, "Auto: same network — 192.168.1.0/24");
+
+    /* A buffer too small for the sentence is a refusal, not a truncated label. */
+    char tiny[8] = {0};
+    CHECK(!macVNCNetworkRowAllowText(&row, tiny, sizeof(tiny), summary, sizeof(summary)));
+    CHECK(!macVNCNetworkRowAllowText(NULL, title, sizeof(title), summary, sizeof(summary)));
+
     puts("network inventory tests passed");
     return 0;
 }

@@ -16,7 +16,6 @@ extern NSString * const MacVNCRowKeyListenTitle;      /* popup title */
 extern NSString * const MacVNCRowKeyAllowTitle;       /* allow title */
 extern NSString * const MacVNCRowKeyAllowSummary;     /* allow summary */
 extern NSString * const MacVNCRowKeyAllowPresetVisible; /* NSNumber(BOOL) */
-extern NSString * const MacVNCRowKeyCGNATLike;        /* NSNumber(BOOL) */
 
 /*
  * Enumerate active IPv4 network interfaces as selectable rows for the

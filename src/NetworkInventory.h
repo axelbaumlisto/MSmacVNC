@@ -31,3 +31,13 @@ typedef struct {
 
 bool macVNCBuildNetworkInterfaceRow(const MacVNCNetworkInterfaceSnapshot *snapshot,
                                     MacVNCNetworkInterfaceRow *row);
+
+#define MACVNC_NETWORK_ROW_LABEL_MAX 192
+
+/* What the allowlist checkbox says for this row: the title and the one-line
+   summary. Kept out of the Objective-C rows builder so a test can read the
+   exact sentences the user will see - the flags were tested, the wording was
+   not, and the wording is what tells a tailnet from a VPN from a LAN. */
+bool macVNCNetworkRowAllowText(const MacVNCNetworkInterfaceRow *row,
+                               char *title, size_t titleSize,
+                               char *summary, size_t summarySize);

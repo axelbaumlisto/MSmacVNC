@@ -599,7 +599,7 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
 
     /* Validated here as well as at startup: a popup should never be able to
        store a value the server would have to reject on the next launch. */
-    if (captureFPS >= MACVNC_CAPTURE_FPS_MIN && captureFPS <= MACVNC_CAPTURE_FPS_MAX)
+    if (macVNCCaptureFPSIsSupported(captureFPS))
         [defaults setInteger:captureFPS forKey:MacVNCKeyCaptureFPS];
     MacVNCImageProfile parsedProfile;
     if (macVNCParseImageProfile(imageProfileName.UTF8String, &parsedProfile))
@@ -634,7 +634,7 @@ static void macVNCPersistPreferences(NSUserDefaults *defaults,
     NSString *currentAddress = [defaults stringForKey:MacVNCKeyListenAddress] ?: @"";
     NSString *currentAllowed = [defaults stringForKey:MacVNCKeyAllowedClients] ?: @"";
     int captureFPS = (int)[defaults integerForKey:MacVNCKeyCaptureFPS];
-    if (captureFPS < MACVNC_CAPTURE_FPS_MIN || captureFPS > MACVNC_CAPTURE_FPS_MAX)
+    if (!macVNCCaptureFPSIsSupported(captureFPS))
         captureFPS = MACVNC_CAPTURE_FPS_DEFAULT;
     NSString *imageProfileName = [defaults stringForKey:MacVNCKeyImageProfile]
                                  ?: @(MACVNC_IMAGE_PROFILE_DEFAULT_NAME);
