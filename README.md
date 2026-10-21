@@ -22,6 +22,11 @@ This branch adds a single composite RFB desktop for all active displays, on-dema
 - VNC password authentication.
 - Optional bind to a specific IPv4 address.
 
+## Installing on this Mac
+
+See [docs/INSTALL.md](docs/INSTALL.md): install only through
+`packaging/install_local.sh`, so exactly one `macVNC.app` stays registered.
+
 ## Requirements
 
 - macOS 13 or later. macOS 15/26 is recommended for the tested ScreenCaptureKit path.
