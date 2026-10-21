@@ -68,19 +68,32 @@ macVNCBuildNetworkInterfaceRow(const MacVNCNetworkInterfaceSnapshot *snapshot,
        interface (carrier/campus CGNAT LAN) keeps its actual subnet: widening a
        /24 to a /10 would silently allow ~4.2M unrelated hosts. */
     const char *ifName = snapshot->name ? snapshot->name : "";
-    bool pointToPointCGNAT = row->cgnatLike && row->prefixLength == 32 &&
-                             strncmp(ifName, "utun", 4) == 0;
+    bool pointToPoint = row->prefixLength == 32 && strncmp(ifName, "utun", 4) == 0;
+    bool pointToPointCGNAT = row->cgnatLike && pointToPoint;
+    /* Same shape as Tailscale, different address family: WireGuard-family VPNs
+       (AmneziaWG, plain WireGuard, OpenVPN tun) hand the client a private /32
+       while every peer shares the tunnel subnet. Naming the /32 would allow
+       exactly this machine and no one else, so suggest the enclosing /24. */
+    char private24[MACVNC_NETWORK_ROW_TEXT_MAX] = {0};
+    bool pointToPointPrivate = pointToPoint && macVNCIPv4IsPrivate(snapshot->address) &&
+                               macVNCIPv4Surrounding24(snapshot->address, private24,
+                                                       sizeof(private24));
     if (pointToPointCGNAT) {
         snprintf(row->displayName, sizeof(row->displayName),
                  "Tailscale-like (%s)", ifName);
         copyText(row->suggestedAllowCIDR, sizeof(row->suggestedAllowCIDR), "100.64.0.0/10");
-    } else if (strcmp(snapshot->name ? snapshot->name : "", "lo0") == 0) {
+    } else if (pointToPointPrivate) {
+        row->vpnLike = true;
+        snprintf(row->displayName, sizeof(row->displayName),
+                 "WireGuard-like (%s)", ifName);
+        copyText(row->suggestedAllowCIDR, sizeof(row->suggestedAllowCIDR), private24);
+    } else if (strcmp(ifName, "lo0") == 0) {
         copyText(row->suggestedAllowCIDR, sizeof(row->suggestedAllowCIDR), MACVNC_LOOPBACK_IPV4 "/32");
     } else {
         copyText(row->suggestedAllowCIDR, sizeof(row->suggestedAllowCIDR), row->cidr);
     }
     row->allowPresetVisible = !isHiddenAllowPresetInterface(snapshot->name) &&
                               !isLinkLocalIPv4(snapshot->address) &&
-                              (row->cgnatLike || row->prefixLength < 32);
+                              (row->cgnatLike || row->vpnLike || row->prefixLength < 32);
     return true;
 }

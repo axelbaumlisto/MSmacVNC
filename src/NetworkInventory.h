@@ -23,6 +23,9 @@ typedef struct {
     bool selectable;
     bool allowPresetVisible;
     bool cgnatLike;
+    /* Point-to-point private tunnel (utunN /32): WireGuard-family VPN such as
+     * AmneziaWG. Its peers live on the enclosing /24, not on this /32. */
+    bool vpnLike;
 } MacVNCNetworkInterfaceRow;
 
 bool macVNCBuildNetworkInterfaceRow(const MacVNCNetworkInterfaceSnapshot *snapshot,

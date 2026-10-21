@@ -31,6 +31,24 @@ int main(void)
     CHECK(!macVNCIPv4IsCGNAT("192.168.1.1"));
     CHECK(!macVNCIPv4IsCGNAT("host"));
 
+    /* private ranges and the enclosing /24 used by the VPN preset */
+    CHECK(macVNCIPv4IsPrivate("10.13.13.3"));
+    CHECK(macVNCIPv4IsPrivate("172.16.5.1"));
+    CHECK(macVNCIPv4IsPrivate("172.31.255.254"));
+    CHECK(!macVNCIPv4IsPrivate("172.32.0.1"));
+    CHECK(macVNCIPv4IsPrivate("192.168.1.53"));
+    CHECK(!macVNCIPv4IsPrivate("100.101.102.103"));
+    CHECK(!macVNCIPv4IsPrivate("203.0.113.9"));
+
+    char net24[24] = {0};
+    CHECK(macVNCIPv4Surrounding24("10.13.13.2", net24, sizeof(net24)));
+    CHECK_STR(net24, "10.13.13.0/24");
+    CHECK(macVNCIPv4Surrounding24("192.168.1.255", net24, sizeof(net24)));
+    CHECK_STR(net24, "192.168.1.0/24");
+    CHECK(!macVNCIPv4Surrounding24("not-an-ip", net24, sizeof(net24)));
+    char tight[8] = {0};
+    CHECK(!macVNCIPv4Surrounding24("10.13.13.2", tight, sizeof(tight)));
+
     puts("network cidr tests passed");
     return 0;
 }

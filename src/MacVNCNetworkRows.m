@@ -59,12 +59,22 @@ NSArray<NSDictionary<NSString *, id> *> *macVNCActiveNetworkRows(void)
            (point-to-point utun). A CGNAT address on a normal LAN keeps its own
            subnet and must not be presented as "Tailscale clients". */
         BOOL usesTailnetPreset = [allowCIDR isEqualToString:@"100.64.0.0/10"];
-        NSString *allowTitle = usesTailnetPreset
-            ? [NSString stringWithFormat:@"Tailscale tailnet / CGNAT range — %@ (broad; use Tailscale ACLs)", allowCIDR]
-            : [NSString stringWithFormat:@"Same network as %@ — %@", displayName, allowCIDR];
-        NSString *allowSummary = usesTailnetPreset
-            ? [NSString stringWithFormat:@"Auto: Tailscale clients — %@", allowCIDR]
-            : [NSString stringWithFormat:@"Auto: same network — %@", allowCIDR];
+        /* A private point-to-point tunnel (AmneziaWG, WireGuard) is recognised by
+           the row itself, not by its CIDR: two different VPNs can share a /24 and
+           a LAN can own one too, so only the interface shape tells them apart. */
+        BOOL usesVPNPreset = row.vpnLike;
+        NSString *allowTitle;
+        NSString *allowSummary;
+        if (usesTailnetPreset) {
+            allowTitle = [NSString stringWithFormat:@"Tailscale tailnet / CGNAT range — %@ (broad; use Tailscale ACLs)", allowCIDR];
+            allowSummary = [NSString stringWithFormat:@"Auto: Tailscale clients — %@", allowCIDR];
+        } else if (usesVPNPreset) {
+            allowTitle = [NSString stringWithFormat:@"VPN peers of %@ — %@ (this tunnel only)", displayName, allowCIDR];
+            allowSummary = [NSString stringWithFormat:@"Auto: VPN clients — %@", allowCIDR];
+        } else {
+            allowTitle = [NSString stringWithFormat:@"Same network as %@ — %@", displayName, allowCIDR];
+            allowSummary = [NSString stringWithFormat:@"Auto: same network — %@", allowCIDR];
+        }
         [rows addObject:@{
             MacVNCRowKeyName: name,
             MacVNCRowKeyDisplayName: displayName,

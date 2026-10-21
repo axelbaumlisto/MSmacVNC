@@ -48,8 +48,32 @@ int main(void)
     CHECK(row.selectable);
     CHECK(!row.allowPresetVisible);
 
+    /* AmneziaWG/WireGuard: the client gets a private /32 while the peers share
+       the tunnel subnet, so the preset must name the enclosing /24 rather than
+       the single address. */
     CHECK(macVNCBuildNetworkInterfaceRow(&(MacVNCNetworkInterfaceSnapshot){"utun6", true, "10.13.13.3", "255.255.255.255"}, &row));
     CHECK(row.selectable);
+    CHECK(row.vpnLike);
+    CHECK(row.allowPresetVisible);
+    CHECK_STR(row.suggestedAllowCIDR, "10.13.13.0/24");
+    CHECK_STR(row.displayName, "WireGuard-like (utun6)");
+
+    CHECK(macVNCBuildNetworkInterfaceRow(&(MacVNCNetworkInterfaceSnapshot){"utun7", true, "192.168.77.4", "255.255.255.255"}, &row));
+    CHECK(row.vpnLike);
+    CHECK(row.allowPresetVisible);
+    CHECK_STR(row.suggestedAllowCIDR, "192.168.77.0/24");
+
+    /* A public /32 tunnel is not a VPN subnet: keep the single address and hide
+       the preset, exactly as before. */
+    CHECK(macVNCBuildNetworkInterfaceRow(&(MacVNCNetworkInterfaceSnapshot){"utun8", true, "203.0.113.9", "255.255.255.255"}, &row));
+    CHECK(!row.vpnLike);
+    CHECK(!row.allowPresetVisible);
+    CHECK_STR(row.suggestedAllowCIDR, "203.0.113.9/32");
+
+    /* A private /32 on a NON-tunnel interface (no utun prefix) must not be
+       widened: only the tunnel shape implies shared peers. */
+    CHECK(macVNCBuildNetworkInterfaceRow(&(MacVNCNetworkInterfaceSnapshot){"en5", true, "10.13.13.3", "255.255.255.255"}, &row));
+    CHECK(!row.vpnLike);
     CHECK(!row.allowPresetVisible);
 
     CHECK(macVNCBuildNetworkInterfaceRow(&(MacVNCNetworkInterfaceSnapshot){"en7", true, "169.254.10.1", "255.255.0.0"}, &row));
