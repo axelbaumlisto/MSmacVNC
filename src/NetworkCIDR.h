@@ -8,6 +8,10 @@ bool macVNCNetworkCIDRFromAddressAndMask(const char *address,
                                          char *out,
                                          size_t outSize);
 
+/* The broad tailnet allowlist range, defined once: the inventory proposes it and
+ * the preferences UI labels it, and neither may hard-code its own copy. */
+#define MACVNC_TAILNET_ALLOW_CIDR "100.64.0.0/10"
+
 bool macVNCIPv4IsCGNAT(const char *address);
 
 /* RFC1918 (10/8, 172.16/12, 192.168/16). Point-to-point tunnels that use these

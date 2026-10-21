@@ -79,9 +79,11 @@ macVNCBuildNetworkInterfaceRow(const MacVNCNetworkInterfaceSnapshot *snapshot,
                                macVNCIPv4Surrounding24(snapshot->address, private24,
                                                        sizeof(private24));
     if (pointToPointCGNAT) {
+        row->tailnetLike = true;
         snprintf(row->displayName, sizeof(row->displayName),
                  "Tailscale-like (%s)", ifName);
-        copyText(row->suggestedAllowCIDR, sizeof(row->suggestedAllowCIDR), "100.64.0.0/10");
+        copyText(row->suggestedAllowCIDR, sizeof(row->suggestedAllowCIDR),
+                 MACVNC_TAILNET_ALLOW_CIDR);
     } else if (pointToPointPrivate) {
         row->vpnLike = true;
         snprintf(row->displayName, sizeof(row->displayName),

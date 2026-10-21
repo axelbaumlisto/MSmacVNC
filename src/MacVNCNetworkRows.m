@@ -55,10 +55,11 @@ NSArray<NSDictionary<NSString *, id> *> *macVNCActiveNetworkRows(void)
         NSString *cidr = [NSString stringWithUTF8String:row.cidr];
         NSString *allowCIDR = [NSString stringWithUTF8String:row.suggestedAllowCIDR];
         NSString *listenTitle = [NSString stringWithFormat:@"%@ — %@", displayName, ip];
-        /* Only label it a tailnet when the broad CGNAT preset was actually applied
-           (point-to-point utun). A CGNAT address on a normal LAN keeps its own
-           subnet and must not be presented as "Tailscale clients". */
-        BOOL usesTailnetPreset = [allowCIDR isEqualToString:@"100.64.0.0/10"];
+        /* Label it a tailnet only when the broad preset was actually applied
+           (point-to-point utun): a CGNAT address on a normal LAN keeps its own
+           subnet and must not be presented as "Tailscale clients". The row says
+           so itself, so this side never re-derives it from the CIDR text. */
+        BOOL usesTailnetPreset = row.tailnetLike;
         /* A private point-to-point tunnel (AmneziaWG, WireGuard) is recognised by
            the row itself, not by its CIDR: two different VPNs can share a /24 and
            a LAN can own one too, so only the interface shape tells them apart. */

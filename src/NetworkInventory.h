@@ -22,7 +22,8 @@ typedef struct {
     bool active;
     bool selectable;
     bool allowPresetVisible;
-    bool cgnatLike;
+    bool cgnatLike;      /* the ADDRESS is CGNAT — says nothing about the preset */
+    bool tailnetLike;    /* the broad tailnet preset was applied to this row */
     /* Point-to-point private tunnel (utunN /32): WireGuard-family VPN such as
      * AmneziaWG. Its peers live on the enclosing /24, not on this /32. */
     bool vpnLike;

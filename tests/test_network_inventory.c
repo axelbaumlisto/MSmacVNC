@@ -1,4 +1,5 @@
 #include "NetworkInventory.h"
+#include "NetworkCIDR.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,7 +27,8 @@ int main(void)
     CHECK(row.allowPresetVisible);
     CHECK(row.cgnatLike);
     CHECK_STR(row.cidr, "100.101.102.103/32");
-    CHECK_STR(row.suggestedAllowCIDR, "100.64.0.0/10");
+    CHECK_STR(row.suggestedAllowCIDR, MACVNC_TAILNET_ALLOW_CIDR);
+    CHECK(row.tailnetLike);
     CHECK_STR(row.displayName, "Tailscale-like (utun4)");
 
     /* A CGNAT address on a normal broadcast interface (carrier/campus CGNAT LAN)
@@ -37,6 +39,7 @@ int main(void)
     CHECK(row.cgnatLike);
     CHECK_STR(row.cidr, "100.92.13.0/24");
     CHECK_STR(row.suggestedAllowCIDR, "100.92.13.0/24");
+    CHECK(!row.tailnetLike);   /* CGNAT address, but no broad preset: label stays neutral */
     CHECK_STR(row.displayName, "en0");
 
     CHECK(macVNCBuildNetworkInterfaceRow(&(MacVNCNetworkInterfaceSnapshot){"lo0", true, "127.0.0.1", "255.0.0.0"}, &row));
@@ -54,6 +57,7 @@ int main(void)
     CHECK(macVNCBuildNetworkInterfaceRow(&(MacVNCNetworkInterfaceSnapshot){"utun6", true, "10.13.13.3", "255.255.255.255"}, &row));
     CHECK(row.selectable);
     CHECK(row.vpnLike);
+    CHECK(!row.tailnetLike);
     CHECK(row.allowPresetVisible);
     CHECK_STR(row.suggestedAllowCIDR, "10.13.13.0/24");
     CHECK_STR(row.displayName, "WireGuard-like (utun6)");
